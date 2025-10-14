@@ -28,6 +28,7 @@
 #include <chrono>
 #include <iomanip>
 #include <sys/stat.h>
+#include <netdb.h>
 
 using namespace std;
 
@@ -232,32 +233,62 @@ public:
         try {
             Logger::debug("[连接" + to_string(conn_id) + "] 开始启动连接");
 
-            // 连接到游戏服务器
-            game_fd = socket(AF_INET, SOCK_STREAM, 0);
-            if (game_fd < 0) {
-                Logger::error("[连接" + to_string(conn_id) + "] 创建socket失败 (errno=" + to_string(errno) + ": " + strerror(errno) + ")");
+            // 使用 getaddrinfo() 解析游戏服务器地址（支持域名/IPv4/IPv6）
+            struct addrinfo hints{}, *result = nullptr, *rp = nullptr;
+            hints.ai_family = AF_UNSPEC;      // 允许IPv4或IPv6
+            hints.ai_socktype = SOCK_STREAM;  // TCP socket
+            hints.ai_flags = 0;
+            hints.ai_protocol = IPPROTO_TCP;
+
+            string port_str = to_string(game_port);
+            int ret = getaddrinfo(game_server_ip.c_str(), port_str.c_str(), &hints, &result);
+            if (ret != 0) {
+                Logger::error("[连接" + to_string(conn_id) + "] DNS解析失败: " +
+                             game_server_ip + " (错误: " + gai_strerror(ret) + ")");
                 return false;
             }
-            Logger::debug("[连接" + to_string(conn_id) + "] 游戏服务器socket已创建 fd=" + to_string(game_fd));
 
-            // 禁用Nagle算法
-            int flag = 1;
-            setsockopt(game_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-            Logger::debug("[连接" + to_string(conn_id) + "] 已设置TCP_NODELAY");
+            Logger::debug("[连接" + to_string(conn_id) + "] DNS解析成功: " + game_server_ip);
 
-            sockaddr_in game_addr{};
-            game_addr.sin_family = AF_INET;
-            game_addr.sin_port = htons(game_port);
-            inet_pton(AF_INET, game_server_ip.c_str(), &game_addr.sin_addr);
+            // 尝试连接所有解析结果
+            int flag = 1;  // TCP_NODELAY标志
+            for (rp = result; rp != nullptr; rp = rp->ai_next) {
+                game_fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+                if (game_fd < 0) {
+                    continue;
+                }
 
-            Logger::debug("[连接" + to_string(conn_id) + "] 正在连接游戏服务器 " + game_server_ip + ":" + to_string(game_port));
-            if (connect(game_fd, (sockaddr*)&game_addr, sizeof(game_addr)) < 0) {
+                Logger::debug("[连接" + to_string(conn_id) + "] 游戏服务器socket已创建 fd=" +
+                             to_string(game_fd) + " (协议: " +
+                             (rp->ai_family == AF_INET ? "IPv4" : "IPv6") + ")");
+
+                // 禁用Nagle算法
+                setsockopt(game_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+                Logger::debug("[连接" + to_string(conn_id) + "] 已设置TCP_NODELAY");
+
+                Logger::debug("[连接" + to_string(conn_id) + "] 正在连接游戏服务器 " +
+                             game_server_ip + ":" + to_string(game_port));
+
+                if (connect(game_fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+                    // 连接成功
+                    Logger::debug("[连接" + to_string(conn_id) + "] 成功连接到游戏服务器");
+                    break;
+                }
+
+                // 连接失败，关闭socket并尝试下一个地址
+                Logger::debug("[连接" + to_string(conn_id) + "] 连接尝试失败 (errno=" +
+                             to_string(errno) + ": " + strerror(errno) + ")，尝试下一个地址");
+                close(game_fd);
+                game_fd = -1;
+            }
+
+            freeaddrinfo(result);
+
+            if (game_fd < 0 || rp == nullptr) {
                 Logger::error("[连接" + to_string(conn_id) + "] 连接游戏服务器失败: " +
-                             game_server_ip + ":" + to_string(game_port) +
-                             " (errno=" + to_string(errno) + ": " + strerror(errno) + ")");
+                             game_server_ip + ":" + to_string(game_port) + " (所有地址均失败)");
                 return false;
             }
-            Logger::debug("[连接" + to_string(conn_id) + "] 成功连接到游戏服务器");
 
             // 客户端socket也禁用Nagle
             setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
@@ -511,7 +542,23 @@ private:
 
             // 获取或创建UDP socket
             if (udp_sockets.find(dst_port) == udp_sockets.end()) {
-                int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+                // 使用getaddrinfo解析游戏服务器地址
+                struct addrinfo hints{}, *result = nullptr;
+                hints.ai_family = AF_UNSPEC;
+                hints.ai_socktype = SOCK_DGRAM;
+                hints.ai_protocol = IPPROTO_UDP;
+
+                string port_str = to_string(dst_port);
+                int ret = getaddrinfo(game_server_ip.c_str(), port_str.c_str(), &hints, &result);
+                if (ret != 0 || result == nullptr) {
+                    Logger::error("[连接" + to_string(conn_id) + "|UDP:" + to_string(dst_port) +
+                                "] DNS解析失败: " + game_server_ip);
+                    return;
+                }
+
+                int udp_fd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+                freeaddrinfo(result);
+
                 if (udp_fd < 0) {
                     Logger::error("[连接" + to_string(conn_id) + "|UDP:" + to_string(dst_port) +
                                 "] 创建UDP socket失败");
@@ -529,14 +576,24 @@ private:
                 udp_threads[dst_port] = t;
             }
 
-            // 发送到游戏服务器
+            // 发送到游戏服务器 - 使用getaddrinfo解析地址
             int udp_fd = udp_sockets[dst_port];
-            sockaddr_in game_addr{};
-            game_addr.sin_family = AF_INET;
-            game_addr.sin_port = htons(dst_port);
-            inet_pton(AF_INET, game_server_ip.c_str(), &game_addr.sin_addr);
 
-            sendto(udp_fd, data.data(), data.size(), 0, (sockaddr*)&game_addr, sizeof(game_addr));
+            struct addrinfo hints{}, *result = nullptr;
+            hints.ai_family = AF_UNSPEC;
+            hints.ai_socktype = SOCK_DGRAM;
+            hints.ai_protocol = IPPROTO_UDP;
+
+            string port_str = to_string(dst_port);
+            int ret = getaddrinfo(game_server_ip.c_str(), port_str.c_str(), &hints, &result);
+            if (ret != 0 || result == nullptr) {
+                Logger::error("[连接" + to_string(conn_id) + "|UDP:" + to_string(dst_port) +
+                            "] DNS解析失败");
+                return;
+            }
+
+            sendto(udp_fd, data.data(), data.size(), 0, result->ai_addr, result->ai_addrlen);
+            freeaddrinfo(result);
 
             Logger::debug("[连接" + to_string(conn_id) + "|UDP:" + to_string(dst_port) +
                         "] 客户端→游戏: " + to_string(data.size()) + "字节");
@@ -615,7 +672,8 @@ public:
     }
 
     bool start() {
-        listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+        // 创建IPv6 socket（支持双栈：同时接受IPv4和IPv6连接）
+        listen_fd = socket(AF_INET6, SOCK_STREAM, 0);
         if (listen_fd < 0) {
             Logger::error("[" + server_name + "] 创建socket失败");
             return false;
@@ -624,10 +682,18 @@ public:
         int opt = 1;
         setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = INADDR_ANY;
-        addr.sin_port = htons(config.listen_port);
+        // 设置双栈模式：IPV6_V6ONLY=0 允许接受IPv4连接
+        int v6only = 0;
+        if (setsockopt(listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) < 0) {
+            Logger::warning("[" + server_name + "] 设置双栈模式失败，将只支持IPv6");
+        } else {
+            Logger::debug("[" + server_name + "] 已启用IPv4/IPv6双栈模式");
+        }
+
+        sockaddr_in6 addr{};
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr = in6addr_any;  // 监听所有IPv6地址（双栈模式下也监听IPv4）
+        addr.sin6_port = htons(config.listen_port);
 
         if (bind(listen_fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
             Logger::error("[" + server_name + "] 绑定端口失败: " + to_string(config.listen_port));
@@ -642,8 +708,8 @@ public:
         }
 
         running = true;
-        Logger::info("[" + server_name + "] 服务器启动成功，监听端口: " + to_string(config.listen_port));
-        Logger::info("[" + server_name + "] 游戏服务器IP: " + config.game_server_ip);
+        Logger::info("[" + server_name + "] 服务器启动成功，监听端口: " + to_string(config.listen_port) + " (IPv4/IPv6双栈)");
+        Logger::info("[" + server_name + "] 游戏服务器: " + config.game_server_ip);
 
         accept_loop();
         return true;
@@ -660,7 +726,7 @@ public:
 private:
     void accept_loop() {
         while (running) {
-            sockaddr_in client_addr{};
+            sockaddr_storage client_addr{};  // 使用sockaddr_storage支持IPv4/IPv6
             socklen_t addr_len = sizeof(client_addr);
 
             int client_fd = accept(listen_fd, (sockaddr*)&client_addr, &addr_len);
@@ -671,9 +737,26 @@ private:
                 continue;
             }
 
-            char client_ip[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
-            string client_str = string(client_ip) + ":" + to_string(ntohs(client_addr.sin_port));
+            // 提取客户端IP地址（支持IPv4和IPv6）
+            char client_ip[INET6_ADDRSTRLEN];
+            int client_port = 0;
+            string client_str;
+
+            if (client_addr.ss_family == AF_INET) {
+                // IPv4客户端
+                sockaddr_in* addr_in = (sockaddr_in*)&client_addr;
+                inet_ntop(AF_INET, &addr_in->sin_addr, client_ip, INET6_ADDRSTRLEN);
+                client_port = ntohs(addr_in->sin_port);
+                client_str = string(client_ip) + ":" + to_string(client_port);
+            } else if (client_addr.ss_family == AF_INET6) {
+                // IPv6客户端
+                sockaddr_in6* addr_in6 = (sockaddr_in6*)&client_addr;
+                inet_ntop(AF_INET6, &addr_in6->sin6_addr, client_ip, INET6_ADDRSTRLEN);
+                client_port = ntohs(addr_in6->sin6_port);
+                client_str = "[" + string(client_ip) + "]:" + to_string(client_port);
+            } else {
+                client_str = "unknown";
+            }
 
             Logger::info("新客户端连接: " + client_str);
 

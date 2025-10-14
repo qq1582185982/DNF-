@@ -1,18 +1,21 @@
 # DNF游戏代理 - 服务器端口复用版本
 
 ## 📋 版本信息
-- **版本**: v3.3 多服务器端口复用版
+- **版本**: v4.0 IPv6 + 域名支持版
 - **日期**: 2025-10-14
 - **状态**: ✅ 已完成并测试通过
+- **新增功能**: IPv6双栈支持、域名解析
 
 ## 🎯 功能特性
 
 ### 核心功能
-1. **多服务器端口复用** - 单个服务器进程支持多个游戏服务器
-2. **TCP半关闭修复** - 解决游戏退出卡顿问题
-3. **智能日志系统** - 支持DEBUG/INFO/WARN/ERROR四级日志
-4. **自动日志目录** - 日志统一存放在`log/`目录
-5. **配置注入工具** - 无需硬编码配置的客户端
+1. **IPv6双栈支持** - 服务器同时支持IPv4和IPv6客户端连接 🆕
+2. **域名解析** - 游戏服务器和隧道服务器均支持域名配置 🆕
+3. **多服务器端口复用** - 单个服务器进程支持多个游戏服务器
+4. **TCP半关闭修复** - 解决游戏退出卡顿问题
+5. **智能日志系统** - 支持DEBUG/INFO/WARN/ERROR四级日志
+6. **自动日志目录** - 日志统一存放在`log/`目录
+7. **配置注入工具** - 无需硬编码配置的客户端
 
 ### 架构优势
 ```
@@ -74,20 +77,27 @@ make
 编辑 `config.json`:
 ```json
 {
-  "listen_ports": [33223, 33224],
-  "log_level": "INFO",
   "servers": [
     {
       "name": "服务器1",
-      "game_server_ip": "10.0.0.10",
-      "ports": [11011, 7001, 10011]
+      "listen_port": 33223,
+      "game_server_ip": "10.0.0.10",           // 支持IPv4
+      "max_connections": 100
     },
     {
       "name": "服务器2",
-      "game_server_ip": "10.0.0.11",
-      "ports": [11011, 7001, 10011]
+      "listen_port": 33224,
+      "game_server_ip": "2001:db8::10",        // 支持IPv6 🆕
+      "max_connections": 100
+    },
+    {
+      "name": "服务器3",
+      "listen_port": 33225,
+      "game_server_ip": "game.example.com",    // 支持域名 🆕
+      "max_connections": 100
     }
-  ]
+  ],
+  "log_level": "INFO"
 }
 ```
 
@@ -131,8 +141,15 @@ python 2.生成客户端2进制编码.py
 **步骤4**: 注入配置生成最终客户端
 ```powershell
 # 语法：config_injector.exe <空白客户端> <游戏服务器IP> <隧道服务器IP> <隧道端口> <输出文件>
+
+# IPv4示例
 .\config_injector.exe tcp_proxy_client_blank.exe 192.168.1.100 10.0.0.50 33223 "DNF代理客户端-服务器1.exe"
-.\config_injector.exe tcp_proxy_client_blank.exe 192.168.1.101 10.0.0.50 33224 "DNF代理客户端-服务器2.exe"
+
+# IPv6示例 🆕
+.\config_injector.exe tcp_proxy_client_blank.exe 2001:db8::100 2001:db8::50 33224 "DNF代理客户端-IPv6.exe"
+
+# 域名示例 🆕
+.\config_injector.exe tcp_proxy_client_blank.exe game.local tunnel.example.com 33225 "DNF代理客户端-域名.exe"
 ```
 
 #### 方式二：直接修改源码编译
@@ -153,6 +170,93 @@ DNF游戏代理客户端 v5.0 (C++ 版本 - TCP)
 
 代理客户端已启动
 按Ctrl+C退出...
+```
+
+## 🌐 IPv6 和域名支持 (v4.0新增)
+
+### IPv6 支持
+
+**服务器端**:
+- 自动启用IPv6双栈监听（同时接受IPv4和IPv6连接）
+- 游戏服务器连接支持IPv6地址
+- 日志中会显示客户端协议类型（IPv4/IPv6）
+
+**客户端**:
+- 自动检测游戏服务器IP类型（IPv4/IPv6）
+- WinDivert过滤器自动适配协议
+- 支持连接IPv6隧道服务器
+
+**配置示例**:
+```json
+// 服务器配置
+{
+  "game_server_ip": "2001:db8::1",      // IPv6地址
+  "listen_port": 33223
+}
+
+// 客户端配置（通过config_injector注入）
+{
+  "game_server_ip": "2001:db8::100",
+  "tunnel_server_ip": "2001:db8::50",
+  "tunnel_port": 33223
+}
+```
+
+### 域名解析
+
+**支持场景**:
+- 游戏服务器使用域名（服务器端）
+- 隧道服务器使用域名（客户端）
+- 自动DNS解析，支持多地址轮询
+
+**配置示例**:
+```json
+// 服务器配置
+{
+  "game_server_ip": "game.example.com",  // 域名
+  "listen_port": 33223
+}
+
+// 客户端配置
+{
+  "game_server_ip": "game.local",           // 游戏服务器域名
+  "tunnel_server_ip": "tunnel.example.com", // 隧道服务器域名
+  "tunnel_port": 33223
+}
+```
+
+**DNS解析特性**:
+- 使用 `getaddrinfo()` 实现跨平台DNS解析
+- 自动尝试所有解析结果（支持多IP轮询）
+- 失败自动切换下一个IP地址
+- 支持IPv4和IPv6混合解析
+
+### 混合配置示例
+
+```json
+{
+  "servers": [
+    {
+      "name": "本地服务器",
+      "listen_port": 33223,
+      "game_server_ip": "192.168.1.100",     // IPv4
+      "max_connections": 100
+    },
+    {
+      "name": "远程服务器",
+      "listen_port": 33224,
+      "game_server_ip": "game.example.com",  // 域名
+      "max_connections": 100
+    },
+    {
+      "name": "IPv6服务器",
+      "listen_port": 33225,
+      "game_server_ip": "2001:db8::10",      // IPv6
+      "max_connections": 100
+    }
+  ],
+  "log_level": "INFO"
+}
 ```
 
 ## 🔧 配置说明
@@ -386,6 +490,16 @@ grep "FIN\|半关闭\|断开" log/server_log_*.txt
 
 ## 📝 变更历史
 
+### v4.0 (2025-10-14)
+- ✨ **新增：IPv6双栈支持** - 服务器同时支持IPv4/IPv6客户端
+- ✨ **新增：域名解析** - 游戏服务器和隧道服务器支持域名配置
+- 🔧 改进：使用 `getaddrinfo()` 替代 `inet_pton()` 实现灵活地址解析
+- 🔧 改进：WinDivert过滤器自动适配IPv4/IPv6
+- 🔧 改进：服务器监听使用 `sockaddr_in6` 双栈模式
+- 📝 文档：添加IPv6和域名配置示例
+- ⚡ 性能：DNS解析支持多地址自动轮询
+- ✅ 兼容：完全向后兼容现有IPv4配置
+
 ### v3.3 (2025-10-14)
 - ✨ 新增：多服务器端口复用架构
 - ✨ 新增：智能日志级别系统（DEBUG/INFO/WARN/ERROR）
@@ -422,5 +536,42 @@ grep "FIN\|半关闭\|断开" log/server_log_*.txt
 ---
 
 **最后更新**: 2025-10-14
-**版本**: v3.3 多服务器端口复用版
+**版本**: v4.0 IPv6 + 域名支持版
 **状态**: ✅ 生产就绪
+
+## 🔍 技术亮点
+
+### IPv6双栈实现
+```cpp
+// 服务器监听 - IPv6双栈
+listen_fd = socket(AF_INET6, SOCK_STREAM, 0);
+int v6only = 0;
+setsockopt(listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+// 现在可以同时接受IPv4和IPv6连接
+```
+
+### 域名解析实现
+```cpp
+// 使用getaddrinfo支持域名/IPv4/IPv6
+struct addrinfo hints{}, *result = nullptr;
+hints.ai_family = AF_UNSPEC;      // 允许IPv4或IPv6
+hints.ai_socktype = SOCK_STREAM;
+getaddrinfo(hostname, port_str, &hints, &result);
+
+// 自动尝试所有解析结果
+for (rp = result; rp != nullptr; rp = rp->ai_next) {
+    fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+    if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+        break;  // 连接成功
+    }
+}
+```
+
+### WinDivert协议自适应
+```cpp
+// 客户端自动检测IP类型
+bool is_ipv6 = (game_server_ip.find(':') != string::npos);
+string filter = is_ipv6
+    ? "ipv6.DstAddr == " + game_server_ip  // IPv6过滤器
+    : "ip.DstAddr == " + game_server_ip;    // IPv4过滤器
+```

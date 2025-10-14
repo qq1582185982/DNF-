@@ -1,6 +1,7 @@
 /*
- * DNF代理客户端 - 配置注入工具 v1.0
+ * DNF代理客户端 - 配置注入工具 v2.0
  * 内置客户端二进制，追加配置生成最终exe
+ * 支持IPv4、IPv6地址和域名
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -18,24 +19,46 @@ using namespace std;
 
 // ==================== 工具函数 ====================
 
-// 验证IP地址格式
-bool validate_ip(const string& ip) {
-    regex ip_pattern("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$");
-    if (!regex_match(ip, ip_pattern)) {
+// 验证地址格式（支持IPv4、IPv6、域名）
+bool validate_address(const string& addr) {
+    if (addr.empty()) {
         return false;
     }
 
-    int a, b, c, d;
-    if (sscanf(ip.c_str(), "%d.%d.%d.%d", &a, &b, &c, &d) != 4) {
+    // IPv4格式检测
+    regex ipv4_pattern("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$");
+    if (regex_match(addr, ipv4_pattern)) {
+        int a, b, c, d;
+        if (sscanf(addr.c_str(), "%d.%d.%d.%d", &a, &b, &c, &d) == 4) {
+            if (a >= 0 && a <= 255 && b >= 0 && b <= 255 &&
+                c >= 0 && c <= 255 && d >= 0 && d <= 255) {
+                return true;  // 有效的IPv4地址
+            }
+        }
         return false;
     }
 
-    if (a < 0 || a > 255 || b < 0 || b > 255 ||
-        c < 0 || c > 255 || d < 0 || d > 255) {
+    // IPv6格式检测（简单检测，包含冒号）
+    if (addr.find(':') != string::npos) {
+        // 基本IPv6格式检查：包含至少2个冒号，只包含十六进制字符和冒号
+        regex ipv6_pattern("^[0-9a-fA-F:]+$");
+        if (regex_match(addr, ipv6_pattern)) {
+            int colon_count = count(addr.begin(), addr.end(), ':');
+            if (colon_count >= 2 && colon_count <= 7) {
+                return true;  // 有效的IPv6地址
+            }
+        }
         return false;
     }
 
-    return true;
+    // 域名格式检测
+    // 允许字母、数字、连字符、点号，必须包含至少一个点号
+    regex domain_pattern("^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$");
+    if (regex_match(addr, domain_pattern) && addr.find('.') != string::npos) {
+        return true;  // 有效的域名
+    }
+
+    return false;
 }
 
 // 验证端口号
@@ -51,6 +74,22 @@ string trim(const string& str) {
     return str.substr(first, (last - first + 1));
 }
 
+// 将地址转换为安全的文件名格式
+string sanitize_for_filename(const string& addr) {
+    string safe = addr;
+    // 替换所有非法文件名字符为下划线
+    // Windows不允许: < > : " / \ | ? *
+    const string illegal_chars = "<>:\"/\\|?*";
+    for (char c : illegal_chars) {
+        replace(safe.begin(), safe.end(), c, '_');
+    }
+    // 限制长度（Windows路径限制）
+    if (safe.length() > 50) {
+        safe = safe.substr(0, 50);
+    }
+    return safe;
+}
+
 // ==================== 主程序 ====================
 
 int main() {
@@ -59,7 +98,8 @@ int main() {
     system("chcp 65001 > nul");
 
     cout << "========================================" << endl;
-    cout << "DNF代理客户端 - 配置注入工具 v1.0" << endl;
+    cout << "DNF代理客户端 - 配置注入工具 v2.0" << endl;
+    cout << "支持IPv4、IPv6和域名" << endl;
     cout << "========================================" << endl;
     cout << endl;
 
@@ -73,9 +113,9 @@ int main() {
     cout << "请输入配置信息（直接回车使用默认值）" << endl;
     cout << "----------------------------------------" << endl;
 
-    // 输入游戏服务器IP
+    // 输入游戏服务器IP/域名
     while (true) {
-        cout << "游戏服务器IP [默认: 192.168.2.110]: ";
+        cout << "游戏服务器地址 [默认: 192.168.2.110]: ";
         string input;
         getline(cin, input);
         input = trim(input);
@@ -85,18 +125,27 @@ int main() {
             break;
         }
 
-        if (validate_ip(input)) {
+        if (validate_address(input)) {
             game_ip = input;
-            cout << "OK IP格式正确" << endl;
+            // 检测地址类型
+            if (input.find(':') != string::npos && input.find('.') == string::npos) {
+                cout << "✓ 检测到IPv6地址" << endl;
+            } else if (input.find('.') != string::npos &&
+                       count(input.begin(), input.end(), '.') == 3) {
+                cout << "✓ 检测到IPv4地址" << endl;
+            } else {
+                cout << "✓ 检测到域名" << endl;
+            }
             break;
         } else {
-            cout << "X IP格式错误，请重新输入（例如: 192.168.1.100）" << endl;
+            cout << "✗ 地址格式错误，请重新输入" << endl;
+            cout << "  支持格式: IPv4 (192.168.1.100)、IPv6 (2001:db8::1)、域名 (game.example.com)" << endl;
         }
     }
 
-    // 输入隧道服务器IP
+    // 输入隧道服务器IP/域名
     while (true) {
-        cout << "隧道服务器IP [默认: 192.168.2.75]: ";
+        cout << "隧道服务器地址 [默认: 192.168.2.75]: ";
         string input;
         getline(cin, input);
         input = trim(input);
@@ -106,12 +155,21 @@ int main() {
             break;
         }
 
-        if (validate_ip(input)) {
+        if (validate_address(input)) {
             tunnel_ip = input;
-            cout << "OK IP格式正确" << endl;
+            // 检测地址类型
+            if (input.find(':') != string::npos && input.find('.') == string::npos) {
+                cout << "✓ 检测到IPv6地址" << endl;
+            } else if (input.find('.') != string::npos &&
+                       count(input.begin(), input.end(), '.') == 3) {
+                cout << "✓ 检测到IPv4地址" << endl;
+            } else {
+                cout << "✓ 检测到域名" << endl;
+            }
             break;
         } else {
-            cout << "X IP格式错误，请重新输入（例如: 10.0.0.50）" << endl;
+            cout << "✗ 地址格式错误，请重新输入" << endl;
+            cout << "  支持格式: IPv4 (10.0.0.50)、IPv6 (2001:db8::2)、域名 (tunnel.example.com)" << endl;
         }
     }
 
@@ -144,9 +202,9 @@ int main() {
     cout << "========================================" << endl;
     cout << "配置摘要" << endl;
     cout << "========================================" << endl;
-    cout << "游戏服务器IP:   " << game_ip << endl;
-    cout << "隧道服务器IP:   " << tunnel_ip << endl;
-    cout << "隧道端口:       " << tunnel_port << endl;
+    cout << "游戏服务器地址:   " << game_ip << endl;
+    cout << "隧道服务器地址:   " << tunnel_ip << endl;
+    cout << "隧道端口:         " << tunnel_port << endl;
     cout << "========================================" << endl;
     cout << endl;
 
@@ -170,11 +228,9 @@ int main() {
 
     // ==================== 生成配置客户端 ====================
 
-    // 构造输出文件名
-    string game_ip_safe = game_ip;
-    string tunnel_ip_safe = tunnel_ip;
-    replace(game_ip_safe.begin(), game_ip_safe.end(), '.', '-');
-    replace(tunnel_ip_safe.begin(), tunnel_ip_safe.end(), '.', '-');
+    // 构造输出文件名（处理IPv4、IPv6、域名）
+    string game_ip_safe = sanitize_for_filename(game_ip);
+    string tunnel_ip_safe = sanitize_for_filename(tunnel_ip);
 
     stringstream output_name;
     output_name << "DNFProxyClient_" << game_ip_safe << "_" << tunnel_ip_safe << "_" << tunnel_port << ".exe";

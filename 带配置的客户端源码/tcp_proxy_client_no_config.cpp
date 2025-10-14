@@ -343,32 +343,59 @@ public:
             send_buffer.clear();
         }
 
-        // 连接到隧道服务器
-        tunnel_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (tunnel_sock == INVALID_SOCKET) {
-            Logger::error("[连接" + to_string(conn_id) + "] 创建socket失败");
+        // 连接到隧道服务器 - 使用getaddrinfo支持域名/IPv4/IPv6
+        struct addrinfo hints{}, *result = nullptr, *rp = nullptr;
+        ZeroMemory(&hints, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;      // 允许IPv4或IPv6
+        hints.ai_socktype = SOCK_STREAM;  // TCP
+        hints.ai_protocol = IPPROTO_TCP;
+
+        string port_str = to_string(tunnel_port);
+        int ret = getaddrinfo(tunnel_server_ip.c_str(), port_str.c_str(), &hints, &result);
+        if (ret != 0) {
+            Logger::error("[连接" + to_string(conn_id) + "] DNS解析失败: " + tunnel_server_ip +
+                         " (错误: " + to_string(ret) + ")");
             running = false;
             return;
         }
 
-        // TCP_NODELAY
-        int flag = 1;
-        setsockopt(tunnel_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+        // 尝试连接所有解析结果
+        bool connected = false;
+        for (rp = result; rp != nullptr; rp = rp->ai_next) {
+            tunnel_sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            if (tunnel_sock == INVALID_SOCKET) {
+                continue;
+            }
 
-        // 连接超时设置
-        DWORD timeout = 5000;
-        setsockopt(tunnel_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-        setsockopt(tunnel_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+            Logger::debug("[连接" + to_string(conn_id) + "] 尝试连接隧道 (协议: " +
+                         string(rp->ai_family == AF_INET ? "IPv4" : "IPv6") + ")");
 
-        sockaddr_in server_addr{};
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(tunnel_port);
-        inet_pton(AF_INET, tunnel_server_ip.c_str(), &server_addr.sin_addr);
+            // TCP_NODELAY
+            int flag = 1;
+            setsockopt(tunnel_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
 
-        if (connect(tunnel_sock, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-            Logger::error("[连接" + to_string(conn_id) + "] 连接隧道服务器失败");
+            // 连接超时设置
+            DWORD timeout = 5000;
+            setsockopt(tunnel_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+            setsockopt(tunnel_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+
+            if (connect(tunnel_sock, rp->ai_addr, (int)rp->ai_addrlen) != SOCKET_ERROR) {
+                connected = true;
+                Logger::debug("[连接" + to_string(conn_id) + "] 隧道连接成功");
+                break;
+            }
+
+            // 连接失败，尝试下一个地址
+            Logger::debug("[连接" + to_string(conn_id) + "] 连接尝试失败，尝试下一个地址");
             closesocket(tunnel_sock);
             tunnel_sock = INVALID_SOCKET;
+        }
+
+        freeaddrinfo(result);
+
+        if (!connected || tunnel_sock == INVALID_SOCKET) {
+            Logger::error("[连接" + to_string(conn_id) + "] 连接隧道服务器失败: " +
+                         tunnel_server_ip + ":" + to_string(tunnel_port) + " (所有地址均失败)");
             running = false;
             return;
         }
@@ -401,8 +428,8 @@ public:
         // 启动接收线程
         running = true;
         // 取消超时
-        timeout = 0;
-        setsockopt(tunnel_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+        DWORD recv_timeout = 0;
+        setsockopt(tunnel_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&recv_timeout, sizeof(recv_timeout));
 
         thread([this]() {
             recv_from_tunnel();
@@ -907,11 +934,21 @@ public:
         Logger::debug("游戏服务器: " + game_server_ip);
         Logger::debug("隧道服务器: " + tunnel_server_ip + ":" + to_string(tunnel_port));
 
-        // 构造WinDivert过滤器 - 拦截所有TCP和UDP (排除SSH端口22)
-        // 修改1: 移除outbound限制，同时抓inbound和outbound
-        // 修改2: 使用更简单的过滤器
-        string filter = "ip.DstAddr == " + game_server_ip +
-                       " and ((tcp and tcp.DstPort != 22) or (udp and udp.DstPort != 22))";
+        // 检测游戏服务器IP类型（IPv4 or IPv6）并构造相应的WinDivert过滤器
+        bool is_ipv6 = (game_server_ip.find(':') != string::npos);
+        string filter;
+
+        if (is_ipv6) {
+            // IPv6过滤器
+            filter = "ipv6.DstAddr == " + game_server_ip +
+                    " and ((tcp and tcp.DstPort != 22) or (udp and udp.DstPort != 22))";
+            Logger::debug("检测到IPv6地址，使用IPv6过滤器");
+        } else {
+            // IPv4过滤器
+            filter = "ip.DstAddr == " + game_server_ip +
+                    " and ((tcp and tcp.DstPort != 22) or (udp and udp.DstPort != 22))";
+            Logger::debug("检测到IPv4地址，使用IPv4过滤器");
+        }
 
         Logger::debug("WinDivert过滤器: " + filter);
         Logger::debug("注意: 已移除outbound限制，将拦截双向流量");
