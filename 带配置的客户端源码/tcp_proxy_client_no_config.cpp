@@ -8,7 +8,14 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+
+// 重要：先包含 windivert.h 定义类型，但不导入函数
+#define WINDIVERTEXPORT
 #include "windivert.h"
+
+// 然后包含动态加载器
+#include "windivert_loader.h"
+
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -23,10 +30,85 @@
 #include <algorithm>
 
 #pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "WinDivert.lib")
 #pragma comment(lib, "advapi32.lib")
 
+// 注意: 不再静态链接 WinDivert.lib，改用动态加载（windivert_loader.h）
+// 这样程序启动时不会检查 WinDivert.dll 依赖，给自解压代码释放文件的机会
+
+// 包含嵌入式 WinDivert 文件
+#include "embedded_windivert.h"
+
 using namespace std;
+
+// ==================== WinDivert 自动部署 ====================
+
+// 获取 WinDivert 临时目录路径
+string get_windivert_temp_dir() {
+    char temp_path[MAX_PATH];
+    if (GetTempPathA(MAX_PATH, temp_path) == 0) {
+        return "";
+    }
+
+    string windivert_dir = string(temp_path) + "WinDivert\\";
+
+    // 创建 WinDivert 子目录（如果不存在）
+    CreateDirectoryA(windivert_dir.c_str(), NULL);
+
+    return windivert_dir;
+}
+
+// 释放嵌入资源到文件
+bool extract_embedded_file(const string& filepath, const unsigned char* data, unsigned int size) {
+    // 检查文件是否已存在且大小正确
+    WIN32_FILE_ATTRIBUTE_DATA file_info;
+    if (GetFileAttributesExA(filepath.c_str(), GetFileExInfoStandard, &file_info)) {
+        ULONGLONG file_size = (ULONGLONG(file_info.nFileSizeHigh) << 32) | file_info.nFileSizeLow;
+        if (file_size == size) {
+            // 文件已存在且大小正确，跳过释放
+            return true;
+        }
+    }
+
+    // 释放文件
+    ofstream file(filepath, ios::binary);
+    if (!file.is_open()) {
+        return false;
+    }
+
+    file.write((const char*)data, size);
+    file.close();
+
+    return true;
+}
+
+// 自动部署 WinDivert 文件
+bool deploy_windivert_files(string& dll_path, string& sys_path) {
+    // 获取临时目录
+    string temp_dir = get_windivert_temp_dir();
+    if (temp_dir.empty()) {
+        cout << "错误: 无法获取临时目录" << endl;
+        return false;
+    }
+
+    dll_path = temp_dir + "WinDivert.dll";
+    sys_path = temp_dir + "WinDivert64.sys";
+
+    cout << "WinDivert 临时目录: " << temp_dir << endl;
+
+    // 释放 WinDivert.dll
+    if (!extract_embedded_file(dll_path, EMBEDDED_WINDIVERT_DLL, EMBEDDED_WINDIVERT_DLL_SIZE)) {
+        cout << "错误: 无法释放 WinDivert.dll" << endl;
+        return false;
+    }
+
+    // 释放 WinDivert64.sys
+    if (!extract_embedded_file(sys_path, EMBEDDED_WINDIVERT_SYS, EMBEDDED_WINDIVERT_SYS_SIZE)) {
+        cout << "错误: 无法释放 WinDivert64.sys" << endl;
+        return false;
+    }
+
+    return true;
+}
 
 // ==================== 配置读取 ====================
 
@@ -1317,6 +1399,29 @@ int main() {
     cout << "DNF游戏代理客户端 v5.0 (C++ 版本 - TCP)" << endl;
     cout << "编译时间: " << __DATE__ << " " << __TIME__ << endl;
     cout << "============================================================" << endl;
+    cout << endl;
+
+    // 自动部署 WinDivert 文件到临时目录
+    cout << "正在部署 WinDivert 组件..." << endl;
+    string dll_path, sys_path;
+    if (!deploy_windivert_files(dll_path, sys_path)) {
+        cout << "错误: WinDivert 组件部署失败" << endl;
+        Logger::close();
+        system("pause");
+        return 1;
+    }
+    cout << "✓ WinDivert 文件已部署" << endl;
+
+    // 动态加载 WinDivert.dll（从临时目录）
+    cout << "正在加载 WinDivert.dll..." << endl;
+    if (!LoadWinDivert(dll_path.c_str())) {
+        cout << "错误: 无法加载 WinDivert.dll" << endl;
+        Logger::error("LoadWinDivert() 失败: " + dll_path);
+        Logger::close();
+        system("pause");
+        return 1;
+    }
+    cout << "✓ WinDivert 组件加载成功" << endl;
     cout << endl;
 
     // 从exe末尾读取配置
