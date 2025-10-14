@@ -1,5 +1,5 @@
 /*
- * DNF游戏代理客户端 - C++ 版本 v5.0 (无硬编码配置)
+ * DNF游戏代理客户端 - C++ 版本 v6.0 (无硬编码配置 + UDP支持)
  * 从自身exe末尾读取配置
  */
 
@@ -980,6 +980,126 @@ private:
     }
 };
 
+// ==================== UDP工具函数 ====================
+// 注入UDP响应包回游戏
+bool inject_udp_response(HANDLE windivert_handle,
+                         const string& local_ip, uint16_t local_port,
+                         const string& remote_ip, uint16_t remote_port,
+                         const uint8_t* payload, size_t len) {
+    if (len > 65535) {
+        Logger::error("[UDP] 响应包过大: " + to_string(len));
+        return false;
+    }
+
+    // 构造完整UDP包: IP头(20) + UDP头(8) + payload
+    vector<uint8_t> packet(20 + 8 + len);
+    uint8_t* ip_header = packet.data();
+    uint8_t* udp_header = packet.data() + 20;
+
+    // === 构造IP头 ===
+    ip_header[0] = 0x45;  // 版本4 + 头长度5
+    ip_header[1] = 0;     // TOS
+    *(uint16_t*)&ip_header[2] = htons((uint16_t)(20 + 8 + len));  // 总长度
+    *(uint16_t*)&ip_header[4] = htons(rand() % 65536);  // IP ID
+    *(uint16_t*)&ip_header[6] = 0;  // 标志 + 片偏移
+    ip_header[8] = 64;   // TTL
+    ip_header[9] = 17;   // 协议（UDP）
+    *(uint16_t*)&ip_header[10] = 0;  // 校验和（稍后计算）
+
+    // 源IP（游戏服务器）和目标IP（游戏客户端）
+    uint8_t src_ip_bytes[4], dst_ip_bytes[4];
+    ip_str_to_bytes(remote_ip, src_ip_bytes);
+    ip_str_to_bytes(local_ip, dst_ip_bytes);
+    memcpy(&ip_header[12], src_ip_bytes, 4);
+    memcpy(&ip_header[16], dst_ip_bytes, 4);
+
+    // === 构造UDP头 ===
+    *(uint16_t*)&udp_header[0] = htons(remote_port);  // 源端口（游戏服务器）
+    *(uint16_t*)&udp_header[2] = htons(local_port);   // 目标端口（游戏客户端）
+    *(uint16_t*)&udp_header[4] = htons((uint16_t)(8 + len));  // UDP长度
+    *(uint16_t*)&udp_header[6] = 0;  // 校验和（稍后计算）
+
+    // 复制payload
+    if (len > 0) {
+        memcpy(udp_header + 8, payload, len);
+    }
+
+    // 使用WinDivert helper计算校验和
+    WinDivertHelperCalcChecksums(packet.data(), (UINT)packet.size(), NULL, 0);
+
+    // === 打印详细的注入信息 ===
+    // 读取计算后的校验和
+    uint16_t ip_checksum = ntohs(*(uint16_t*)&ip_header[10]);
+    uint16_t udp_checksum = ntohs(*(uint16_t*)&udp_header[6]);
+
+    Logger::info("[UDP注入] ========== 开始注入UDP响应 ==========");
+    Logger::info("[UDP注入] IP: " + remote_ip + ":" + to_string(remote_port) +
+                " → " + local_ip + ":" + to_string(local_port));
+    Logger::info("[UDP注入] 包大小: " + to_string(packet.size()) + "字节 (IP头:20 + UDP头:8 + 载荷:" + to_string(len) + ")");
+
+    // 打印IP头关键字段
+    char ip_checksum_hex[8];
+    sprintf(ip_checksum_hex, "0x%04x", ip_checksum);
+    Logger::info("[UDP注入] IP校验和: " + string(ip_checksum_hex));
+
+    // 打印UDP头关键字段
+    char udp_checksum_hex[8];
+    sprintf(udp_checksum_hex, "0x%04x", udp_checksum);
+    Logger::info("[UDP注入] UDP校验和: " + string(udp_checksum_hex));
+
+    // 打印完整payload hex dump
+    if (len > 0) {
+        string hex_dump = "";
+        for (size_t i = 0; i < len; i++) {
+            if (i > 0 && i % 16 == 0) {
+                hex_dump += "\n                    ";
+            }
+            char buf[4];
+            sprintf(buf, "%02x ", payload[i]);
+            hex_dump += buf;
+        }
+        Logger::info("[UDP注入] Payload(" + to_string(len) + "字节):\n                    " + hex_dump);
+    }
+
+    // 打印完整IP+UDP包头(前28字节)
+    string packet_header_hex = "";
+    int header_len = min(28, (int)packet.size());
+    for (int i = 0; i < header_len; i++) {
+        if (i > 0 && i % 16 == 0) {
+            packet_header_hex += "\n                    ";
+        }
+        char buf[4];
+        sprintf(buf, "%02x ", packet[i]);
+        packet_header_hex += buf;
+    }
+    Logger::info("[UDP注入] 完整包头(前" + to_string(header_len) + "字节):\n                    " + packet_header_hex);
+
+    // 注入包
+    WINDIVERT_ADDRESS addr = {};
+    addr.Outbound = 0;  // Inbound（发给游戏客户端）
+    Logger::info("[UDP注入] WinDivert方向: Inbound (Outbound=0)");
+
+    UINT send_len = 0;
+    BOOL inject_result = WinDivertSend(windivert_handle, packet.data(), (UINT)packet.size(), &send_len, &addr);
+    DWORD err = GetLastError();
+
+    Logger::info("[UDP注入] WinDivertSend返回: " + string(inject_result ? "成功" : "失败") +
+                ", 发送字节=" + to_string(send_len) +
+                ", 期望字节=" + to_string(packet.size()) +
+                ", WSA错误码=" + to_string(err));
+    Logger::info("[UDP注入] ========== 注入完成 ==========");
+
+    if (!inject_result) {
+        Logger::error("[UDP] ❌ 注入UDP包失败: 错误码=" + to_string(err));
+        return false;
+    }
+
+    Logger::info("[UDP|" + to_string(remote_port) + "→" + to_string(local_port) +
+                 "] ✓ 成功注入UDP响应 " + to_string(len) + "字节");
+
+    return true;
+}
+
 // ==================== 主客户端类 ====================
 class TCPProxyClient {
 private:
@@ -994,11 +1114,27 @@ private:
     map<tuple<string, uint16_t, uint16_t>, TCPConnection*> connections;
     mutex conn_lock;
 
+    // UDP管理 - 简化版 (直接转发,无per-connection对象)
+    uint32_t udp_conn_id_counter;
+    mutex udp_lock;
+    SOCKET udp_tunnel_sock;  // UDP专用的tunnel连接
+    atomic<bool> udp_tunnel_ready;  // UDP tunnel是否就绪
+
+    // UDP端口映射表: key="local_ip:local_port:remote_ip:remote_port" -> conn_id
+    map<string, uint32_t> udp_port_map;
+    // UDP conn_id反查表: conn_id -> "local_ip:local_port:remote_ip:remote_port"
+    map<uint32_t, string> udp_conn_map;
+    // 保存客户端IP用于握手响应(从第一个UDP包获取)
+    string udp_client_ip;
+
 public:
     TCPProxyClient(const string& game_ip, const string& tunnel_ip, uint16_t tport)
         : game_server_ip(game_ip), tunnel_server_ip(tunnel_ip), tunnel_port(tport),
           windivert_handle(NULL), running(false),
-          conn_id_counter(1) {
+          conn_id_counter(1),
+          udp_conn_id_counter(100000),  // UDP连接ID从100000开始
+          udp_tunnel_sock(INVALID_SOCKET),
+          udp_tunnel_ready(false) {
     }
 
     ~TCPProxyClient() {
@@ -1064,12 +1200,27 @@ public:
     void stop() {
         running = false;
 
-        lock_guard<mutex> lock(conn_lock);
-        for (auto& pair : connections) {
-            pair.second->stop();
-            delete pair.second;
+        // 清理TCP连接
+        {
+            lock_guard<mutex> lock(conn_lock);
+            for (auto& pair : connections) {
+                pair.second->stop();
+                delete pair.second;
+            }
+            connections.clear();
         }
-        connections.clear();
+
+        // 清理UDP tunnel
+        {
+            lock_guard<mutex> lock(udp_lock);
+            udp_port_map.clear();
+            udp_conn_map.clear();
+            udp_client_ip.clear();
+            if (udp_tunnel_sock != INVALID_SOCKET) {
+                closesocket(udp_tunnel_sock);
+                udp_tunnel_sock = INVALID_SOCKET;
+            }
+        }
 
         if (windivert_handle != NULL) {
             WinDivertClose(windivert_handle);
@@ -1350,12 +1501,319 @@ private:
             }
         }
 
-        Logger::debug("[🔍拦截UDP] " + to_string(src_port) + "→" + to_string(dst_port) +
+        Logger::info("[🔍拦截UDP] " + to_string(src_port) + "→" + to_string(dst_port) +
                    " 载荷=" + to_string(payload_len) + "字节" +
                    (payload_len > 0 ? "\n                    " + hex_dump : ""));
 
-        // TODO: 如果需要转发UDP，这里添加转发逻辑
-        // 目前只记录日志，不转发
+        // 首次建立UDP tunnel连接(如果还没有)
+        if (udp_tunnel_sock == INVALID_SOCKET) {
+            lock_guard<mutex> lock(udp_lock);
+            if (udp_tunnel_sock == INVALID_SOCKET) {  // Double-check
+                if (!create_udp_tunnel()) {
+                    Logger::error("[UDP] 创建UDP tunnel连接失败");
+                    return;
+                }
+            }
+        }
+
+        // 查找或分配conn_id
+        string port_key = src_ip + ":" + to_string(src_port) + ":" + dst_ip + ":" + to_string(dst_port);
+        uint32_t conn_id;
+
+        {
+            lock_guard<mutex> lock(udp_lock);
+
+            // 保存客户端IP(从第一个UDP包获取,用于握手响应)
+            if (udp_client_ip.empty()) {
+                udp_client_ip = src_ip;
+                Logger::debug("[UDP] 保存客户端IP: " + udp_client_ip);
+            }
+
+            auto it = udp_port_map.find(port_key);
+            if (it != udp_port_map.end()) {
+                conn_id = it->second;
+            } else {
+                // 分配新的conn_id
+                conn_id = udp_conn_id_counter++;
+                udp_port_map[port_key] = conn_id;
+                udp_conn_map[conn_id] = port_key;
+                Logger::info("[UDP|" + to_string(conn_id) + "] 新UDP流: " +
+                           src_ip + ":" + to_string(src_port) + " → " +
+                           dst_ip + ":" + to_string(dst_port));
+            }
+        }
+
+        // 直接构造tunnel协议并发送
+        if (payload_len > 0 && payload != nullptr) {
+            if (payload_len > 65535) {
+                Logger::error("[UDP|" + to_string(conn_id) + "] 数据包过大: " + to_string(payload_len));
+                return;
+            }
+
+            // 构造tunnel协议: msg_type(0x03) + conn_id(4) + src_port(2) + dst_port(2) + data_len(2) + payload
+            vector<uint8_t> packet(11 + payload_len);
+            packet[0] = 0x03;  // UDP消息类型
+            *(uint32_t*)&packet[1] = htonl(conn_id);
+            *(uint16_t*)&packet[5] = htons(src_port);
+            *(uint16_t*)&packet[7] = htons(dst_port);
+            *(uint16_t*)&packet[9] = htons((uint16_t)payload_len);
+            memcpy(&packet[11], payload, payload_len);
+
+            int sent = send(udp_tunnel_sock, (char*)packet.data(), (int)packet.size(), 0);
+            if (sent != (int)packet.size()) {
+                int err = WSAGetLastError();
+                Logger::error("[UDP|" + to_string(conn_id) + "] 发送到tunnel失败: sent=" +
+                            to_string(sent) + " expected=" + to_string(packet.size()) +
+                            " WSA错误=" + to_string(err));
+                return;
+            }
+
+            Logger::debug("[UDP|" + to_string(conn_id) + "|" + to_string(src_port) + "→" + to_string(dst_port) +
+                         "] →[隧道] 已转发 " + to_string(payload_len) + "字节");
+        }
+    }
+
+    // 创建UDP专用的tunnel连接
+    bool create_udp_tunnel() {
+        // 解析tunnel服务器地址
+        struct addrinfo hints{}, *result = nullptr, *rp = nullptr;
+        ZeroMemory(&hints, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+
+        string port_str = to_string(tunnel_port);
+        int ret = getaddrinfo(tunnel_server_ip.c_str(), port_str.c_str(), &hints, &result);
+        if (ret != 0) {
+            Logger::error("[UDP] DNS解析失败: " + tunnel_server_ip);
+            return false;
+        }
+
+        // 尝试连接
+        bool connected = false;
+        for (rp = result; rp != nullptr; rp = rp->ai_next) {
+            udp_tunnel_sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            if (udp_tunnel_sock == INVALID_SOCKET) {
+                continue;
+            }
+
+            // TCP_NODELAY
+            int flag = 1;
+            setsockopt(udp_tunnel_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+
+            if (connect(udp_tunnel_sock, rp->ai_addr, (int)rp->ai_addrlen) != SOCKET_ERROR) {
+                connected = true;
+                Logger::info("[UDP] Tunnel连接成功: " + tunnel_server_ip + ":" + to_string(tunnel_port));
+                break;
+            }
+
+            closesocket(udp_tunnel_sock);
+            udp_tunnel_sock = INVALID_SOCKET;
+        }
+
+        freeaddrinfo(result);
+
+        if (!connected) {
+            Logger::error("[UDP] 连接tunnel服务器失败");
+            return false;
+        }
+
+        // 发送UDP tunnel握手: conn_id(4) = 0xFFFFFFFF (特殊标记) + port(2) = 10011 (使用真实端口)
+        // 注意: 服务器会为每个tunnel创建一个TunnelConnection，UDP流量通过这个连接转发
+        uint8_t handshake[6];
+        *(uint32_t*)handshake = htonl(0xFFFFFFFF);  // 特殊conn_id标记UDP tunnel
+        *(uint16_t*)(handshake + 4) = htons(10011);  // 使用10011端口作为默认游戏端口
+
+        if (send(udp_tunnel_sock, (char*)handshake, 6, 0) != 6) {
+            int err = WSAGetLastError();
+            Logger::error("[UDP] 发送UDP握手失败: WSA错误=" + to_string(err));
+            closesocket(udp_tunnel_sock);
+            udp_tunnel_sock = INVALID_SOCKET;
+            return false;
+        }
+
+        Logger::info("[UDP] 已发送握手请求,等待服务器确认 (conn_id=0xFFFFFFFF, port=10011)");
+
+        // 等待服务器的握手确认(6字节: conn_id + port)
+        uint8_t ack[6];
+        DWORD timeout = 5000;  // 5秒超时
+        setsockopt(udp_tunnel_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+
+        int received = recv(udp_tunnel_sock, (char*)ack, 6, MSG_WAITALL);
+        if (received != 6) {
+            int err = WSAGetLastError();
+            Logger::error("[UDP] 握手确认失败: received=" + to_string(received) +
+                        " WSA错误=" + to_string(err));
+            closesocket(udp_tunnel_sock);
+            udp_tunnel_sock = INVALID_SOCKET;
+            return false;
+        }
+
+        // 解析握手确认
+        uint32_t ack_conn_id = ntohl(*(uint32_t*)ack);
+        uint16_t ack_port = ntohs(*(uint16_t*)(ack + 4));
+
+        if (ack_conn_id != 0xFFFFFFFF) {
+            Logger::error("[UDP] 握手确认失败: 期望conn_id=0xFFFFFFFF, 收到=" + to_string(ack_conn_id));
+            closesocket(udp_tunnel_sock);
+            udp_tunnel_sock = INVALID_SOCKET;
+            return false;
+        }
+
+        Logger::info("[UDP] ✓ 握手成功! 服务器已确认 (port=" + to_string(ack_port) + ")");
+
+        // 取消接收超时,恢复为阻塞模式
+        timeout = 0;
+        setsockopt(udp_tunnel_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+
+        // 标记UDP tunnel就绪
+        udp_tunnel_ready = true;
+
+        // 启动UDP响应接收线程
+        thread([this]() {
+            recv_udp_responses();
+        }).detach();
+
+        return true;
+    }
+
+    // 接收UDP响应的线程
+    void recv_udp_responses() {
+        Logger::info("[UDP] ========================================");
+        Logger::info("[UDP] 响应接收线程已启动");
+        Logger::info("[UDP] socket状态: " + string(udp_tunnel_sock != INVALID_SOCKET ? "有效" : "无效") +
+                    " (sock=" + to_string(udp_tunnel_sock) + ")");
+        Logger::info("[UDP] running状态: " + string(running ? "true" : "false"));
+        Logger::info("[UDP] ========================================");
+
+        vector<uint8_t> buffer;
+        uint8_t recv_buf[4096];
+
+        while (running && udp_tunnel_sock != INVALID_SOCKET) {
+            Logger::info("[UDP] 准备调用recv() - socket=" + to_string(udp_tunnel_sock) +
+                        ", buffer_size=" + to_string(sizeof(recv_buf)));
+
+            int n = recv(udp_tunnel_sock, (char*)recv_buf, sizeof(recv_buf), 0);
+            int err = WSAGetLastError();
+
+            Logger::info("[UDP] recv()返回: n=" + to_string(n) +
+                        ", WSAError=" + to_string(err));
+
+            if (n <= 0) {
+                if (n == 0) {
+                    Logger::info("[UDP] Tunnel连接被服务器关闭 (recv返回0)");
+                } else {
+                    Logger::error("[UDP] recv()失败: 返回值=" + to_string(n) +
+                                ", WSA错误=" + to_string(err));
+                }
+                Logger::info("[UDP] 退出接收循环");
+                break;
+            }
+
+            Logger::info("[UDP] ✓ ←[Tunnel] 成功接收 " + to_string(n) + "字节");
+            buffer.insert(buffer.end(), recv_buf, recv_buf + n);
+
+            // 解析: msg_type(0x03) + conn_id(4) + src_port(2) + dst_port(2) + data_len(2) + payload
+            while (buffer.size() >= 11) {
+                uint8_t msg_type = buffer[0];
+                if (msg_type != 0x03) {
+                    Logger::warning("[UDP] 未知消息类型: " + to_string((int)msg_type));
+                    buffer.erase(buffer.begin());
+                    continue;
+                }
+
+                uint32_t conn_id = ntohl(*(uint32_t*)&buffer[1]);
+                uint16_t src_port = ntohs(*(uint16_t*)&buffer[5]);
+                uint16_t dst_port = ntohs(*(uint16_t*)&buffer[7]);
+                uint16_t data_len = ntohs(*(uint16_t*)&buffer[9]);
+
+                if (buffer.size() < 11 + data_len) {
+                    Logger::debug("[UDP] 等待更多数据 (需要" + to_string(11 + data_len) +
+                                "字节，当前" + to_string(buffer.size()) + "字节)");
+                    break;
+                }
+
+                vector<uint8_t> payload(buffer.begin() + 11, buffer.begin() + 11 + data_len);
+                buffer.erase(buffer.begin(), buffer.begin() + 11 + data_len);
+
+                Logger::debug("[UDP] 解析响应: conn_id=" + to_string(conn_id) +
+                            " " + to_string(src_port) + "→" + to_string(dst_port) +
+                            " 数据=" + to_string(data_len) + "字节");
+
+                // 特殊处理握手响应(conn_id=0xFFFFFFFF)
+                if (conn_id == 0xFFFFFFFF) {
+                    // 握手响应包,直接使用协议头的端口信息注入
+                    // 协议格式: src_port=游戏服务器端口, dst_port=游戏客户端端口
+                    // 响应方向: 游戏服务器 -> 游戏客户端,所以local=游戏客户端,remote=游戏服务器
+
+                    string client_ip;
+                    {
+                        lock_guard<mutex> lock(udp_lock);
+                        client_ip = udp_client_ip;
+                    }
+
+                    if (!client_ip.empty()) {
+                        Logger::info("[UDP|握手响应] 准备注入握手响应: " +
+                                   client_ip + ":" + to_string(dst_port) + " ← " +
+                                   game_server_ip + ":" + to_string(src_port) +
+                                   " (" + to_string(data_len) + "字节)");
+
+                        inject_udp_response(windivert_handle,
+                                          client_ip, dst_port,           // 本地游戏客户端
+                                          game_server_ip, src_port,      // 远程游戏服务器
+                                          payload.data(), payload.size());
+
+                        Logger::info("[UDP|握手响应] ✓ 已注入握手响应");
+                    } else {
+                        Logger::warning("[UDP|握手响应] 无法注入握手响应: 客户端IP未知");
+                    }
+                    continue;  // 握手包处理完成
+                }
+
+                // 查找对应的UDP连接并注入响应
+                string port_key;
+                {
+                    lock_guard<mutex> lock(udp_lock);
+                    auto it = udp_conn_map.find(conn_id);
+                    if (it != udp_conn_map.end()) {
+                        port_key = it->second;
+                    }
+                }
+
+                if (!port_key.empty()) {
+                    // 解析port_key: "local_ip:local_port:remote_ip:remote_port"
+                    size_t pos1 = port_key.find(':');
+                    size_t pos2 = port_key.find(':', pos1 + 1);
+                    size_t pos3 = port_key.find(':', pos2 + 1);
+
+                    if (pos1 != string::npos && pos2 != string::npos && pos3 != string::npos) {
+                        string local_ip = port_key.substr(0, pos1);
+                        uint16_t local_port = (uint16_t)stoi(port_key.substr(pos1 + 1, pos2 - pos1 - 1));
+                        string remote_ip = port_key.substr(pos2 + 1, pos3 - pos2 - 1);
+                        uint16_t remote_port = (uint16_t)stoi(port_key.substr(pos3 + 1));
+
+                        // 使用工具函数注入UDP响应
+                        Logger::info("[UDP|" + to_string(conn_id) + "] 准备注入UDP响应: " +
+                                   local_ip + ":" + to_string(local_port) + " ← " +
+                                   remote_ip + ":" + to_string(src_port) +
+                                   " (" + to_string(payload.size()) + "字节)");
+
+                        inject_udp_response(windivert_handle, local_ip, local_port,
+                                          remote_ip, src_port, payload.data(), payload.size());
+                    } else {
+                        Logger::error("[UDP] 解析port_key失败: " + port_key);
+                    }
+                } else {
+                    Logger::warning("[UDP] 未找到conn_id=" + to_string(conn_id) + "对应的映射");
+                }
+            }
+        }
+
+        Logger::info("[UDP] ========================================");
+        Logger::info("[UDP] 响应接收线程退出");
+        Logger::info("[UDP] 最终状态: running=" + string(running ? "true" : "false") +
+                    ", socket=" + (udp_tunnel_sock != INVALID_SOCKET ? "有效" : "无效"));
+        Logger::info("[UDP] ========================================");
     }
 };
 
@@ -1396,7 +1854,7 @@ int main() {
     }
 
     cout << "============================================================" << endl;
-    cout << "DNF游戏代理客户端 v5.0 (C++ 版本 - TCP)" << endl;
+    cout << "DNF游戏代理客户端 v6.0 (C++ 版本 - TCP/UDP)" << endl;
     cout << "编译时间: " << __DATE__ << " " << __TIME__ << endl;
     cout << "============================================================" << endl;
     cout << endl;
