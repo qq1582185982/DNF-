@@ -1,0 +1,23 @@
+# 忽略测试和临时文件
+*.zip
+log/
+*.log
+*.tmp
+
+# 忽略编译生成的文件
+*.exe
+*.o
+*.obj
+*.dll
+*.lib
+*.sys
+
+# 忽略IDE文件
+.vscode/
+*.vcxproj
+*.vcxproj.filters
+*.sln
+
+# 忽略系统文件
+Thumbs.db
+.DS_Store
