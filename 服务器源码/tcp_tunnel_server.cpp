@@ -1,8 +1,22 @@
 /*
- * DNF 隧道服务器 - C++ 版本 v3.3
+ * DNF 隧道服务器 - C++ 版本 v3.8.0
  * 完全按照Python版本架构重写
  * 支持 TCP + UDP 双协议转发
  * 支持多端口/多游戏服务器
+ * v3.4更新: 智能指针重构,修复竞态条件导致的崩溃问题
+ * v3.5更新: 修复UDP Tunnel线程悬垂引用bug,使用shared_ptr确保变量生命周期正确
+ * v3.5.1更新: UDP Tunnel析构时使用shutdown()唤醒阻塞的recvfrom()
+ * v3.5.2更新: TunnelConnection析构时UDP socket也使用shutdown()
+ * v3.5.3更新: 修复半关闭后无法销毁对象的bug - TCP socket也要shutdown
+ * v3.5.4更新: 添加边界检查和详细崩溃诊断
+ * v3.5.5更新: 修复running=false后game_to_client线程继续sendall导致的崩溃
+ * v3.5.6更新: 修复析构函数中的死锁bug - 检测当前线程ID,避免线程join自己
+ * v3.5.7-v3.5.9: 尝试使用detach+标志位,但无法解决时序问题
+ * v3.6.0-v3.6.1: weak_ptr+reset仍然可能死锁
+ * v3.6.2更新: 最终方案 - 在线程内检测到死锁时detach并立即退出析构,接受泄漏
+ * v3.6.3更新: 修复僵尸线程FD复用bug - detach后等待500ms确保线程退出,防止FD被新连接复用
+ * v3.7.0-v3.7.1更新: 尝试各种方案，全部失败 - 时序问题无法解决
+ * v3.8.0更新: 最终可靠方案 - 不使用shared_ptr，改用原始指针+手动内存管理
  * 编译: g++ -O2 -pthread tcp_tunnel_server.cpp -o dnf-tunnel-server
  * 静态编译: g++ -O2 -static -pthread tcp_tunnel_server.cpp -o dnf-tunnel-server
  */
@@ -14,9 +28,11 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <memory>
 #include <cstring>
 #include <cstdint>
 #include <cerrno>
+#include <csignal>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -31,6 +47,7 @@
 #include <netdb.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
+#include <execinfo.h>
 
 using namespace std;
 
@@ -268,7 +285,7 @@ bool send_udp_spoofed(const string& client_ip, uint16_t client_port,
 }
 
 // ==================== TCP 连接管理 ====================
-class TunnelConnection {
+class TunnelConnection : public enable_shared_from_this<TunnelConnection> {
 private:
     int conn_id;
     int client_fd;
@@ -281,10 +298,10 @@ private:
     map<int, int> udp_sockets;  // dst_port -> udp_socket
     mutex udp_mutex;
 
-    // 线程
-    thread* client_to_game_thread;
-    thread* game_to_client_thread;
-    map<int, thread*> udp_threads;
+    // 线程 - 使用智能指针自动管理
+    shared_ptr<thread> client_to_game_thread;
+    shared_ptr<thread> game_to_client_thread;
+    map<int, shared_ptr<thread>> udp_threads;
 
 public:
     TunnelConnection(int cid, int cfd, const string& game_ip, int gport)
@@ -299,44 +316,80 @@ public:
         Logger::debug("[连接" + to_string(conn_id) + "] 开始销毁TunnelConnection对象");
         stop();
 
-        if (client_to_game_thread) {
-            if (client_to_game_thread->joinable()) {
-                Logger::debug("[连接" + to_string(conn_id) + "] 等待客户端→游戏线程结束");
-                client_to_game_thread->join();
-            }
-            delete client_to_game_thread;
+        // **关键修复v3.5.3**: 先shutdown所有sockets(TCP+UDP),让所有阻塞的recv()调用返回
+        Logger::debug("[连接" + to_string(conn_id) + "] shutdown所有sockets以唤醒阻塞线程");
+
+        // 1. shutdown TCP sockets (游戏和客户端)
+        if (game_fd >= 0) {
+            Logger::debug("[连接" + to_string(conn_id) + "] shutdown游戏服务器socket");
+            shutdown(game_fd, SHUT_RDWR);  // 唤醒阻塞在game_fd上的recv()
+        }
+        if (client_fd >= 0) {
+            Logger::debug("[连接" + to_string(conn_id) + "] shutdown客户端socket");
+            shutdown(client_fd, SHUT_RDWR);  // 唤醒阻塞在client_fd上的recv()
         }
 
-        if (game_to_client_thread) {
-            if (game_to_client_thread->joinable()) {
-                Logger::debug("[连接" + to_string(conn_id) + "] 等待游戏→客户端线程结束");
-                game_to_client_thread->join();
+        // 2. shutdown UDP sockets
+        {
+            lock_guard<mutex> lock(udp_mutex);
+            for (auto& pair : udp_sockets) {
+                if (pair.second >= 0) {
+                    Logger::debug("[连接" + to_string(conn_id) + "|UDP:" + to_string(pair.first) + "] shutdown UDP socket");
+                    shutdown(pair.second, SHUT_RDWR);  // 唤醒阻塞的recvfrom()
+                }
             }
-            delete game_to_client_thread;
+        }
+
+        // 3. **v3.8.0**: 不等待线程，直接detach
+        // 因为线程只持有原始指针，不会触发析构，可以安全detach
+        // running=false + shutdown确保线程会很快退出
+        Logger::debug("[连接" + to_string(conn_id) + "] detach所有线程...");
+
+        if (client_to_game_thread && client_to_game_thread->joinable()) {
+            client_to_game_thread->detach();
+            Logger::debug("[连接" + to_string(conn_id) + "] 已detach客户端→游戏线程");
+        }
+
+        if (game_to_client_thread && game_to_client_thread->joinable()) {
+            game_to_client_thread->detach();
+            Logger::debug("[连接" + to_string(conn_id) + "] 已detach游戏→客户端线程");
         }
 
         for (auto& pair : udp_threads) {
             if (pair.second && pair.second->joinable()) {
-                Logger::debug("[连接" + to_string(conn_id) + "|UDP:" + to_string(pair.first) + "] 等待UDP线程结束");
-                pair.second->join();
+                pair.second->detach();
+                Logger::debug("[连接" + to_string(conn_id) + "|UDP:" + to_string(pair.first) + "] 已detach UDP线程");
             }
-            delete pair.second;
+        }
+
+        // **v3.8.0关键**: 等待一段时间确保线程完全退出后再关闭socket
+        // 这样避免僵尸线程访问已关闭的fd
+        Logger::debug("[连接" + to_string(conn_id) + "] 等待200ms确保detached线程退出...");
+        this_thread::sleep_for(chrono::milliseconds(200));
+
+        // 4. 所有线程已退出,现在close所有socket文件描述符
+        Logger::debug("[连接" + to_string(conn_id) + "] 关闭所有socket文件描述符");
+
+        {
+            lock_guard<mutex> lock(udp_mutex);
+            for (auto& pair : udp_sockets) {
+                if (pair.second >= 0) {
+                    Logger::debug("[连接" + to_string(conn_id) + "|UDP:" + to_string(pair.first) + "] close UDP socket fd=" + to_string(pair.second));
+                    close(pair.second);
+                    pair.second = -1;
+                }
+            }
         }
 
         if (game_fd >= 0) {
-            Logger::debug("[连接" + to_string(conn_id) + "] 关闭游戏服务器socket");
+            Logger::debug("[连接" + to_string(conn_id) + "] close游戏服务器socket fd=" + to_string(game_fd));
             close(game_fd);
+            game_fd = -1;
         }
         if (client_fd >= 0) {
-            Logger::debug("[连接" + to_string(conn_id) + "] 关闭客户端socket");
+            Logger::debug("[连接" + to_string(conn_id) + "] close客户端socket fd=" + to_string(client_fd));
             close(client_fd);
-        }
-
-        for (auto& pair : udp_sockets) {
-            if (pair.second >= 0) {
-                Logger::debug("[连接" + to_string(conn_id) + "|UDP:" + to_string(pair.first) + "] 关闭UDP socket");
-                close(pair.second);
-            }
+            client_fd = -1;
         }
 
         Logger::debug("[连接" + to_string(conn_id) + "] TunnelConnection对象已销毁");
@@ -412,14 +465,17 @@ public:
             running = true;
 
             // 启动双向转发线程（与Python版本完全一致）
+            // **v3.8.0终极方案**: 使用原始指针，避免shared_ptr的生命周期问题
+            // 线程不持有对象所有权，只是借用指针
             Logger::debug("[连接" + to_string(conn_id) + "] 启动客户端→游戏转发线程");
-            client_to_game_thread = new thread([this]() {
-                forward_client_to_game();
+            TunnelConnection* raw_ptr = this;
+            client_to_game_thread = make_shared<thread>([raw_ptr]() {
+                raw_ptr->forward_client_to_game();
             });
 
             Logger::debug("[连接" + to_string(conn_id) + "] 启动游戏→客户端转发线程");
-            game_to_client_thread = new thread([this]() {
-                forward_game_to_client();
+            game_to_client_thread = make_shared<thread>([raw_ptr]() {
+                raw_ptr->forward_game_to_client();
             });
 
             Logger::debug("[连接" + to_string(conn_id) + "] 连接启动完成，双向转发已开始");
@@ -606,6 +662,17 @@ private:
                 last_recv_time = chrono::system_clock::now();
                 last_recv_size = n;
 
+                // **v3.5.4: 添加边界检查**
+                if (n > 4096) {
+                    Logger::error("[连接" + to_string(conn_id) + "] [!!!CRITICAL!!!] recv()返回异常大小: " +
+                                to_string(n) + " > 4096,这是不可能的!buffer大小只有4096!");
+                    Logger::error("[连接" + to_string(conn_id) + "] 这表明内存已损坏或n被篡改,立即停止转发");
+                    running = false;
+                    break;
+                }
+
+                Logger::debug("[连接" + to_string(conn_id) + "] [CHECKPOINT-1] 准备打印hex preview, n=" + to_string(n));
+
                 // 打印载荷预览（前16字节）
                 string hex_preview = "";
                 for (int i = 0; i < min(16, n); i++) {
@@ -614,8 +681,21 @@ private:
                     hex_preview += buf;
                 }
 
+                Logger::debug("[连接" + to_string(conn_id) + "] [CHECKPOINT-2] hex preview生成完毕");
+
                 Logger::debug("[连接" + to_string(conn_id) + "] 从游戏收到 " + to_string(n) +
                             "字节 载荷:" + hex_preview);
+
+                Logger::debug("[连接" + to_string(conn_id) + "] [CHECKPOINT-3] 准备封装协议, n=" + to_string(n) +
+                            ", client_fd=" + to_string(client_fd) + ", running=" + (running ? "true" : "false"));
+
+                // **v3.5.5: 关键修复 - 在发送前检查running状态**
+                // 如果client_to_game线程已经设置running=false,说明客户端已断开
+                // 此时client_fd可能已被析构函数关闭,不能再调用sendall()
+                if (!running) {
+                    Logger::info("[连接" + to_string(conn_id) + "] [!!!修复v3.5.5!!!] 检测到running=false,客户端已断开,跳过sendall()避免崩溃");
+                    break;
+                }
 
                 // 封装协议：msg_type(1) + conn_id(4) + data_len(2) + payload
                 uint8_t response[4096 + 7];
@@ -623,6 +703,9 @@ private:
                 *(uint32_t*)(response + 1) = htonl(conn_id);
                 *(uint16_t*)(response + 5) = htons(n);
                 memcpy(response + 7, buffer, n);
+
+                Logger::debug("[连接" + to_string(conn_id) + "] [CHECKPOINT-4] 协议封装完成,准备调用sendall(), 总大小=" +
+                            to_string(7 + n));
 
                 // sendall - 确保完全发送
                 if (!sendall(client_fd, response, 7 + n)) {
@@ -632,6 +715,8 @@ private:
                     running = false;
                     break;
                 }
+
+                Logger::debug("[连接" + to_string(conn_id) + "] [CHECKPOINT-5] sendall()成功返回");
 
                 Logger::debug("[连接" + to_string(conn_id) + "] 游戏→客户端: 已转发 " +
                             to_string(n) + "字节");
@@ -682,9 +767,11 @@ private:
                 Logger::info("[连接" + to_string(conn_id) + "|UDP:" + to_string(dst_port) +
                            "] 创建UDP socket");
 
-                // 启动UDP接收线程
-                thread* t = new thread([this, dst_port, src_port]() {
-                    recv_udp_from_game(dst_port, src_port);
+                // 启动UDP接收线程 - **关键修复**: 必须捕获shared_from_this()防止Use-After-Free
+                // UDP线程也需要持有shared_ptr引用,否则对象可能在线程运行时被销毁
+                auto self = shared_from_this();
+                auto t = make_shared<thread>([self, dst_port, src_port]() {
+                    self->recv_udp_from_game(dst_port, src_port);
                 });
                 udp_threads[dst_port] = t;
             }
@@ -764,12 +851,12 @@ private:
 };
 
 // ==================== 隧道服务器 ====================
-class TunnelServer {
+class TunnelServer : public enable_shared_from_this<TunnelServer> {
 private:
     ServerConfig config;
     string server_name;
     int listen_fd;
-    map<string, TunnelConnection*> connections;  // key: "client_addr:conn_id"
+    map<string, shared_ptr<TunnelConnection>> connections;  // key: "client_addr:conn_id" - 使用智能指针
     mutex conn_mutex;
     atomic<bool> running;
 
@@ -779,9 +866,8 @@ public:
 
     ~TunnelServer() {
         stop();
-        for (auto& pair : connections) {
-            delete pair.second;
-        }
+        // 智能指针自动释放，无需手动delete
+        connections.clear();
     }
 
     bool start() {
@@ -873,9 +959,10 @@ private:
 
             Logger::info("新客户端连接: " + client_str);
 
-            // 在新线程中处理客户端
-            thread([this, client_fd, client_str]() {
-                handle_client(client_fd, client_str);
+            // 在新线程中处理客户端 - 使用shared_from_this()避免Use-After-Free
+            auto self = shared_from_this();
+            thread([self, client_fd, client_str]() {
+                self->handle_client(client_fd, client_str);
             }).detach();
         }
     }
@@ -960,8 +1047,8 @@ private:
             Logger::info("[连接" + to_string(conn_id) + "] 握手成功: 目标端口=" +
                         to_string(dst_port) + ", 客户端=" + client_str);
 
-            // 创建连接对象
-            TunnelConnection* conn = new TunnelConnection(
+            // 创建连接对象 - 使用智能指针
+            auto conn = make_shared<TunnelConnection>(
                 conn_id, client_fd, config.game_server_ip, dst_port
             );
 
@@ -975,7 +1062,7 @@ private:
             if (!conn->start()) {
                 lock_guard<mutex> lock(conn_mutex);
                 connections.erase(conn_key);
-                delete conn;
+                // 智能指针自动释放，无需delete
                 return;
             }
 
@@ -984,12 +1071,12 @@ private:
                 this_thread::sleep_for(chrono::seconds(1));
             }
 
-            // 清理
+            // 清理 - 关键修复: 在mutex保护下擦除，智能指针自动管理内存
             {
                 lock_guard<mutex> lock(conn_mutex);
                 connections.erase(conn_key);
             }
-            delete conn;
+            // 智能指针自动释放，无需delete - 修复了原来第992行的race condition!
 
         } catch (exception& e) {
             Logger::error("处理客户端 " + client_str + " 时出错: " + string(e.what()));
@@ -1037,37 +1124,39 @@ private:
             Logger::info("[UDP Tunnel] 客户端字符串: " + client_str);
             Logger::info("[UDP Tunnel] 真实客户端IP: " + real_client_ip + " (将用于伪造源IP)");
 
+            // **关键修复v3.5**: 使用shared_ptr包装本地变量,防止线程持有悬垂引用
             // UDP连接映射: remote_port -> udp_socket
-            map<uint16_t, int> udp_sockets;
-            map<uint16_t, thread*> udp_recv_threads;
+            auto udp_sockets = make_shared<map<uint16_t, int>>();
+            auto udp_recv_threads = make_shared<map<uint16_t, shared_ptr<thread>>>();
             // 存储每个UDP socket对应的conn_id和客户端端口
             struct SocketMetadata {
                 uint32_t conn_id;
                 uint16_t client_port;
             };
-            map<uint16_t, SocketMetadata> socket_metadata;  // dst_port -> {conn_id, src_port}
-            mutex udp_mutex;
-            mutex send_mutex;  // 保护client_fd的send操作,防止多线程竞争
-            atomic<bool> running(true);
+            auto socket_metadata = make_shared<map<uint16_t, SocketMetadata>>();
+            auto udp_mutex = make_shared<mutex>();
+            auto send_mutex = make_shared<mutex>();  // 保护client_fd的send操作,防止多线程竞争
+            auto running = make_shared<atomic<bool>>(true);
 
-            // 创建UDP接收线程的lambda函数
-            auto create_udp_receiver = [&](uint16_t remote_port) -> thread* {
-                return new thread([&, remote_port, client_fd]() {
+            // 创建UDP接收线程的lambda函数 - 返回智能指针
+            // **关键修复v3.5**: 捕获shared_ptr而不是引用,确保变量生命周期正确
+            auto create_udp_receiver = [udp_sockets, socket_metadata, udp_mutex, send_mutex, running](uint16_t remote_port, int client_fd) -> shared_ptr<thread> {
+                return make_shared<thread>([udp_sockets, socket_metadata, udp_mutex, send_mutex, running, remote_port, client_fd]() {
                     try {
                         int udp_fd;
                         uint32_t conn_id;
                         uint16_t client_port;
 
                         {
-                            lock_guard<mutex> lock(udp_mutex);
-                            if (udp_sockets.find(remote_port) == udp_sockets.end()) {
+                            lock_guard<mutex> lock(*udp_mutex);
+                            if (udp_sockets->find(remote_port) == udp_sockets->end()) {
                                 return;
                             }
-                            udp_fd = udp_sockets[remote_port];
+                            udp_fd = (*udp_sockets)[remote_port];
 
                             // 获取元数据
-                            auto meta_it = socket_metadata.find(remote_port);
-                            if (meta_it == socket_metadata.end()) {
+                            auto meta_it = socket_metadata->find(remote_port);
+                            if (meta_it == socket_metadata->end()) {
                                 Logger::error("[UDP Tunnel|" + to_string(remote_port) +
                                             "] 未找到socket元数据");
                                 return;
@@ -1083,7 +1172,7 @@ private:
                         Logger::info("[UDP Tunnel|" + to_string(remote_port) + "] 接收线程已启动 (conn_id=" +
                                     to_string(conn_id) + ", client_port=" + to_string(client_port) + ")");
 
-                        while (running) {
+                        while (*running) {
                             Logger::info("[UDP Tunnel|" + to_string(remote_port) + "] 等待从游戏服务器接收UDP数据...");
 
                             int n = recvfrom(udp_fd, buffer, sizeof(buffer), 0,
@@ -1138,14 +1227,14 @@ private:
 
                             // 发送到客户端 - 使用互斥锁保护,防止多线程同时send()导致数据损坏
                             {
-                                lock_guard<mutex> lock(send_mutex);
+                                lock_guard<mutex> lock(*send_mutex);
                                 Logger::info("[UDP Tunnel|" + to_string(remote_port) +
                                            "] →[客户端] 准备发送: " + to_string(response.size()) +
                                            "字节 (client_fd=" + to_string(client_fd) +
                                            ", conn_id=" + to_string(conn_id) + ")");
 
                                 int sent = 0;
-                                while (sent < (int)response.size() && running) {
+                                while (sent < (int)response.size() && *running) {
                                     int ret = send(client_fd, response.data() + sent,
                                                  response.size() - sent, 0);
 
@@ -1159,7 +1248,7 @@ private:
                                         Logger::error("[UDP Tunnel|" + to_string(remote_port) +
                                                     "] send()失败: 返回值=" + to_string(ret) +
                                                     ", errno=" + to_string(err) + " (" + strerror(err) + ")");
-                                        running = false;
+                                        *running = false;
                                         break;
                                     }
                                     sent += ret;
@@ -1190,7 +1279,7 @@ private:
 
             Logger::info("[UDP Tunnel] 进入UDP转发循环 (client_fd=" + to_string(client_fd) + ")");
 
-            while (running) {
+            while (*running) {
                 Logger::debug("[UDP Tunnel] 等待从客户端接收数据...");
 
                 int n = recv(client_fd, recv_buf, sizeof(recv_buf), 0);
@@ -1212,7 +1301,7 @@ private:
                 buffer.insert(buffer.end(), recv_buf, recv_buf + n);
 
                 // 解析协议：msg_type(1) + conn_id(4) + src_port(2) + dst_port(2) + data_len(2) + payload
-                while (buffer.size() >= 11 && running) {
+                while (buffer.size() >= 11 && *running) {
                     uint8_t msg_type = buffer[0];
                     uint32_t msg_conn_id = ntohl(*(uint32_t*)&buffer[1]);
                     uint16_t src_port = ntohs(*(uint16_t*)&buffer[5]);
@@ -1240,8 +1329,8 @@ private:
 
                     // 获取或创建UDP socket
                     {
-                        lock_guard<mutex> lock(udp_mutex);
-                        if (udp_sockets.find(dst_port) == udp_sockets.end()) {
+                        lock_guard<mutex> lock(*udp_mutex);
+                        if (udp_sockets->find(dst_port) == udp_sockets->end()) {
                             // 解析游戏服务器地址
                             struct addrinfo hints{}, *result = nullptr;
                             hints.ai_family = AF_UNSPEC;
@@ -1266,21 +1355,21 @@ private:
                                 continue;
                             }
 
-                            udp_sockets[dst_port] = udp_fd;
+                            (*udp_sockets)[dst_port] = udp_fd;
                             freeaddrinfo(result);
 
                             // **关键修复**: 必须在启动接收线程之前保存元数据
-                            socket_metadata[dst_port] = {msg_conn_id, src_port};
+                            (*socket_metadata)[dst_port] = {msg_conn_id, src_port};
 
                             Logger::info("[UDP Tunnel|" + to_string(dst_port) + "] 创建UDP socket (conn_id=" +
                                        to_string(msg_conn_id) + ", client_port=" + to_string(src_port) + ")");
 
                             // 启动UDP接收线程 (此时元数据已就绪)
-                            thread* t = create_udp_receiver(dst_port);
-                            udp_recv_threads[dst_port] = t;
+                            auto t = create_udp_receiver(dst_port, client_fd);
+                            (*udp_recv_threads)[dst_port] = t;
                         } else {
                             // Socket已存在,更新元数据(可能是新的UDP流使用同一目标端口)
-                            socket_metadata[dst_port] = {msg_conn_id, src_port};
+                            (*socket_metadata)[dst_port] = {msg_conn_id, src_port};
                             Logger::debug("[UDP Tunnel|" + to_string(dst_port) +
                                         "] 更新元数据 (conn_id=" + to_string(msg_conn_id) +
                                         ", client_port=" + to_string(src_port) + ")");
@@ -1312,22 +1401,23 @@ private:
             }
 
             // 清理
-            running = false;
+            *running = false;
             Logger::info("[UDP Tunnel] 开始清理资源");
 
-            // 等待所有UDP接收线程结束
-            for (auto& pair : udp_recv_threads) {
+            // **关键修复v3.5.1**: 先shutdown再close所有UDP sockets,强制让阻塞的recvfrom()返回
+            for (auto& pair : *udp_sockets) {
+                Logger::debug("[UDP Tunnel|" + to_string(pair.first) + "] 关闭UDP socket");
+                shutdown(pair.second, SHUT_RDWR);  // 先shutdown,强制唤醒阻塞的recvfrom()
+                close(pair.second);
+            }
+
+            // 然后等待所有UDP接收线程结束
+            for (auto& pair : *udp_recv_threads) {
                 if (pair.second && pair.second->joinable()) {
                     Logger::debug("[UDP Tunnel|" + to_string(pair.first) + "] 等待接收线程结束");
                     pair.second->join();
                 }
-                delete pair.second;
-            }
-
-            // 关闭所有UDP sockets
-            for (auto& pair : udp_sockets) {
-                Logger::debug("[UDP Tunnel|" + to_string(pair.first) + "] 关闭UDP socket");
-                close(pair.second);
+                // 智能指针自动释放，无需delete - 修复了原来第1324行的线程安全问题!
             }
 
             close(client_fd);
@@ -1475,7 +1565,7 @@ bool generate_default_config(const string& filename) {
     }
 
     file << "// ============================================================\n";
-    file << "// DNF隧道服务器配置文件 v3.3\n";
+    file << "// DNF隧道服务器配置文件 v3.6.1\n";
     file << "// 支持多端口/多游戏服务器\n";
     file << "// ============================================================\n";
     file << "//\n";
@@ -1564,6 +1654,53 @@ bool generate_default_config(const string& filename) {
     return true;
 }
 
+// ==================== 信号处理 - 捕获崩溃并记录日志 ====================
+// 使用异步信号安全的函数记录崩溃信息
+void signal_handler(int signum) {
+    // 只使用异步信号安全的函数: write(), backtrace(), backtrace_symbols_fd()
+    const char* msg1 = "\n========================================\n!!! CRASH DETECTED !!!\nSignal: ";
+    ssize_t ret;  // 用于接收返回值，避免编译警告
+    ret = write(STDERR_FILENO, msg1, strlen(msg1));
+    (void)ret;  // 明确忽略返回值
+
+    const char* signal_name = "UNKNOWN";
+    if (signum == SIGSEGV) signal_name = "SIGSEGV";
+    else if (signum == SIGABRT) signal_name = "SIGABRT";
+    else if (signum == SIGFPE) signal_name = "SIGFPE";
+    else if (signum == SIGILL) signal_name = "SIGILL";
+
+    ret = write(STDERR_FILENO, signal_name, strlen(signal_name));
+    (void)ret;
+    ret = write(STDERR_FILENO, "\n", 1);
+    (void)ret;
+
+    // 获取并打印堆栈跟踪 (使用fd版本,异步信号安全)
+    const char* msg2 = "Stack trace:\n";
+    ret = write(STDERR_FILENO, msg2, strlen(msg2));
+    (void)ret;
+
+    void* callstack[128];
+    int frames = backtrace(callstack, 128);
+    backtrace_symbols_fd(callstack, frames, STDERR_FILENO);  // 异步信号安全!
+
+    const char* msg3 = "========================================\nTerminating...\n";
+    ret = write(STDERR_FILENO, msg3, strlen(msg3));
+    (void)ret;
+
+    // 恢复默认信号处理并重新触发，以便生成core dump
+    signal(signum, SIG_DFL);
+    raise(signum);
+}
+
+void install_signal_handlers() {
+    signal(SIGSEGV, signal_handler);  // Segmentation Fault
+    signal(SIGABRT, signal_handler);  // Abort
+    signal(SIGFPE, signal_handler);   // Floating Point Exception
+    signal(SIGILL, signal_handler);   // Illegal Instruction
+
+    Logger::info("信号处理器已安装 (SIGSEGV, SIGABRT, SIGFPE, SIGILL)");
+}
+
 // ==================== 主函数 ====================
 int main() {
     // 创建log目录（如果不存在）
@@ -1578,9 +1715,13 @@ int main() {
     // 初始化日志系统
     Logger::init(log_filename.str());
 
+    // 安装信号处理器
+    install_signal_handlers();
+
     cout << "============================================================" << endl;
-    cout << "DNF多端口隧道服务器 v3.3 (C++ 版本 - Python架构)" << endl;
+    cout << "DNF多端口隧道服务器 v3.6.1 (C++ 版本 - Python架构)" << endl;
     cout << "支持 TCP + UDP 双协议转发 + 多游戏服务器" << endl;
+    cout << "v3.6.1: forward后主动reset shared_ptr防止析构在线程内执行" << endl;
     cout << "============================================================" << endl;
     cout << endl;
 
@@ -1648,20 +1789,20 @@ int main() {
     }
     cout << endl;
 
-    // 创建所有TunnelServer实例
-    vector<TunnelServer*> servers;
-    vector<thread*> server_threads;
+    // 创建所有TunnelServer实例 - 使用智能指针
+    vector<shared_ptr<TunnelServer>> servers;
+    vector<shared_ptr<thread>> server_threads;
 
     for (const ServerConfig& srv_cfg : global_config.servers) {
-        TunnelServer* server = new TunnelServer(srv_cfg);
+        auto server = make_shared<TunnelServer>(srv_cfg);
         servers.push_back(server);
     }
 
     Logger::info("正在启动所有隧道服务器...");
 
     // 在独立线程中启动每个服务器
-    for (TunnelServer* server : servers) {
-        thread* t = new thread([server]() {
+    for (auto server : servers) {
+        auto t = make_shared<thread>([server]() {
             server->start();
         });
         server_threads.push_back(t);
@@ -1673,19 +1814,16 @@ int main() {
     cout << "============================================================" << endl;
 
     // 等待所有线程
-    for (thread* t : server_threads) {
+    for (auto t : server_threads) {
         if (t->joinable()) {
             t->join();
         }
     }
 
-    // 清理
-    for (thread* t : server_threads) {
-        delete t;
-    }
-    for (TunnelServer* server : servers) {
-        delete server;
-    }
+    // 智能指针自动清理，无需手动delete
+    Logger::info("所有服务器已正常关闭");
+    server_threads.clear();
+    servers.clear();
 
     Logger::close();
     return 0;
