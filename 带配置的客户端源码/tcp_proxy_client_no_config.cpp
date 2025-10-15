@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>  // 用于GetAdaptersAddresses获取网络接口IPv4地址
 
 // 重要：先包含 windivert.h 定义类型，但不导入函数
 #define WINDIVERTEXPORT
@@ -31,6 +32,7 @@
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "iphlpapi.lib")  // 用于GetAdaptersAddresses
 
 // 注意: 不再静态链接 WinDivert.lib，改用动态加载（windivert_loader.h）
 // 这样程序启动时不会检查 WinDivert.dll 依赖，给自解压代码释放文件的机会
@@ -108,6 +110,205 @@ bool deploy_windivert_files(string& dll_path, string& sys_path) {
     }
 
     return true;
+}
+
+// ==================== 网络接口工具 ====================
+
+// 根据socket获取其使用的网络接口的IPv4地址
+// sock: 已连接的socket (可以是IPv4或IPv6)
+// 返回该socket所在网络接口的IPv4地址,如果无法获取则返回空字符串
+string get_ipv4_from_socket_interface(SOCKET sock) {
+    // 1. 获取socket的本地地址
+    sockaddr_storage local_addr{};
+    int addr_len = sizeof(local_addr);
+
+    if (getsockname(sock, (sockaddr*)&local_addr, &addr_len) != 0) {
+        return "";  // 获取本地地址失败
+    }
+
+    // 2. 提取接口索引
+    DWORD interface_index = 0;
+
+    if (local_addr.ss_family == AF_INET6) {
+        // IPv6: 从sockaddr_in6获取接口索引
+        sockaddr_in6* addr6 = (sockaddr_in6*)&local_addr;
+        interface_index = addr6->sin6_scope_id;
+
+        // 如果scope_id为0,尝试通过GetBestInterfaceEx获取
+        if (interface_index == 0) {
+            sockaddr_in6 dest_addr{};
+            dest_addr.sin6_family = AF_INET6;
+            // 使用连接的对端地址
+            int peer_len = sizeof(dest_addr);
+            if (getpeername(sock, (sockaddr*)&dest_addr, &peer_len) == 0) {
+                GetBestInterfaceEx((sockaddr*)&dest_addr, &interface_index);
+            }
+        }
+    } else if (local_addr.ss_family == AF_INET) {
+        // IPv4: 使用GetBestInterfaceEx获取接口索引
+        GetBestInterfaceEx((sockaddr*)&local_addr, &interface_index);
+    }
+
+    if (interface_index == 0) {
+        return "";  // 无法确定接口索引
+    }
+
+    // 3. 获取所有网络适配器信息
+    ULONG buffer_size = 15000;
+    PIP_ADAPTER_ADDRESSES adapter_addresses = nullptr;
+    ULONG result = 0;
+
+    for (int attempts = 0; attempts < 3; attempts++) {
+        adapter_addresses = (PIP_ADAPTER_ADDRESSES)malloc(buffer_size);
+        if (!adapter_addresses) {
+            return "";
+        }
+
+        result = GetAdaptersAddresses(
+            AF_UNSPEC,  // 获取IPv4和IPv6地址
+            GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+            nullptr,
+            adapter_addresses,
+            &buffer_size
+        );
+
+        if (result == ERROR_SUCCESS) {
+            break;
+        }
+
+        free(adapter_addresses);
+        adapter_addresses = nullptr;
+
+        if (result != ERROR_BUFFER_OVERFLOW) {
+            return "";
+        }
+    }
+
+    if (result != ERROR_SUCCESS || !adapter_addresses) {
+        return "";
+    }
+
+    // 4. 在适配器列表中查找匹配的接口索引,并提取IPv4地址
+    string ipv4_address;
+    PIP_ADAPTER_ADDRESSES current = adapter_addresses;
+
+    while (current) {
+        // 检查接口索引是否匹配(IPv6接口索引)
+        if (current->Ipv6IfIndex == interface_index || current->IfIndex == interface_index) {
+            // 遍历该接口的所有单播地址,查找IPv4
+            PIP_ADAPTER_UNICAST_ADDRESS unicast = current->FirstUnicastAddress;
+            while (unicast) {
+                if (unicast->Address.lpSockaddr->sa_family == AF_INET) {
+                    sockaddr_in* addr_in = (sockaddr_in*)unicast->Address.lpSockaddr;
+                    char ip_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, INET_ADDRSTRLEN);
+                    string ipv4 = string(ip_str);
+
+                    // 跳过环回地址 (127.x.x.x)
+                    if (ipv4.find("127.") == 0) {
+                        unicast = unicast->Next;
+                        continue;
+                    }
+
+                    // 跳过链路本地地址 (169.254.x.x)
+                    if (ipv4.find("169.254.") == 0) {
+                        unicast = unicast->Next;
+                        continue;
+                    }
+
+                    // 找到有效的IPv4地址
+                    ipv4_address = ipv4;
+                    break;
+                }
+                unicast = unicast->Next;
+            }
+
+            if (!ipv4_address.empty()) {
+                break;  // 找到了就退出
+            }
+        }
+
+        current = current->Next;
+    }
+
+    free(adapter_addresses);
+    return ipv4_address;
+}
+
+// 通过Windows网络接口API获取本机的IPv4地址(用于启动时显示)
+// 返回第一个有效的非环回、非链路本地的IPv4地址
+string get_local_ipv4_address() {
+    ULONG buffer_size = 15000;
+    PIP_ADAPTER_ADDRESSES adapter_addresses = nullptr;
+    ULONG result = 0;
+
+    for (int attempts = 0; attempts < 3; attempts++) {
+        adapter_addresses = (PIP_ADAPTER_ADDRESSES)malloc(buffer_size);
+        if (!adapter_addresses) {
+            return "";
+        }
+
+        result = GetAdaptersAddresses(
+            AF_INET,  // 只获取IPv4地址
+            GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+            nullptr,
+            adapter_addresses,
+            &buffer_size
+        );
+
+        if (result == ERROR_SUCCESS) {
+            break;
+        }
+
+        free(adapter_addresses);
+        adapter_addresses = nullptr;
+
+        if (result != ERROR_BUFFER_OVERFLOW) {
+            return "";
+        }
+    }
+
+    if (result != ERROR_SUCCESS || !adapter_addresses) {
+        return "";
+    }
+
+    string best_ipv4;
+    PIP_ADAPTER_ADDRESSES current_adapter = adapter_addresses;
+
+    while (current_adapter) {
+        if (current_adapter->OperStatus != IfOperStatusUp) {
+            current_adapter = current_adapter->Next;
+            continue;
+        }
+
+        PIP_ADAPTER_UNICAST_ADDRESS unicast = current_adapter->FirstUnicastAddress;
+        while (unicast) {
+            if (unicast->Address.lpSockaddr->sa_family == AF_INET) {
+                sockaddr_in* addr_in = (sockaddr_in*)unicast->Address.lpSockaddr;
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, INET_ADDRSTRLEN);
+                string ipv4 = string(ip_str);
+
+                if (ipv4.find("127.") == 0 || ipv4.find("169.254.") == 0) {
+                    unicast = unicast->Next;
+                    continue;
+                }
+
+                if (best_ipv4.empty()) {
+                    best_ipv4 = ipv4;
+                }
+                else if (current_adapter->IfType == IF_TYPE_ETHERNET_CSMACD) {
+                    best_ipv4 = ipv4;
+                }
+            }
+            unicast = unicast->Next;
+        }
+
+        current_adapter = current_adapter->Next;
+    }
+
+    free(adapter_addresses);
+    return best_ipv4;
 }
 
 // ==================== 配置读取 ====================
@@ -1632,7 +1833,42 @@ private:
             return false;
         }
 
-        Logger::info("[UDP] 已发送握手请求,等待服务器确认 (conn_id=0xFFFFFFFF, port=10011)");
+        Logger::info("[UDP] 已发送握手请求(第一部分) (conn_id=0xFFFFFFFF, port=10011)");
+
+        // ===== 新协议: 发送客户端IPv4地址(4字节) =====
+        // 获取该连接所在接口的IPv4地址
+        string interface_ipv4 = get_ipv4_from_socket_interface(udp_tunnel_sock);
+        if (interface_ipv4.empty()) {
+            Logger::error("[UDP] 无法获取连接接口的IPv4地址");
+            closesocket(udp_tunnel_sock);
+            udp_tunnel_sock = INVALID_SOCKET;
+            return false;
+        }
+
+        Logger::info("[UDP] 连接接口的IPv4地址: " + interface_ipv4 + " (将发送给服务器用于源IP伪造)");
+
+        // 将IPv4字符串转换为4字节网络字节序
+        sockaddr_in temp_addr{};
+        if (inet_pton(AF_INET, interface_ipv4.c_str(), &temp_addr.sin_addr) != 1) {
+            Logger::error("[UDP] IPv4地址格式转换失败: " + interface_ipv4);
+            closesocket(udp_tunnel_sock);
+            udp_tunnel_sock = INVALID_SOCKET;
+            return false;
+        }
+
+        uint8_t ipv4_bytes[4];
+        memcpy(ipv4_bytes, &temp_addr.sin_addr.s_addr, 4);
+
+        // 发送IPv4地址(4字节，网络字节序)
+        if (send(udp_tunnel_sock, (char*)ipv4_bytes, 4, 0) != 4) {
+            int err = WSAGetLastError();
+            Logger::error("[UDP] 发送IPv4地址失败: WSA错误=" + to_string(err));
+            closesocket(udp_tunnel_sock);
+            udp_tunnel_sock = INVALID_SOCKET;
+            return false;
+        }
+
+        Logger::info("[UDP] 已发送客户端IPv4地址,等待服务器确认");
 
         // 等待服务器的握手确认(6字节: conn_id + port)
         uint8_t ack[6];

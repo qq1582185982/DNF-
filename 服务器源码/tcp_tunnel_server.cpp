@@ -916,8 +916,27 @@ private:
 
             if (conn_id == UDP_MAGIC) {
                 Logger::info("[UDP Tunnel] ✓ 识别为UDP Tunnel连接!");
-                Logger::info("[UDP Tunnel] 收到UDP握手请求: 客户端=" + client_str +
+                Logger::info("[UDP Tunnel] 收到UDP握手请求(第一部分): 客户端=" + client_str +
                            ", 游戏端口=" + to_string(dst_port));
+
+                // ===== 新协议: 接收客户端IPv4地址(4字节) =====
+                uint8_t ipv4_bytes[4];
+                int ip_received = recv(client_fd, ipv4_bytes, 4, MSG_WAITALL);
+                if (ip_received != 4) {
+                    Logger::error("[UDP Tunnel] 握手失败: 未接收到客户端IPv4地址 (received=" +
+                                to_string(ip_received) + ")");
+                    close(client_fd);
+                    return;
+                }
+
+                // 将IPv4字节转换为字符串
+                char ipv4_str[INET_ADDRSTRLEN];
+                struct in_addr ipv4_addr;
+                memcpy(&ipv4_addr, ipv4_bytes, 4);
+                inet_ntop(AF_INET, &ipv4_addr, ipv4_str, INET_ADDRSTRLEN);
+                string client_ipv4 = string(ipv4_str);
+
+                Logger::info("[UDP Tunnel] 收到客户端IPv4地址: " + client_ipv4 + " (将用于源IP伪造)");
 
                 // 发送UDP握手确认响应(与TCP握手相同的6字节格式)
                 uint8_t ack[6];
@@ -932,7 +951,7 @@ private:
 
                 Logger::info("[UDP Tunnel] 握手成功,已发送确认");
                 Logger::info("[UDP Tunnel] 调用 handle_udp_tunnel()");
-                handle_udp_tunnel(client_fd, client_str, dst_port);
+                handle_udp_tunnel(client_fd, client_ipv4, dst_port);
                 Logger::info("[UDP Tunnel] handle_udp_tunnel()函数已返回");
                 return;
             }
