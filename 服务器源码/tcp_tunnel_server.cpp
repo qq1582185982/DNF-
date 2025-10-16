@@ -725,6 +725,12 @@ public:
 private:
     // 完整实现sendall（确保所有数据发送完成）
     bool sendall(int fd, const uint8_t* data, int len) {
+        // v5.1: 检查fd有效性，防止向已关闭的socket发送数据导致崩溃
+        if (fd < 0) {
+            Logger::error("[连接" + to_string(conn_id) + "] sendall失败: fd=" + to_string(fd) + " 无效");
+            return false;
+        }
+
         int sent = 0;
         while (sent < len) {
             int ret = send(fd, data + sent, len - sent, 0);
@@ -801,6 +807,15 @@ private:
                                             real_ip + " -> " + proxy_local_ip +
                                             " (替换" + to_string(replaced) + "处)");
                             }
+                        }
+
+                        // v5.1: 转发前检查连接状态和socket有效性
+                        if (!running || game_fd < 0) {
+                            Logger::info("[连接" + to_string(conn_id) + "] 连接已关闭 (running=" +
+                                       string(running ? "true" : "false") + ", game_fd=" +
+                                       to_string(game_fd) + ")，停止转发");
+                            running = false;
+                            break;
                         }
 
                         // 转发到游戏服务器 - sendall
@@ -896,10 +911,19 @@ private:
                                     "字节，距今 " + to_string(time_since_last) + "ms");
                     }
 
-                    // 半关闭：只关闭游戏socket的读取方向，不设置running=false
-                    shutdown(game_fd, SHUT_RD);
-                    Logger::debug("[连接" + to_string(conn_id) + "] 已关闭游戏socket读取方向(SHUT_RD)");
-                    break;  // 只退出本线程，不影响客户端→游戏转发
+                    // v5.1: 游戏服务器关闭后，完全关闭game_fd防止继续发送数据
+                    // 之前的半关闭方案(SHUT_RD)会导致client_to_game继续向已关闭的socket发送数据
+                    // 从而在析构时触发sendall(-1)崩溃
+                    shutdown(game_fd, SHUT_RDWR);
+                    Logger::debug("[连接" + to_string(conn_id) + "] shutdown游戏socket (SHUT_RDWR)");
+
+                    close(game_fd);
+                    int closed_fd = game_fd;
+                    game_fd = -1;  // 设置为-1，让client_to_game线程的检查能够发现
+                    Logger::info("[连接" + to_string(conn_id) + "] 已关闭游戏socket fd=" + to_string(closed_fd) +
+                               "，client_to_game线程将在下次发送时检测到并停止");
+
+                    break;  // 退出game_to_client线程
                 }
 
                 // 记录接收时间和大小
