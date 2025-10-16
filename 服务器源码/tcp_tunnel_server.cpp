@@ -1,4 +1,9 @@
 /*
+ * DNF 隧道服务器 - C++ 版本 v5.1
+ * v5.1更新: 配合客户端v12.2.0流式转发优化
+ *          - recv缓冲区 4KB → 64KB
+ *          - socket缓冲区增大到256KB
+ *          - 提升吞吐量，降低延迟
  * DNF 隧道服务器 - C++ 版本 v5.0
  * 完全按照Python版本架构重写
  * 支持 TCP + UDP 双协议转发
@@ -657,7 +662,13 @@ public:
 
                 // 禁用Nagle算法
                 setsockopt(game_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-                Logger::debug("[连接" + to_string(conn_id) + "] 已设置TCP_NODELAY");
+
+                // v12.2.0: 增大socket缓冲区，配合客户端流式转发
+                int buf_size = 262144;  // 256KB
+                setsockopt(game_fd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
+                setsockopt(game_fd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
+
+                Logger::debug("[连接" + to_string(conn_id) + "] 已设置TCP_NODELAY + 256KB缓冲区");
 
                 Logger::debug("[连接" + to_string(conn_id) + "] 正在连接游戏服务器 " +
                              game_server_ip + ":" + to_string(game_port));
@@ -683,8 +694,11 @@ public:
                 return false;
             }
 
-            // 客户端socket也禁用Nagle
+            // 客户端socket也禁用Nagle并增大缓冲区
             setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+            int buf_size = 262144;  // 256KB
+            setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
+            setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
 
             Logger::info("[连接" + to_string(conn_id) + "] 已连接到游戏服务器 " +
                         game_server_ip + ":" + to_string(game_port) + " (TCP_NODELAY)");
@@ -745,7 +759,7 @@ private:
     // 线程1：转发客户端→游戏服务器（完全按照Python版本）
     void forward_client_to_game() {
         vector<uint8_t> buffer;
-        uint8_t recv_buf[4096];  // 与Python版本一致
+        uint8_t recv_buf[65536];  // v12.2.0: 增大到64KB，配合流式转发
 
         Logger::debug("[连接" + to_string(conn_id) + "] 客户端→游戏转发线程已启动");
 
@@ -880,7 +894,7 @@ private:
 
     // 线程2：转发游戏服务器→客户端（完全按照Python版本）
     void forward_game_to_client() {
-        uint8_t buffer[4096];  // 与Python版本一致
+        uint8_t buffer[65536];  // v12.2.0: 增大到64KB，配合流式转发
 
         Logger::debug("[连接" + to_string(conn_id) + "] 游戏→客户端转发线程已启动");
 
@@ -930,10 +944,10 @@ private:
                 last_recv_time = chrono::system_clock::now();
                 last_recv_size = n;
 
-                // **v3.5.4: 添加边界检查**
-                if (n > 4096) {
+                // **v3.5.4: 添加边界检查** (v5.1: 更新为65536)
+                if (n > 65536) {
                     Logger::error("[连接" + to_string(conn_id) + "] [!!!CRITICAL!!!] recv()返回异常大小: " +
-                                to_string(n) + " > 4096,这是不可能的!buffer大小只有4096!");
+                                to_string(n) + " > 65536,这是不可能的!buffer大小只有65536!");
                     Logger::error("[连接" + to_string(conn_id) + "] 这表明内存已损坏或n被篡改,立即停止转发");
                     running = false;
                     break;
@@ -984,7 +998,7 @@ private:
                 }
 
                 // 封装协议：msg_type(1) + conn_id(4) + data_len(2) + payload
-                uint8_t response[4096 + 7];
+                uint8_t response[65536 + 7];  // v12.2.0: 配合更大的缓冲区
                 response[0] = 0x01;
                 *(uint32_t*)(response + 1) = htonl(conn_id);
                 *(uint16_t*)(response + 5) = htons(n);

@@ -1,6 +1,15 @@
 /*
- * DNF游戏代理客户端 - C++ 版本 v12.0 (虚拟网卡自动配置)
+ * DNF游戏代理客户端 - C++ 版本 v12.2.0 (流式转发优化)
  * 从自身exe末尾读取配置
+ *
+ * v12.2.0更新: 流式转发优化 ⭐ 解决组队延迟
+ *             - 移除人为流控限制（窗口从245→65535字节）
+ *             - 彻底解决组队/频道延迟问题
+ *             - 启动握手测试，避免首次连接失败
+ *
+ * v12.1.0更新: 动态IP配置
+ *             - 根据游戏服务器IP自动计算辅助IP（同网段.252）
+ *             - 支持任意网段切换
  *
  * v12.0更新: 虚拟网卡自动配置 ⭐ 最终完善版本
  *            新增功能: 程序启动时自动检测和配置虚拟网卡
@@ -1223,7 +1232,7 @@ bool auto_setup_loopback_adapter(const string& primary_ip, const string& seconda
     cout << endl;
 
     Logger::info("========================================");
-    Logger::info("虚拟网卡自动配置 (v12.1.0)");
+    Logger::info("虚拟网卡自动配置 (v12.2.0)");
     Logger::info("  主IP（游戏服务器）: " + primary_ip);
     Logger::info("  辅助IP（虚拟客户端）: " + secondary_ip);
     Logger::info("========================================");
@@ -1412,14 +1421,19 @@ public:
           tunnel_sock(INVALID_SOCKET), running(false), established(false), closing(false),
           last_window_probe_time(0), window_zero_start_time(0), window_probe_logged(false) {
 
-        // 根据端口设置窗口
-        if (dport == 10011) {
-            data_window = 245;
-        } else if (dport == 7001) {
-            data_window = 228;
-        } else {
-            data_window = 229;
-        }
+        // v12.2.0: 流式转发 - 移除人为流控，使用最大窗口
+        // 原因: 小窗口(245字节)导致组队时延迟严重，频繁触发窗口探测
+        // 改为65535字节，让TCP协议栈自己管理流量，延迟降到最低
+        data_window = 65535;  // 使用TCP最大窗口，彻底解决组队延迟
+
+        // 旧代码（保留注释供参考）：
+        // if (dport == 10011) {
+        //     data_window = 245;   // 频道服务器，组队时会阻塞
+        // } else if (dport == 7001) {
+        //     data_window = 228;   // 登录服务器
+        // } else {
+        //     data_window = 229;   // 其他端口
+        // }
     }
 
     ~TCPConnection() {
@@ -2697,7 +2711,7 @@ private:
         if (g_loopback_adapter_ifidx > 0) {
             // 使用动态虚拟客户端IP（从配置自动计算的辅助IP）
             interface_ipv4 = secondary_ip;
-            Logger::info("[UDP] v12.1.0 使用虚拟客户端IP: " + interface_ipv4 + " (payload中的客户端IP)");
+            Logger::info("[UDP] v12.2.0 使用虚拟客户端IP: " + interface_ipv4 + " (payload中的客户端IP)");
         } else {
             // 获取该连接所在接口的IPv4地址
             interface_ipv4 = get_ipv4_from_socket_interface(udp_tunnel_sock);
@@ -2971,7 +2985,7 @@ int main() {
     }
 
     cout << "============================================================" << endl;
-    cout << "DNF游戏代理客户端 v12.1.0 (C++ 版本 - 动态IP配置)" << endl;
+    cout << "DNF游戏代理客户端 v12.2.0 (C++ 版本 - 流式转发)" << endl;
     cout << "编译时间: " << __DATE__ << " " << __TIME__ << endl;
     cout << "============================================================" << endl;
     cout << endl;
