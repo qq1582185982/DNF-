@@ -553,6 +553,112 @@ ofstream Logger::log_file;
 bool Logger::file_enabled = false;
 string Logger::current_log_level = "INFO";
 
+// ==================== 启动握手测试 ====================
+// 在程序启动时主动连接隧道服务器进行握手测试
+// 目的：预热整个代理链路，避免第一次连接失败
+bool test_tunnel_handshake(const string& tunnel_ip, uint16_t tunnel_port) {
+    cout << "[启动测试] 正在测试到隧道服务器的连接..." << endl;
+    Logger::info("[启动测试] 开始握手测试 -> " + tunnel_ip + ":" + to_string(tunnel_port));
+
+    // 使用getaddrinfo支持域名/IPv4/IPv6
+    struct addrinfo hints{}, *result = nullptr, *rp = nullptr;
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;      // 允许IPv4或IPv6
+    hints.ai_socktype = SOCK_STREAM;  // TCP
+    hints.ai_protocol = IPPROTO_TCP;
+
+    string port_str = to_string(tunnel_port);
+    int ret = getaddrinfo(tunnel_ip.c_str(), port_str.c_str(), &hints, &result);
+    if (ret != 0) {
+        cout << "[启动测试] ✗ DNS解析失败: " << tunnel_ip << endl;
+        Logger::error("[启动测试] DNS解析失败: " + tunnel_ip + " (错误: " + to_string(ret) + ")");
+        return false;
+    }
+
+    // 尝试连接所有解析结果
+    SOCKET test_sock = INVALID_SOCKET;
+    bool connected = false;
+
+    for (rp = result; rp != nullptr; rp = rp->ai_next) {
+        test_sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (test_sock == INVALID_SOCKET) {
+            continue;
+        }
+
+        Logger::debug("[启动测试] 尝试连接 (协议: " +
+                     string(rp->ai_family == AF_INET ? "IPv4" : "IPv6") + ")");
+
+        // 设置连接超时
+        DWORD timeout = 5000;  // 5秒超时
+        setsockopt(test_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+        setsockopt(test_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+
+        if (connect(test_sock, rp->ai_addr, (int)rp->ai_addrlen) != SOCKET_ERROR) {
+            connected = true;
+            Logger::debug("[启动测试] 连接成功");
+            break;
+        }
+
+        Logger::debug("[启动测试] 连接失败，尝试下一个地址");
+        closesocket(test_sock);
+        test_sock = INVALID_SOCKET;
+    }
+
+    freeaddrinfo(result);
+
+    if (!connected || test_sock == INVALID_SOCKET) {
+        cout << "[启动测试] ✗ 无法连接到隧道服务器" << endl;
+        Logger::error("[启动测试] 所有连接尝试均失败");
+        return false;
+    }
+
+    // 发送测试握手包: conn_id(4)=0 + dst_port(2)=65535 (特殊标记表示测试连接)
+    uint8_t handshake[6];
+    *(uint32_t*)handshake = htonl(0);      // conn_id=0 表示测试
+    *(uint16_t*)(handshake + 4) = htons(65535);  // port=65535 表示测试
+
+    if (send(test_sock, (char*)handshake, 6, 0) != 6) {
+        cout << "[启动测试] ✗ 发送测试握手失败" << endl;
+        Logger::error("[启动测试] 发送握手包失败");
+        closesocket(test_sock);
+        return false;
+    }
+
+    Logger::debug("[启动测试] 已发送测试握手包");
+
+    // 等待服务器响应（或超时）
+    // 服务器可能会发送确认或直接关闭连接，两种情况都算成功
+    uint8_t response[64];
+    int recv_len = recv(test_sock, (char*)response, sizeof(response), 0);
+
+    closesocket(test_sock);
+
+    if (recv_len > 0) {
+        cout << "[启动测试] ✓ 隧道服务器响应正常 (收到 " << recv_len << " 字节)" << endl;
+        Logger::info("[启动测试] 收到服务器响应: " + to_string(recv_len) + "字节");
+    } else if (recv_len == 0) {
+        // 服务器关闭连接，这也是正常的（说明连接建立成功）
+        cout << "[启动测试] ✓ 隧道服务器连接正常 (连接已建立)" << endl;
+        Logger::info("[启动测试] 服务器接受连接并关闭");
+    } else {
+        // 超时或错误，但连接已建立，仍然算成功
+        int err = WSAGetLastError();
+        if (err == WSAETIMEDOUT) {
+            cout << "[启动测试] ✓ 隧道服务器连接正常 (超时，但连接已建立)" << endl;
+            Logger::info("[启动测试] 接收超时，但TCP连接已成功建立");
+        } else {
+            cout << "[启动测试] ⚠ 连接已建立，但接收时出错 (错误码: " << err << ")" << endl;
+            Logger::warning("[启动测试] 接收错误: " + to_string(err) + "，但连接已建立");
+        }
+    }
+
+    Logger::info("[启动测试] ========================================");
+    Logger::info("[启动测试] 握手测试完成，代理链路就绪");
+    Logger::info("[启动测试] ========================================");
+
+    return true;
+}
+
 // ==================== IP地址计算工具 ====================
 
 // 计算辅助IP（同网段的.252，避免与用户网络冲突）
@@ -2871,7 +2977,7 @@ int main() {
     cout << endl;
 
     // ========== 步骤1: 读取配置（获取游戏服务器IP） ==========
-    cout << "[步骤1/4] 读取配置..." << endl;
+    cout << "[步骤1/5] 读取配置..." << endl;
     string GAME_SERVER_IP;
     string TUNNEL_SERVER_IP;
     int TUNNEL_PORT;
@@ -2893,7 +2999,7 @@ int main() {
     cout << endl;
 
     // ========== 步骤2: 计算辅助IP ==========
-    cout << "[步骤2/4] 计算虚拟网卡IP分配方案..." << endl;
+    cout << "[步骤2/5] 计算虚拟网卡IP分配方案..." << endl;
     string SECONDARY_IP = calculate_secondary_ip(GAME_SERVER_IP);
     if (SECONDARY_IP.empty()) {
         cout << "错误: 无法计算辅助IP地址" << endl;
@@ -2909,7 +3015,7 @@ int main() {
     cout << endl;
 
     // ========== 步骤3: 配置虚拟网卡（使用动态IP） ==========
-    cout << "[步骤3/4] 配置虚拟网卡..." << endl;
+    cout << "[步骤3/5] 配置虚拟网卡..." << endl;
     if (!auto_setup_loopback_adapter(GAME_SERVER_IP, SECONDARY_IP)) {
         cout << "错误: 虚拟网卡配置失败，程序无法继续运行" << endl;
         Logger::error("虚拟网卡配置失败");
@@ -2919,7 +3025,7 @@ int main() {
     }
 
     // ========== 步骤4: 部署WinDivert ==========
-    cout << "[步骤4/4] 部署WinDivert组件..." << endl;
+    cout << "[步骤4/5] 部署WinDivert组件..." << endl;
     string dll_path, sys_path;
     if (!deploy_windivert_files(dll_path, sys_path)) {
         cout << "错误: WinDivert 组件部署失败" << endl;
@@ -2955,6 +3061,34 @@ int main() {
         return 1;
     }
 
+    cout << "✓ 代理客户端已启动" << endl;
+    cout << endl;
+
+    // ========== 步骤5: 启动握手测试 ==========
+    cout << "[步骤5/5] 测试代理链路..." << endl;
+    if (!test_tunnel_handshake(TUNNEL_SERVER_IP, TUNNEL_PORT)) {
+        cout << endl;
+        cout << "⚠ 警告: 握手测试失败！" << endl;
+        cout << "可能的原因:" << endl;
+        cout << "  1. 隧道服务器未启动或网络不通" << endl;
+        cout << "  2. 防火墙阻止了连接" << endl;
+        cout << "  3. 服务器地址或端口配置错误" << endl;
+        cout << endl;
+        cout << "您可以:" << endl;
+        cout << "  - 按任意键继续运行(可能无法正常工作)" << endl;
+        cout << "  - 或按Ctrl+C退出并检查网络/服务器配置" << endl;
+        cout << endl;
+        Logger::warning("握手测试失败，但允许继续运行");
+        system("pause");
+    } else {
+        cout << "✓ 代理链路测试通过" << endl;
+    }
+
+    cout << endl;
+    cout << "============================================================" << endl;
+    cout << "✓ 系统就绪！现在可以启动游戏了" << endl;
+    cout << "============================================================" << endl;
+    cout << endl;
     cout << "按Ctrl+C退出..." << endl;
     client.wait();
 
