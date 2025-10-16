@@ -1,5 +1,5 @@
 /*
- * DNF 隧道服务器 - C++ 版本 v3.8.0
+ * DNF 隧道服务器 - C++ 版本 v5.0
  * 完全按照Python版本架构重写
  * 支持 TCP + UDP 双协议转发
  * 支持多端口/多游戏服务器
@@ -17,6 +17,156 @@
  * v3.6.3更新: 修复僵尸线程FD复用bug - detach后等待500ms确保线程退出,防止FD被新连接复用
  * v3.7.0-v3.7.1更新: 尝试各种方案，全部失败 - 时序问题无法解决
  * v3.8.0更新: 最终可靠方案 - 不使用shared_ptr，改用原始指针+手动内存管理
+ * v4.5.0更新: 🎯UDP NAT穿透方案 - payload IP替换
+ *             问题分析: Raw Socket伪造源IP方案过于复杂,需要路由、ARP配置
+ *                      且游戏服务器在内网,响应公网IP的包会路由到网关丢失
+ *             新方案: 使用代理服务器IP(192.168.2.75)作为源IP发送UDP
+ *                    游戏服务器响应能正常返回代理服务器
+ *                    在响应payload中查找并替换代理IP为客户端公网IP
+ *                    游戏协议是明文,IP替换安全可靠
+ *             核心机制: 1. 记录TCP连接源IP(客户端公网IP: 222.187.12.82)
+ *                      2. UDP发送使用普通socket(源IP自动=192.168.2.75)
+ *                      3. 响应接收后,替换payload中的192.168.2.75为222.187.12.82
+ *                      4. 支持大端序和小端序IP格式
+ * v4.6.0更新: 🎯修复UDP源端口问题 - bind到客户端源端口（失败）
+ *             问题: 按目标端口创建socket,多个目标端口bind同一源端口冲突
+ *             结果: 只有第一个socket成功bind,后续使用随机端口,游戏服务器返回错误端口
+ * v4.7.0更新: 🎯重构UDP socket管理架构 - 按源端口创建socket
+ *             问题根源: 客户端使用单个UDP socket(bind 5063)向多个目标端口发送
+ *                      v4.6.0为每个目标端口创建socket,都尝试bind 5063导致冲突
+ *                      第二个socket bind失败,使用系统随机端口(如45952)
+ *             解决方案: 彻底重构UDP socket管理
+ *                      - 数据结构: udp_sockets[src_port], flow_metadata[(src_port,dst_port)]
+ *                      - 每个源端口只创建一个socket并bind
+ *                      - 一个接收线程处理该源端口的所有流量
+ *                      - 通过recvfrom()的from_addr判断响应来自哪个游戏服务器端口
+ *                      - 根据(src_port,dst_port)查找对应conn_id封装响应
+ *             结果: 端口正确了(5063),但游戏服务器仍返回7字节格式
+ * v4.7.1更新: 🎯扩展7字节UDP响应为18字节格式（错误方案）
+ *             问题根源: 游戏服务器检测到通过代理连接(无TCP上下文关联)
+ *                      返回简化的7字节格式: 02 [IP:4] [Port:2]
+ *                      客户端期望18字节格式,收到7字节后拒绝并持续重试
+ *             解决方案: 在代理服务器检测到7字节响应时自动扩展
+ *             结果: 错误！通过分析直连抓包发现游戏服务器本就返回7字节，不需要扩展
+ * v4.7.2更新: 🎯UDP握手响应IP替换 - 替换为游戏服务器公网IP（错误方案）
+ *             解决方案: 将内网IP替换为game_server_ip(1.87.211.199)
+ *             结果: 错误！通过分析直连抓包发现应该返回客户端自己的公网IP
+ *                  UDP握手响应的作用是NAT穿透验证，回显客户端的公网IP和端口
+ * v4.7.3更新: 🎯UDP握手响应IP替换 - 替换为客户端公网IP（正确方案）
+ *             问题根源: 游戏服务器UDP握手响应用于NAT穿透验证
+ *                      格式: 02 + 客户端公网IP(4字节,DNF字节序) + 客户端端口(2字节)
+ *                      游戏服务器在内网，看到的是代理服务器IP(192.168.x.x)
+ *                      客户端期望看到自己真实的公网IP才能验证通过
+ *             解决方案: 1. 移除v4.7.1的7→18字节扩展逻辑（不需要）
+ *                      2. 检测UDP握手响应(0x02开头)
+ *                      3. 提取IP字段(DNF字节序)，判断是否内网IP
+ *                      4. 如果是内网IP，替换为client_public_ip（TCP连接源IP）
+ *             预期效果: 客户端收到自己的公网IP和端口
+ *                      验证通过，发送0x05成功确认
+ *                      UDP握手完成！
+ *             测试结果: ✗ 仍然失败！原因分析见v4.8.0
+ * v4.8.0更新: 🎯UDP源IP欺骗 - bind到客户端真实IP而非代理IP（局域网方案）
+ *             问题根源: v4.7.3虽然替换了响应payload中的IP，但这不是关键
+ *                      真正原因: 游戏服务器根据UDP包的**源IP地址**计算握手响应的最后2字节
+ *             解决方案: UDP源IP欺骗（IP Spoofing）
+ *                      1. socket创建后设置IP_TRANSPARENT选项（允许bind到非本地IP）
+ *                      2. bind时使用client_ipv4（客户端真实IP，来自握手payload）
+ *                      3. sendto时UDP包的源IP = 客户端IP而非代理IP
+ *             技术细节: 需要root权限或CAP_NET_ADMIN能力
+ *             适用场景: ✓ 同一局域网（客户端、代理、游戏服务器在同一网段）
+ *                      ✗ 跨网络（响应会被路由到客户端真实网络，代理收不到）
+ * v4.9.0更新: 🎯UDP握手响应端口替换 - 支持异地访问（最终完整方案）
+ *             算法发现: 通过多次直连抓包分析，逆向出算法：
+ *                      **UDP握手响应最后2字节 = UDP源端口（小端序）**
+ *                      - 客户端端口5063  → 响应 c7 13 (小端=0x13c7=5063) ✓
+ *                      - 客户端端口51003 → 响应 3b c7 (小端=0xc73b=51003) ✓
+ *             问题根源: 异地访问时，代理用自己的端口发送UDP
+ *                      游戏服务器返回基于代理端口的值
+ *                      客户端期望基于自己源端口的值 → 不匹配失败
+ *             解决方案: 代理端重新计算最后2字节
+ *                      1. 代理用自己的IP和端口发送UDP（正常发送，不做源IP欺骗）
+ *                      2. 游戏服务器返回基于代理端口的握手响应
+ *                      3. 代理检测UDP握手响应（0x02开头，7字节）
+ *                      4. **关键**：直接替换最后2字节为客户端源端口（小端序）
+ *                      5. 转发给客户端，客户端验证通过
+ *             技术优势: - 无需root权限或特殊能力
+ *                      - 支持任意网络拓扑（同一局域网、跨网络、跨地域）
+ *                      - 代理可部署在任何位置
+ *                      - 算法简单可靠，只需端口值替换
+ *             适用场景: ✓ 所有场景（局域网、异地、公网、内网）
+ *             测试验证: ✓ 内网直连成功（192.168.2.35 → 192.168.2.106）
+ *                      ✓ 算法验证成功（多组IP/端口测试）
+ * v4.9.1更新: 🔥修复v4.9.0遗漏问题 - 同时替换IP字段和端口字段
+ *             问题发现: v4.9.0实际测试发现，虽然端口替换正确，但客户端仍然失败
+ *                      原因：v4.9.0只替换了端口，没有替换IP字段
+ *                      握手响应格式: 02 + IP(4字节,DNF字节序) + Port(2字节,小端序)
+ *                      - 服务器返回IP=192.168.2.75（代理服务器IP）
+ *                      - 客户端期望IP=192.168.2.35（自己的IP）
+ *                      - 客户端收到错误IP，继续发送01重试
+ *             完整算法: **IP字段 = UDP包源IP**，**端口字段 = UDP包源端口**
+ *                      游戏服务器完全基于UDP包源地址（IP:Port）计算响应
+ *             v4.9.1方案: 同时替换IP和端口两个字段
+ *                      1. 检测UDP握手响应（0x02开头，7字节）
+ *                      2. 解析服务器返回的IP（DNF字节序）和端口（小端序）
+ *                      3. **关键**：替换IP字段为客户端private_ip（DNF字节序）
+ *                      4. **关键**：替换端口字段为客户端源端口（小端序）
+ *                      5. 转发给客户端，客户端验证通过
+ *             测试验证: v4.9.0测试失败（只替换端口不够）
+ *                      v4.9.1测试失败（用错了IP）
+ * v4.9.2更新: 💯修复v4.9.1致命错误 - 使用TCP连接源IP而非payload中的IP
+ *             问题发现: v4.9.1测试失败，payload替换正确但客户端仍重试
+ *                      对比内网直连成功案例：
+ *                      - 内网直连: TCP源IP=192.168.2.35, UDP握手响应IP=192.168.2.35 ✓
+ *                      - v4.9.1代理: TCP源IP=192.168.2.1, UDP握手响应IP=192.168.2.35 ✗
+ *             根本原因: 客户端验证逻辑: **UDP握手响应IP 必须等于 TCP连接源IP**
+ *                      v4.9.1用了payload中的private_ip（192.168.2.35）
+ *                      但客户端经过NAT后，TCP源IP是网关IP（192.168.2.1）
+ *                      客户端验证: 192.168.2.35 != 192.168.2.1 → 失败重试
+ *             v4.9.2方案: 使用TCP连接源IP（client_public_ip）
+ *                      1. 从TCP连接获取真实源IP（可能经过NAT）
+ *                      2. UDP握手响应替换为TCP源IP和客户端源端口
+ *                      3. 客户端验证: UDP响应IP == TCP连接IP → 成功！
+ *             关键修改: client_private_ip → client_public_ip
+ *             测试验证: v4.9.1测试失败（用错IP来源）
+ *                      v4.9.2测试失败（游戏服务器验证失败）
+ * v5.0更新:  🎯终极方案 - 完整双向IP替换，让游戏服务器认为客户端就是代理服务器
+ *             问题根源: 通过抓包分析直连成功案例，发现游戏服务器的验证逻辑：
+ *                      **所有层面的IP必须完全一致**
+ *                      直连时: TCP源IP=192.168.2.35, UDP源IP=192.168.2.35,
+ *                             UDP握手响应payload IP=192.168.2.35 (全部一致✓)
+ *                      v4.9.x代理: TCP源IP=192.168.2.1(NAT), UDP源IP=192.168.2.75(代理),
+ *                                 TCP payload IP=192.168.2.35(客户端) (三个IP都不同✗)
+ *                      游戏服务器验证: UDP源IP == TCP payload中的IP → 不匹配 → 拒绝服务
+ *             v5.0完整方案: **双向IP替换 - 让游戏服务器认为所有流量来自代理IP**
+ *                      客户端→游戏服务器:
+ *                        1. TCP payload中的IP: 192.168.2.35 → 192.168.2.75(代理IP)
+ *                        2. UDP payload中的IP: 192.168.2.35 → 192.168.2.75(代理IP)
+ *                        3. UDP包源IP: 自然是192.168.2.75(代理bind到INADDR_ANY)
+ *                      游戏服务器→客户端:
+ *                        4. TCP payload中的IP: 192.168.2.75 → 192.168.2.35(客户端IP)
+ *                        5. UDP握手响应中的IP: 192.168.2.75 → 192.168.2.35(客户端IP)
+ *             技术实现: 1. TCP转发添加双向IP替换（客户端↔游戏服务器）
+ *                      2. UDP已有替换逻辑，修改替换方向（客户端IP→代理IP）
+ *                      3. UDP握手响应替换（代理IP→客户端IP）
+ *             关键优势: - 无需root权限（不使用IP_TRANSPARENT）
+ *                      - 支持跨网络、跨地域部署
+ *                      - 游戏服务器看到的所有IP都是代理IP（一致性验证通过）
+ *                      - 客户端看到的所有IP都是自己的IP（无感知）
+ *             实现完成: ✅ TCP双向IP替换 (TunnelConnection类)
+ *                      ✅ UDP双向IP替换 (handle_udp_tunnel函数)
+ *                      ✅ 自动获取代理本地IP (get_local_ip函数)
+ *                      ✅ TCP源IP到真实IPv4映射 (client_ip_map)
+ *                      ✅ IPv4/IPv6双栈支持，正确提取TCP源IP
+ *             工作流程: 1. 客户端建立TCP连接（可能在UDP tunnel之前）
+ *                      2. 客户端建立UDP tunnel，发送真实IPv4
+ *                      3. 服务器存储 TCP源IP → 真实IPv4 映射
+ *                      4. TCP转发时动态查询映射，获取真实IPv4
+ *                      5. 所有TCP/UDP payload双向替换IP
+ *             关键机制: - TCP连接持有映射指针，支持动态查询
+ *                      - 首次查询后缓存结果，避免重复查询
+ *                      - 兼容TCP连接早于UDP tunnel建立的情况
+ *             测试验证: v4.9.2测试失败（游戏服务器拒绝服务）
+ *                      v5.0已完整实现（等待测试验证）
  * 编译: g++ -O2 -pthread tcp_tunnel_server.cpp -o dnf-tunnel-server
  * 静态编译: g++ -O2 -static -pthread tcp_tunnel_server.cpp -o dnf-tunnel-server
  */
@@ -50,23 +200,6 @@
 #include <execinfo.h>
 
 using namespace std;
-
-// ==================== UDP伪造源IP辅助函数(前向声明) ====================
-// 计算IP/UDP校验和
-uint16_t calculate_checksum(uint16_t *data, int len) {
-    uint32_t sum = 0;
-    while (len > 1) {
-        sum += *data++;
-        len -= 2;
-    }
-    if (len == 1) {
-        sum += *(uint8_t*)data;
-    }
-    while (sum >> 16) {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    return ~sum;
-}
 
 // 前向声明Logger类
 class Logger;
@@ -193,94 +326,155 @@ mutex Logger::log_mutex;
 bool Logger::file_enabled = false;
 string Logger::current_log_level = "INFO";
 
-// ==================== UDP伪造源IP发送函数 ====================
-// 使用Raw Socket伪造源IP发送UDP数据包
-// client_ip: 真实客户端IP (伪造的源IP)
-// client_port: 客户端端口
-// game_ip: 游戏服务器IP (目标IP)
-// game_port: 游戏服务器端口
-// payload: UDP载荷数据
-bool send_udp_spoofed(const string& client_ip, uint16_t client_port,
-                      const string& game_ip, uint16_t game_port,
-                      const uint8_t* payload, size_t payload_len) {
+// ==================== IP替换辅助函数 ====================
+// 在payload中查找并替换IP地址(支持大端序和小端序)
+// payload: 数据载荷
+// payload_len: 数据长度
+// old_ip: 要替换的IP地址(如"192.168.2.75")
+// new_ip: 新的IP地址(如"222.187.12.82")
+// 返回: 替换次数
+int replace_ip_in_payload(uint8_t* payload, size_t payload_len,
+                         const string& old_ip, const string& new_ip) {
+    // 检查payload是否足够大(至少4字节才可能包含IP)
+    if (payload_len < 4) {
+        Logger::debug("[IP替换] payload太小(" + to_string(payload_len) +
+                     "字节),跳过IP替换");
+        return 0;
+    }
+
+    // 将IP字符串转换为字节
+    struct in_addr old_addr, new_addr;
+    if (inet_pton(AF_INET, old_ip.c_str(), &old_addr) != 1 ||
+        inet_pton(AF_INET, new_ip.c_str(), &new_addr) != 1) {
+        Logger::error("[IP替换] IP地址格式错误: " + old_ip + " -> " + new_ip);
+        return 0;
+    }
+
+    // 提取IP的4个字节(网络字节序,大端序)
+    uint8_t* old_bytes = (uint8_t*)&old_addr.s_addr;
+    uint8_t* new_bytes = (uint8_t*)&new_addr.s_addr;
+
+    // 构造各种格式
+    uint32_t old_ip_be = old_addr.s_addr;  // 大端序(网络字节序)
+    uint32_t new_ip_be = new_addr.s_addr;
+
+    // DNF逐字节反向格式: a.b.c.d -> d c b a
+    // 修复v4.5.4: 字节序列[d c b a]在小端系统读取为uint32_t时，需要按正序组合
+    uint32_t old_ip_reversed = (old_bytes[0] << 24) | (old_bytes[1] << 16) |
+                               (old_bytes[2] << 8) | old_bytes[3];
+    uint32_t new_ip_reversed = (new_bytes[0] << 24) | (new_bytes[1] << 16) |
+                               (new_bytes[2] << 8) | new_bytes[3];
+
+    int replace_count = 0;
+
+    // ===== 详细调试信息 =====
+    char debug_buf[200];
+    sprintf(debug_buf, "[IP替换调试] old_bytes=[%02x,%02x,%02x,%02x] old_ip_be=0x%08x old_ip_reversed=0x%08x",
+            old_bytes[0], old_bytes[1], old_bytes[2], old_bytes[3],
+            old_ip_be, old_ip_reversed);
+    Logger::debug(string(debug_buf));
+
+    // 打印查找的目标
+    if (payload_len >= 4) {
+        char hex[100];
+        sprintf(hex, "%02x %02x %02x %02x (大端) / %02x %02x %02x %02x (DNF反向)",
+                old_bytes[0], old_bytes[1], old_bytes[2], old_bytes[3],
+                old_bytes[3], old_bytes[2], old_bytes[1], old_bytes[0]);
+        Logger::debug("[IP替换] 查找IP " + old_ip + " 格式: " + string(hex));
+
+        // 打印payload前64字节
+        string payload_hex = "";
+        for (size_t i = 0; i < min((size_t)64, payload_len); i++) {
+            char hbuf[4];
+            sprintf(hbuf, "%02x ", payload[i]);
+            payload_hex += hbuf;
+            if ((i + 1) % 16 == 0) payload_hex += "\n                    ";
+        }
+        Logger::debug("[IP替换] Payload(" + to_string(payload_len) + "字节):\n                    " + payload_hex);
+    }
+
+    // 扫描payload,查找并替换IP
+    for (size_t i = 0; i + 3 < payload_len; i++) {
+        uint32_t* ip_ptr = (uint32_t*)(payload + i);
+        uint32_t ip_value = *ip_ptr;
+
+        // 详细调试：打印每个位置的扫描结果（只打印前10个位置）
+        if (i < 10 && payload_len <= 20) {
+            char scan_buf[150];
+            sprintf(scan_buf, "[IP替换扫描] 位置%zu: [%02x %02x %02x %02x] = 0x%08x (大端匹配:%s DNF匹配:%s)",
+                    i, payload[i], payload[i+1], payload[i+2], payload[i+3], ip_value,
+                    (ip_value == old_ip_be ? "YES" : "no"),
+                    (ip_value == old_ip_reversed ? "YES" : "no"));
+            Logger::debug(string(scan_buf));
+        }
+
+        // 检查大端序(网络字节序)匹配
+        if (ip_value == old_ip_be) {
+            *ip_ptr = new_ip_be;
+            replace_count++;
+            Logger::info("[IP替换] 位置" + to_string(i) + " 大端序: " +
+                         old_ip + " -> " + new_ip);
+            i += 3;
+        }
+        // 检查DNF逐字节反向格式匹配
+        else if (ip_value == old_ip_reversed) {
+            *ip_ptr = new_ip_reversed;
+            replace_count++;
+            Logger::info("[IP替换] 位置" + to_string(i) + " DNF逐字节反向: " +
+                         old_ip + " -> " + new_ip);
+            i += 3;
+        }
+    }
+
+    if (replace_count > 0) {
+        Logger::info("[IP替换] ✓ 完成: " + old_ip + " -> " + new_ip +
+                    " (替换" + to_string(replace_count) + "处)");
+    } else {
+        Logger::info("[IP替换] ✗ 未找到IP " + old_ip + " (payload=" +
+                    to_string(payload_len) + "字节)");
+    }
+
+    return replace_count;
+}
+
+// 获取本机在指定网络上的本地IP地址
+// 通过连接到目标服务器(不实际发送数据)来获取本地IP
+string get_local_ip(const string& target_ip) {
     try {
-        // 创建Raw Socket
-        int raw_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
-        if (raw_sock < 0) {
-            Logger::error("[Raw Socket] 创建失败 (errno=" + to_string(errno) +
-                        ": " + strerror(errno) + ") - 需要root权限!");
-            return false;
+        // 创建一个临时UDP socket
+        int sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock < 0) {
+            return "";
         }
 
-        // 设置IP_HDRINCL，告诉内核我们自己构造IP头
-        int one = 1;
-        if (setsockopt(raw_sock, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one)) < 0) {
-            Logger::error("[Raw Socket] 设置IP_HDRINCL失败");
-            close(raw_sock);
-            return false;
+        // 连接到目标IP(UDP不会实际建立连接,只是选择路由)
+        struct sockaddr_in target_addr{};
+        target_addr.sin_family = AF_INET;
+        target_addr.sin_port = htons(9);  // 任意端口
+        inet_pton(AF_INET, target_ip.c_str(), &target_addr.sin_addr);
+
+        if (connect(sock, (struct sockaddr*)&target_addr, sizeof(target_addr)) < 0) {
+            close(sock);
+            return "";
         }
 
-        // 构造完整数据包: IP头(20) + UDP头(8) + 载荷
-        size_t total_len = sizeof(struct ip) + sizeof(struct udphdr) + payload_len;
-        uint8_t packet[total_len];
-        memset(packet, 0, total_len);
-
-        // ===== 构造IP头 =====
-        struct ip* ip_hdr = (struct ip*)packet;
-        ip_hdr->ip_hl = 5;                          // 头长度(5*4=20字节)
-        ip_hdr->ip_v = 4;                           // IPv4
-        ip_hdr->ip_tos = 0;                         // 服务类型
-        ip_hdr->ip_len = htons(total_len);          // 总长度
-        ip_hdr->ip_id = htons(rand() % 65535);      // 标识符
-        ip_hdr->ip_off = 0;                         // 片偏移
-        ip_hdr->ip_ttl = 64;                        // TTL
-        ip_hdr->ip_p = IPPROTO_UDP;                 // 协议=UDP
-        ip_hdr->ip_sum = 0;                         // 校验和(稍后计算)
-        inet_pton(AF_INET, client_ip.c_str(), &ip_hdr->ip_src);  // 源IP(伪造!)
-        inet_pton(AF_INET, game_ip.c_str(), &ip_hdr->ip_dst);    // 目标IP
-
-        // 计算IP头校验和
-        ip_hdr->ip_sum = calculate_checksum((uint16_t*)ip_hdr, sizeof(struct ip));
-
-        // ===== 构造UDP头 =====
-        struct udphdr* udp_hdr = (struct udphdr*)(packet + sizeof(struct ip));
-        udp_hdr->source = htons(client_port);                     // 源端口
-        udp_hdr->dest = htons(game_port);                         // 目标端口
-        udp_hdr->len = htons(sizeof(struct udphdr) + payload_len); // UDP长度
-        udp_hdr->check = 0;                                       // 校验和(可选,设为0)
-
-        // 复制UDP载荷
-        memcpy(packet + sizeof(struct ip) + sizeof(struct udphdr), payload, payload_len);
-
-        // UDP校验和计算(使用伪头部)
-        // 为了简化,这里设为0(大多数情况下可选)
-        // 如需精确计算,需要构造UDP伪头部(源IP+目标IP+协议+UDP长度)
-
-        // 发送数据包
-        struct sockaddr_in dest_addr{};
-        dest_addr.sin_family = AF_INET;
-        dest_addr.sin_port = htons(game_port);
-        inet_pton(AF_INET, game_ip.c_str(), &dest_addr.sin_addr);
-
-        int sent = sendto(raw_sock, packet, total_len, 0,
-                         (struct sockaddr*)&dest_addr, sizeof(dest_addr));
-
-        close(raw_sock);
-
-        if (sent < 0) {
-            Logger::error("[Raw Socket] sendto失败 (errno=" + to_string(errno) +
-                        ": " + strerror(errno) + ")");
-            return false;
+        // 获取本地socket地址
+        struct sockaddr_in local_addr{};
+        socklen_t addr_len = sizeof(local_addr);
+        if (getsockname(sock, (struct sockaddr*)&local_addr, &addr_len) < 0) {
+            close(sock);
+            return "";
         }
 
-        Logger::debug("[Raw Socket] 成功伪造源IP发送: " + client_ip + ":" +
-                     to_string(client_port) + " -> " + game_ip + ":" +
-                     to_string(game_port) + " (" + to_string(payload_len) + "字节)");
-        return true;
+        close(sock);
 
-    } catch (exception& e) {
-        Logger::error("[Raw Socket] 异常: " + string(e.what()));
-        return false;
+        // 转换为字符串
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &local_addr.sin_addr, ip_str, INET_ADDRSTRLEN);
+        return string(ip_str);
+
+    } catch (...) {
+        return "";
     }
 }
 
@@ -294,21 +488,54 @@ private:
     int game_port;
     atomic<bool> running;
 
-    // UDP相关
-    map<int, int> udp_sockets;  // dst_port -> udp_socket
-    mutex udp_mutex;
-
     // 线程 - 使用智能指针自动管理
     shared_ptr<thread> client_to_game_thread;
     shared_ptr<thread> game_to_client_thread;
     map<int, shared_ptr<thread>> udp_threads;
 
+    // v5.0: IP替换相关 (必须在线程之后声明，匹配构造函数初始化顺序)
+    string client_real_ip;     // 客户端真实IP（从payload提取）
+    string proxy_local_ip;     // 代理服务器本地IP
+    string tcp_source_ip;      // TCP连接源IP（用于动态查询映射）
+    map<string, string>* client_ip_map_ptr;  // 指向TunnelServer的IP映射
+    mutex* ip_map_mutex_ptr;   // 指向TunnelServer的IP映射互斥锁
+
+    // UDP相关
+    map<int, int> udp_sockets;  // dst_port -> udp_socket
+    mutex udp_mutex;
+
+    // v5.0: 动态获取客户端真实IP（从映射中查询）
+    string get_client_real_ip() {
+        if (!client_real_ip.empty()) {
+            return client_real_ip;  // 已有缓存
+        }
+        if (tcp_source_ip.empty() || !client_ip_map_ptr || !ip_map_mutex_ptr) {
+            return "";  // 无法查询
+        }
+
+        lock_guard<mutex> lock(*ip_map_mutex_ptr);
+        auto it = client_ip_map_ptr->find(tcp_source_ip);
+        if (it != client_ip_map_ptr->end()) {
+            client_real_ip = it->second;  // 缓存结果
+            Logger::debug("[连接" + to_string(conn_id) + "] 动态获取客户端真实IP: " + client_real_ip);
+            return client_real_ip;
+        }
+        return "";
+    }
+
 public:
-    TunnelConnection(int cid, int cfd, const string& game_ip, int gport)
+    TunnelConnection(int cid, int cfd, const string& game_ip, int gport,
+                     const string& client_ip = "", const string& proxy_ip = "",
+                     const string& tcp_src_ip = "",
+                     map<string, string>* ip_map = nullptr,
+                     mutex* ip_mutex = nullptr)
         : conn_id(cid), client_fd(cfd), game_fd(-1),
           game_server_ip(game_ip), game_port(gport),
           running(false), client_to_game_thread(nullptr),
-          game_to_client_thread(nullptr) {
+          game_to_client_thread(nullptr),
+          client_real_ip(client_ip), proxy_local_ip(proxy_ip),
+          tcp_source_ip(tcp_src_ip), client_ip_map_ptr(ip_map),
+          ip_map_mutex_ptr(ip_mutex) {
         Logger::debug("[连接" + to_string(conn_id) + "] TunnelConnection对象已创建");
     }
 
@@ -559,6 +786,23 @@ private:
                         vector<uint8_t> payload(buffer.begin() + 7, buffer.begin() + 7 + data_len);
                         buffer.erase(buffer.begin(), buffer.begin() + 7 + data_len);
 
+                        // v5.0: TCP payload IP替换（客户端IP → 代理IP）
+                        // 动态获取客户端真实IP（可能在UDP tunnel之后才可用）
+                        string real_ip = get_client_real_ip();
+                        if (!real_ip.empty() && !proxy_local_ip.empty()) {
+                            int replaced = replace_ip_in_payload(
+                                const_cast<uint8_t*>(payload.data()),
+                                payload.size(),
+                                real_ip,
+                                proxy_local_ip
+                            );
+                            if (replaced > 0) {
+                                Logger::debug("[连接" + to_string(conn_id) + "] TCP已替换IP: " +
+                                            real_ip + " -> " + proxy_local_ip +
+                                            " (替换" + to_string(replaced) + "处)");
+                            }
+                        }
+
                         // 转发到游戏服务器 - sendall
                         if (!sendall(game_fd, payload.data(), payload.size())) {
                             int err = errno;
@@ -685,6 +929,24 @@ private:
 
                 Logger::debug("[连接" + to_string(conn_id) + "] 从游戏收到 " + to_string(n) +
                             "字节 载荷:" + hex_preview);
+
+                // v5.0: TCP payload IP替换（代理IP → 客户端IP）
+                // 游戏服务器返回的数据中如果包含代理IP,需要替换回客户端真实IP
+                // 动态获取客户端真实IP（可能在UDP tunnel之后才可用）
+                string real_ip = get_client_real_ip();
+                if (!real_ip.empty() && !proxy_local_ip.empty()) {
+                    int replaced = replace_ip_in_payload(
+                        buffer,
+                        n,
+                        proxy_local_ip,
+                        real_ip
+                    );
+                    if (replaced > 0) {
+                        Logger::debug("[连接" + to_string(conn_id) + "] TCP已替换IP: " +
+                                    proxy_local_ip + " -> " + real_ip +
+                                    " (替换" + to_string(replaced) + "处)");
+                    }
+                }
 
                 Logger::debug("[连接" + to_string(conn_id) + "] [CHECKPOINT-3] 准备封装协议, n=" + to_string(n) +
                             ", client_fd=" + to_string(client_fd) + ", running=" + (running ? "true" : "false"));
@@ -860,6 +1122,31 @@ private:
     mutex conn_mutex;
     atomic<bool> running;
 
+    // v5.0: 存储TCP连接源IP到客户端真实IPv4的映射
+    map<string, string> client_ip_map;  // TCP源IP(不含端口) -> 客户端真实IPv4
+    mutex ip_map_mutex;
+
+    // v5.0: 从client_str中提取TCP源IP（不含端口）
+    // 输入: "[::ffff:192.168.2.1]:56601" 或 "[240e:...]:12345"
+    // 输出: "192.168.2.1" 或 "240e:..."
+    string extract_tcp_source_ip(const string& client_str) {
+        size_t start = client_str.find('[');
+        size_t end = client_str.find(']');
+        if (start == string::npos || end == string::npos || end <= start) {
+            return "";  // 格式错误
+        }
+
+        string ip_part = client_str.substr(start + 1, end - start - 1);  // 提取[...]中的内容
+
+        // 检查是否为IPv4映射IPv6格式: ::ffff:x.x.x.x
+        const string ipv4_prefix = "::ffff:";
+        if (ip_part.find(ipv4_prefix) == 0) {
+            return ip_part.substr(ipv4_prefix.length());  // 返回IPv4部分
+        }
+
+        return ip_part;  // 返回完整IP（IPv6或其他格式）
+    }
+
 public:
     TunnelServer(const ServerConfig& cfg)
         : config(cfg), server_name(cfg.name), listen_fd(-1), running(false) {}
@@ -969,6 +1256,9 @@ private:
 
     void handle_client(int client_fd, const string& client_str) {
         try {
+            // v4.5.0: 用于存储从UDP握手payload中解析的客户端IP
+            string client_ipv4 = "";
+
             // 接收握手：conn_id(4) + dst_port(2)
             uint8_t handshake[6];
             int n = recv(client_fd, handshake, 6, MSG_WAITALL);
@@ -1021,9 +1311,18 @@ private:
                 struct in_addr ipv4_addr;
                 memcpy(&ipv4_addr, ipv4_bytes, 4);
                 inet_ntop(AF_INET, &ipv4_addr, ipv4_str, INET_ADDRSTRLEN);
-                string client_ipv4 = string(ipv4_str);
+                client_ipv4 = string(ipv4_str);  // v4.5.0: 赋值给外层变量,不重新声明
 
-                Logger::info("[UDP Tunnel] 收到客户端IPv4地址: " + client_ipv4 + " (将用于源IP伪造)");
+                Logger::info("[UDP Tunnel] 收到客户端IPv4地址(payload中): " + client_ipv4);
+
+                // v5.0: 存储TCP源IP到客户端真实IPv4的映射
+                string tcp_source_ip = extract_tcp_source_ip(client_str);
+                if (!tcp_source_ip.empty() && !client_ipv4.empty()) {
+                    lock_guard<mutex> lock(ip_map_mutex);
+                    client_ip_map[tcp_source_ip] = client_ipv4;
+                    Logger::info("[UDP Tunnel] v5.0存储IP映射: TCP源IP=" + tcp_source_ip +
+                               " -> 客户端真实IPv4=" + client_ipv4);
+                }
 
                 // 发送UDP握手确认响应(与TCP握手相同的6字节格式)
                 uint8_t ack[6];
@@ -1038,7 +1337,8 @@ private:
 
                 Logger::info("[UDP Tunnel] 握手成功,已发送确认");
                 Logger::info("[UDP Tunnel] 调用 handle_udp_tunnel()");
-                handle_udp_tunnel(client_fd, client_ipv4, dst_port);
+                // v4.5.0: 传递TCP真实IP(client_str)和payload中的IP(client_ipv4)
+                handle_udp_tunnel(client_fd, client_str, client_ipv4, dst_port);
                 Logger::info("[UDP Tunnel] handle_udp_tunnel()函数已返回");
                 return;
             }
@@ -1047,9 +1347,34 @@ private:
             Logger::info("[连接" + to_string(conn_id) + "] 握手成功: 目标端口=" +
                         to_string(dst_port) + ", 客户端=" + client_str);
 
+            // v5.0: 从映射中查询客户端真实IPv4
+            string tcp_source_ip = extract_tcp_source_ip(client_str);
+            string client_real_ipv4 = "";
+            {
+                lock_guard<mutex> lock(ip_map_mutex);
+                auto it = client_ip_map.find(tcp_source_ip);
+                if (it != client_ip_map.end()) {
+                    client_real_ipv4 = it->second;
+                }
+            }
+
+            // v5.0: 计算代理服务器本地IP(用于连接游戏服务器的本地IP)
+            string proxy_local_ip = get_local_ip(config.game_server_ip);
+
+            Logger::debug("[连接" + to_string(conn_id) + "] v5.0 IP替换准备: TCP源IP=" + tcp_source_ip +
+                        ", 客户端真实IPv4=" + client_real_ipv4 + ", 代理IP=" + proxy_local_ip);
+
             // 创建连接对象 - 使用智能指针
+            // v5.0: 传递IP参数以支持TCP payload IP替换
+            // client_real_ipv4可能为空（TCP连接在UDP tunnel之前建立）
+            // 传递tcp_source_ip和映射指针，支持动态查询
             auto conn = make_shared<TunnelConnection>(
-                conn_id, client_fd, config.game_server_ip, dst_port
+                conn_id, client_fd, config.game_server_ip, dst_port,
+                client_real_ipv4,  // client_real_ip (可能为空)
+                proxy_local_ip,    // proxy_ip
+                tcp_source_ip,     // tcp_source_ip (用于动态查询)
+                &client_ip_map,    // IP映射指针
+                &ip_map_mutex      // 映射互斥锁指针
             );
 
             string conn_key = client_str + ":" + to_string(conn_id);
@@ -1085,9 +1410,11 @@ private:
     }
 
     // 处理UDP tunnel连接
-    void handle_udp_tunnel(int client_fd, const string& client_str, uint16_t game_port) {
+    // v4.5.0: 添加client_ipv4_from_payload参数,包含客户端payload中声明的IP
+    void handle_udp_tunnel(int client_fd, const string& client_str,
+                          const string& client_ipv4_from_payload, uint16_t game_port) {
         try {
-            // 提取客户端真实IP地址(用于伪造源IP)
+            // 提取客户端真实IP地址(TCP连接源IP,客户端公网IP)
             string real_client_ip;
 
             // 处理IPv6格式: [xxxx]:port 或 IPv4格式: x.x.x.x:port
@@ -1120,74 +1447,123 @@ private:
                 }
             }
 
+            // v4.5.0: 使用传入的payload IP
+            string client_ipv4 = client_ipv4_from_payload;
+
             Logger::info("[UDP Tunnel] 开始处理UDP代理连接");
             Logger::info("[UDP Tunnel] 客户端字符串: " + client_str);
-            Logger::info("[UDP Tunnel] 真实客户端IP: " + real_client_ip + " (将用于伪造源IP)");
+            Logger::info("[UDP Tunnel] 客户端公网IP(TCP源): " + real_client_ip);
+            Logger::info("[UDP Tunnel] 客户端私网IP(payload): " + client_ipv4);
+
+            // ===== v4.5.0关键: 获取代理服务器本地IP =====
+            string proxy_local_ip = get_local_ip(config.game_server_ip);
+            if (proxy_local_ip.empty()) {
+                Logger::error("[UDP Tunnel] 无法获取代理服务器本地IP,使用默认值");
+                proxy_local_ip = "192.168.2.75";  // 回退默认值
+            }
+            Logger::info("[UDP Tunnel] 代理服务器本地IP: " + proxy_local_ip);
+            Logger::info("[UDP Tunnel] v5.0策略: 客户端→服务器(客户端IP→代理IP), 服务器→客户端(代理IP→客户端IP)");
 
             // **关键修复v3.5**: 使用shared_ptr包装本地变量,防止线程持有悬垂引用
-            // UDP连接映射: remote_port -> udp_socket
-            auto udp_sockets = make_shared<map<uint16_t, int>>();
-            auto udp_recv_threads = make_shared<map<uint16_t, shared_ptr<thread>>>();
-            // 存储每个UDP socket对应的conn_id和客户端端口
-            struct SocketMetadata {
+            // v4.7.0重构: 按源端口管理UDP socket - 每个客户端源端口一个socket
+            // v5.1修复: 支持多用户 - 按(client_str, src_port)管理socket
+            // 原因: 多个客户端可能使用相同源端口(如5063),需要区分
+            auto udp_sockets = make_shared<map<string, int>>();  // ["client_str:src_port"] = socket
+            auto udp_recv_threads = make_shared<map<string, shared_ptr<thread>>>();  // ["client_str:src_port"] = thread
+
+            // v4.7.0: 存储每个数据流(src_port, dst_port)的元数据
+            // v5.1修复: key改为"client_str:src_port:dst_port"支持多用户
+            struct FlowMetadata {
                 uint32_t conn_id;
-                uint16_t client_port;
+                uint16_t src_port;          // 客户端源端口
+                uint16_t dst_port;          // 游戏服务器目标端口
+                string client_public_ip;    // 客户端公网IP (TCP源IP)
+                string client_private_ip;   // 客户端私网IP (payload中)
             };
-            auto socket_metadata = make_shared<map<uint16_t, SocketMetadata>>();
+            // v5.1: 使用 "client_str:src_port:dst_port" 作为key
+            auto flow_metadata = make_shared<map<string, FlowMetadata>>();
             auto udp_mutex = make_shared<mutex>();
             auto send_mutex = make_shared<mutex>();  // 保护client_fd的send操作,防止多线程竞争
             auto running = make_shared<atomic<bool>>(true);
 
+            // v4.5.0: 捕获proxy_local_ip用于IP替换（已废弃）
+            string proxy_ip_for_lambda = proxy_local_ip;  // Lambda捕获用
+
             // 创建UDP接收线程的lambda函数 - 返回智能指针
             // **关键修复v3.5**: 捕获shared_ptr而不是引用,确保变量生命周期正确
-            auto create_udp_receiver = [udp_sockets, socket_metadata, udp_mutex, send_mutex, running](uint16_t remote_port, int client_fd) -> shared_ptr<thread> {
-                return make_shared<thread>([udp_sockets, socket_metadata, udp_mutex, send_mutex, running, remote_port, client_fd]() {
+            // v4.5.0: 新增proxy_ip_for_lambda用于IP替换（已废弃）
+            // v4.7.0重构: 参数改为src_port，一个线程处理该源端口的所有流量
+            // v4.7.3: 移除game_server_ip_for_lambda，改用client_public_ip（从flow_metadata获取）
+            // v5.1修复: 参数改为socket_key="client_str:src_port"支持多用户
+            auto create_udp_receiver = [udp_sockets, flow_metadata, udp_mutex, send_mutex, running, proxy_ip_for_lambda](const string& socket_key, uint16_t src_port, int client_fd) -> shared_ptr<thread> {
+                return make_shared<thread>([udp_sockets, flow_metadata, udp_mutex, send_mutex, running, proxy_ip_for_lambda, socket_key, src_port, client_fd]() {
                     try {
                         int udp_fd;
-                        uint32_t conn_id;
-                        uint16_t client_port;
-
                         {
                             lock_guard<mutex> lock(*udp_mutex);
-                            if (udp_sockets->find(remote_port) == udp_sockets->end()) {
+                            if (udp_sockets->find(socket_key) == udp_sockets->end()) {
+                                Logger::error("[UDP Tunnel|" + socket_key + "] socket不存在");
                                 return;
                             }
-                            udp_fd = (*udp_sockets)[remote_port];
-
-                            // 获取元数据
-                            auto meta_it = socket_metadata->find(remote_port);
-                            if (meta_it == socket_metadata->end()) {
-                                Logger::error("[UDP Tunnel|" + to_string(remote_port) +
-                                            "] 未找到socket元数据");
-                                return;
-                            }
-                            conn_id = meta_it->second.conn_id;
-                            client_port = meta_it->second.client_port;
+                            udp_fd = (*udp_sockets)[socket_key];
                         }
 
                         uint8_t buffer[65535];
                         sockaddr_storage from_addr{};
                         socklen_t from_len = sizeof(from_addr);
 
-                        Logger::info("[UDP Tunnel|" + to_string(remote_port) + "] 接收线程已启动 (conn_id=" +
-                                    to_string(conn_id) + ", client_port=" + to_string(client_port) + ")");
+                        Logger::info("[UDP Tunnel|" + socket_key + "] 接收线程已启动");
 
                         while (*running) {
-                            Logger::info("[UDP Tunnel|" + to_string(remote_port) + "] 等待从游戏服务器接收UDP数据...");
+                            Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "] 等待从游戏服务器接收UDP数据...");
 
+                            from_len = sizeof(from_addr);
                             int n = recvfrom(udp_fd, buffer, sizeof(buffer), 0,
                                            (sockaddr*)&from_addr, &from_len);
 
                             if (n <= 0) {
                                 int err = errno;
-                                Logger::info("[UDP Tunnel|" + to_string(remote_port) +
+                                Logger::info("[UDP Tunnel|src=" + to_string(src_port) +
                                            "] recvfrom返回: n=" + to_string(n) +
                                            ", errno=" + to_string(err) + " (" + strerror(err) + ")");
                                 break;
                             }
 
-                            Logger::info("[UDP Tunnel|" + to_string(remote_port) +
+                            // v4.7.0: 获取游戏服务器的端口（响应来自哪个目标端口）
+                            uint16_t game_server_port = 0;
+                            if (from_addr.ss_family == AF_INET) {
+                                sockaddr_in* addr_in = (sockaddr_in*)&from_addr;
+                                game_server_port = ntohs(addr_in->sin_port);
+                            } else if (from_addr.ss_family == AF_INET6) {
+                                sockaddr_in6* addr_in6 = (sockaddr_in6*)&from_addr;
+                                game_server_port = ntohs(addr_in6->sin6_port);
+                            }
+
+                            Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(game_server_port) +
                                         "] ←[游戏服务器] 接收到UDP数据: " + to_string(n) + "字节");
+
+                            // v4.7.0: 根据(src_port, game_server_port)查找流元数据
+                            // v5.1修复: flow_key改为"socket_key:dst_port"支持多用户
+                            uint32_t conn_id = 0;
+                            uint16_t client_port = src_port;
+                            string client_public_ip = "";
+                            string client_private_ip = "";
+
+                            {
+                                lock_guard<mutex> lock(*udp_mutex);
+                                string flow_key = socket_key + ":" + to_string(game_server_port);
+                                auto flow_it = flow_metadata->find(flow_key);
+                                if (flow_it != flow_metadata->end()) {
+                                    conn_id = flow_it->second.conn_id;
+                                    client_port = flow_it->second.src_port;
+                                    client_public_ip = flow_it->second.client_public_ip;
+                                    client_private_ip = flow_it->second.client_private_ip;
+                                } else {
+                                    Logger::warning("[UDP Tunnel|" + socket_key + "|dst=" +
+                                                  to_string(game_server_port) + "] 未找到流元数据，可能是延迟响应");
+                                    continue;
+                                }
+                            }
 
                             // 打印接收到的UDP payload hex dump
                             string payload_hex = "";
@@ -1199,16 +1575,82 @@ private:
                                 sprintf(hex_buf, "%02x ", buffer[i]);
                                 payload_hex += hex_buf;
                             }
-                            Logger::info("[UDP Tunnel|" + to_string(remote_port) +
+                            Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(game_server_port) +
                                         "] UDP Payload(" + to_string(n) + "字节):\n                    " + payload_hex);
+
+                            // ===== v4.9.1关键修复: UDP握手响应 - 替换IP字段和端口字段 =====
+                            // 算法发现: 通过多次抓包分析确认
+                            //          IP字段 = UDP包的源IP
+                            //          最后2字节 = UDP包的源端口（小端序）
+                            //          游戏服务器完全基于收到的UDP包源地址计算响应
+                            // 异地代理问题:
+                            //          代理用自己的IP:Port发送UDP包到游戏服务器
+                            //          服务器返回基于代理IP:Port的响应
+                            //          但客户端期望看到基于自己IP:Port的响应
+                            // 解决方案: 同时替换IP字段和端口字段为客户端真实值
+                            if (n >= 7 && buffer[0] == 0x02) {
+                                // 握手响应格式: 02 + IP(4字节,DNF字节序) + Port(2字节,小端序)
+
+                                // 读取服务器返回的IP字段（DNF字节序 [d,c,b,a] 表示 a.b.c.d）
+                                char server_ip_str[20];
+                                sprintf(server_ip_str, "%d.%d.%d.%d", buffer[4], buffer[3], buffer[2], buffer[1]);
+
+                                // 读取服务器返回的端口字段（小端序）
+                                uint16_t server_port_le = ((uint16_t)buffer[6] << 8) | buffer[5];
+
+                                Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(game_server_port) +
+                                           "] 检测到UDP握手响应，服务器返回: IP=" + string(server_ip_str) +
+                                           ", Port=" + to_string(server_port_le) + " (0x" +
+                                           [](uint16_t v){ char buf[8]; sprintf(buf, "%04x", v); return string(buf); }(server_port_le) + ")");
+
+                                // v5.0关键修复: 替换为客户端真实IP（从payload提取）
+                                // 原因: 游戏客户端期望UDP握手响应IP = 自己的真实IP（payload中的IP）
+                                //      代理发送时已将payload中的IP替换为代理IP
+                                //      游戏服务器返回基于代理IP的响应
+                                //      必须还原为客户端真实IP让客户端验证通过
+                                if (!client_private_ip.empty()) {
+                                    unsigned int a, b, c, d;
+                                    if (sscanf(client_private_ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+                                        Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(game_server_port) +
+                                                   "] 替换为客户端真实IP: " + client_private_ip + ", Port=" + to_string(client_port));
+
+                                        // 替换IP字段（DNF字节序 [d,c,b,a]）
+                                        buffer[1] = (uint8_t)d;
+                                        buffer[2] = (uint8_t)c;
+                                        buffer[3] = (uint8_t)b;
+                                        buffer[4] = (uint8_t)a;
+
+                                        // 替换端口字段（小端序 [low, high]）
+                                        buffer[5] = (uint8_t)(client_port & 0xFF);         // 低字节
+                                        buffer[6] = (uint8_t)((client_port >> 8) & 0xFF);  // 高字节
+
+                                        Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(game_server_port) +
+                                                   "] ✓ 已替换IP字段和端口字段");
+
+                                        // 打印替换后的payload
+                                        char new_hex[50];
+                                        sprintf(new_hex, "%02x %02x %02x %02x %02x %02x %02x",
+                                               buffer[0], buffer[1], buffer[2], buffer[3],
+                                               buffer[4], buffer[5], buffer[6]);
+                                        Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(game_server_port) +
+                                                   "] 替换后payload: " + string(new_hex));
+                                    } else {
+                                        Logger::warning("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(game_server_port) +
+                                                      "] 客户端IP格式错误: " + client_private_ip);
+                                    }
+                                } else {
+                                    Logger::warning("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(game_server_port) +
+                                                  "] 客户端真实IP为空，无法替换");
+                                }
+                            }
 
                             // 封装协议：msg_type(1) + conn_id(4) + src_port(2) + dst_port(2) + data_len(2) + payload
                             vector<uint8_t> response(11 + n);
                             response[0] = 0x03;  // msg_type=UDP
-                            *(uint32_t*)(&response[1]) = htonl(conn_id);        // 使用正确的conn_id
-                            *(uint16_t*)(&response[5]) = htons(remote_port);     // src_port（游戏服务器）
-                            *(uint16_t*)(&response[7]) = htons(client_port);     // dst_port（客户端端口）
-                            *(uint16_t*)(&response[9]) = htons(n);              // data_len
+                            *(uint32_t*)(&response[1]) = htonl(conn_id);
+                            *(uint16_t*)(&response[5]) = htons(game_server_port);   // src_port=游戏服务器端口
+                            *(uint16_t*)(&response[7]) = htons(client_port);        // dst_port=客户端端口
+                            *(uint16_t*)(&response[9]) = htons(n);
                             memcpy(&response[11], buffer, n);
 
                             // 打印封装后的完整response数据包
@@ -1222,13 +1664,13 @@ private:
                                 sprintf(hex_buf, "%02x ", response[i]);
                                 response_hex += hex_buf;
                             }
-                            Logger::info("[UDP Tunnel|" + to_string(remote_port) +
+                            Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(game_server_port) +
                                         "] 封装后数据包(前" + to_string(dump_len) + "字节):\n                    " + response_hex);
 
                             // 发送到客户端 - 使用互斥锁保护,防止多线程同时send()导致数据损坏
                             {
                                 lock_guard<mutex> lock(*send_mutex);
-                                Logger::info("[UDP Tunnel|" + to_string(remote_port) +
+                                Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(game_server_port) +
                                            "] →[客户端] 准备发送: " + to_string(response.size()) +
                                            "字节 (client_fd=" + to_string(client_fd) +
                                            ", conn_id=" + to_string(conn_id) + ")");
@@ -1238,14 +1680,14 @@ private:
                                     int ret = send(client_fd, response.data() + sent,
                                                  response.size() - sent, 0);
 
-                                    Logger::info("[UDP Tunnel|" + to_string(remote_port) +
+                                    Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(game_server_port) +
                                                "] send()返回: " + to_string(ret) +
                                                " (已发送: " + to_string(sent) +
                                                "/" + to_string(response.size()) + "字节)");
 
                                     if (ret <= 0) {
                                         int err = errno;
-                                        Logger::error("[UDP Tunnel|" + to_string(remote_port) +
+                                        Logger::error("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(game_server_port) +
                                                     "] send()失败: 返回值=" + to_string(ret) +
                                                     ", errno=" + to_string(err) + " (" + strerror(err) + ")");
                                         *running = false;
@@ -1255,18 +1697,18 @@ private:
                                 }
 
                                 if (sent == (int)response.size()) {
-                                    Logger::info("[UDP Tunnel|" + to_string(remote_port) +
+                                    Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(game_server_port) +
                                                 "] ✓ 成功发送到客户端: " + to_string(response.size()) +
                                                 "字节 (conn_id=" + to_string(conn_id) + ")");
                                 } else {
-                                    Logger::error("[UDP Tunnel|" + to_string(remote_port) +
+                                    Logger::error("[UDP Tunnel|src=" + to_string(src_port) +
                                                 "] ✗ 发送不完整: 仅发送 " + to_string(sent) +
                                                 "/" + to_string(response.size()) + "字节");
                                 }
                             }
                         }
 
-                        Logger::info("[UDP Tunnel|" + to_string(remote_port) + "] 接收线程退出");
+                        Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "] 接收线程退出");
                     } catch (exception& e) {
                         Logger::error("[UDP Tunnel] 接收线程异常: " + string(e.what()));
                     }
@@ -1327,75 +1769,128 @@ private:
                                 ", src=" + to_string(src_port) + ", dst=" + to_string(dst_port) +
                                 ", len=" + to_string(data_len));
 
-                    // 获取或创建UDP socket
+                    // v4.7.0: 按源端口获取或创建UDP socket
+                    // v5.1修复: 使用client_str:src_port作为key支持多用户
+                    // v5.1: 构造socket_key = "client_str:src_port" (在块外定义，供后续使用)
+                    string socket_key = client_str + ":" + to_string(src_port);
+
                     {
                         lock_guard<mutex> lock(*udp_mutex);
-                        if (udp_sockets->find(dst_port) == udp_sockets->end()) {
-                            // 解析游戏服务器地址
-                            struct addrinfo hints{}, *result = nullptr;
-                            hints.ai_family = AF_UNSPEC;
-                            hints.ai_socktype = SOCK_DGRAM;
-                            hints.ai_protocol = IPPROTO_UDP;
 
-                            string port_str = to_string(dst_port);
-                            int ret = getaddrinfo(config.game_server_ip.c_str(), port_str.c_str(),
-                                                &hints, &result);
-                            if (ret != 0 || result == nullptr) {
-                                Logger::error("[UDP Tunnel|" + to_string(dst_port) +
-                                            "] DNS解析失败: " + config.game_server_ip);
-                                continue;
-                            }
-
-                            int udp_fd = socket(result->ai_family, result->ai_socktype,
-                                              result->ai_protocol);
+                        // 检查此客户端的源端口是否已有socket
+                        if (udp_sockets->find(socket_key) == udp_sockets->end()) {
+                            // 首次遇到此源端口，创建socket并bind
+                            int udp_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
                             if (udp_fd < 0) {
-                                Logger::error("[UDP Tunnel|" + to_string(dst_port) +
+                                Logger::error("[UDP Tunnel|src=" + to_string(src_port) +
                                             "] 创建UDP socket失败");
-                                freeaddrinfo(result);
                                 continue;
                             }
 
-                            (*udp_sockets)[dst_port] = udp_fd;
-                            freeaddrinfo(result);
+                            // v4.9.0: 普通bind到源端口（不做源IP欺骗）
+                            // v5.1修复: bind失败时允许系统自动分配（支持多用户共享端口）
+                            // 原因: 多个客户端可能使用相同源端口，第一个成功bind，后续使用自动分配
+                            struct sockaddr_in local_addr{};
+                            local_addr.sin_family = AF_INET;
+                            local_addr.sin_addr.s_addr = INADDR_ANY;  // 使用代理服务器自己的IP
+                            local_addr.sin_port = htons(src_port);
 
-                            // **关键修复**: 必须在启动接收线程之前保存元数据
-                            (*socket_metadata)[dst_port] = {msg_conn_id, src_port};
+                            bool bind_success = true;
+                            if (bind(udp_fd, (struct sockaddr*)&local_addr, sizeof(local_addr)) < 0) {
+                                int bind_err = errno;
+                                if (bind_err == EADDRINUSE) {
+                                    // v5.1: 端口被占用（多用户场景），允许系统自动分配
+                                    Logger::info("[UDP Tunnel|" + socket_key +
+                                                "] 端口" + to_string(src_port) + "已被占用，使用系统自动分配");
+                                    bind_success = false;  // 不bind，系统会自动分配端口
+                                } else {
+                                    Logger::error("[UDP Tunnel|" + socket_key +
+                                                "] bind失败: " + strerror(bind_err));
+                                    close(udp_fd);
+                                    continue;
+                                }
+                            }
 
-                            Logger::info("[UDP Tunnel|" + to_string(dst_port) + "] 创建UDP socket (conn_id=" +
-                                       to_string(msg_conn_id) + ", client_port=" + to_string(src_port) + ")");
+                            (*udp_sockets)[socket_key] = udp_fd;
+                            if (bind_success) {
+                                Logger::info("[UDP Tunnel|" + socket_key +
+                                           "] ✓ 创建UDP socket并bind到端口 " + to_string(src_port));
+                            } else {
+                                Logger::info("[UDP Tunnel|" + socket_key +
+                                           "] ✓ 创建UDP socket（系统自动分配端口）");
+                            }
 
-                            // 启动UDP接收线程 (此时元数据已就绪)
-                            auto t = create_udp_receiver(dst_port, client_fd);
-                            (*udp_recv_threads)[dst_port] = t;
+                            // 启动接收线程（每个客户端的源端口一个线程）
+                            auto t = create_udp_receiver(socket_key, src_port, client_fd);
+                            (*udp_recv_threads)[socket_key] = t;
+                            Logger::info("[UDP Tunnel|" + socket_key + "] 接收线程已启动");
                         } else {
-                            // Socket已存在,更新元数据(可能是新的UDP流使用同一目标端口)
-                            (*socket_metadata)[dst_port] = {msg_conn_id, src_port};
-                            Logger::debug("[UDP Tunnel|" + to_string(dst_port) +
-                                        "] 更新元数据 (conn_id=" + to_string(msg_conn_id) +
-                                        ", client_port=" + to_string(src_port) + ")");
+                            Logger::debug("[UDP Tunnel|" + socket_key + "] UDP socket已存在，复用");
                         }
+
+                        // 保存或更新流元数据
+                        // v5.1: flow_key改为"socket_key:dst_port"支持多用户
+                        string meta_private_ip = client_ipv4.empty() ? real_client_ip : client_ipv4;
+                        string flow_key = socket_key + ":" + to_string(dst_port);
+                        (*flow_metadata)[flow_key] = {msg_conn_id, src_port, dst_port,
+                                                     real_client_ip, meta_private_ip};
+
+                        Logger::debug("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(dst_port) +
+                                    "] 流元数据已保存 (conn_id=" + to_string(msg_conn_id) +
+                                    ", private_ip=" + meta_private_ip + ")");
                     }
 
-                    // ===== 关键修改: 使用Raw Socket伪造源IP发送UDP =====
-                    Logger::info("[UDP Tunnel|" + to_string(dst_port) + "] 使用Raw Socket伪造源IP发送");
+                    // ===== v5.0关键修改: 发送前替换payload中的客户端IP为代理IP =====
+                    // 让游戏服务器认为所有流量来自代理服务器
+                    string private_ip = client_ipv4.empty() ? real_client_ip : client_ipv4;
 
-                    bool success = send_udp_spoofed(
-                        real_client_ip,          // 伪造的源IP (真实客户端IP)
-                        src_port,                // 源端口 (客户端端口)
-                        config.game_server_ip,   // 目标IP (游戏服务器IP)
-                        dst_port,                // 目标端口 (游戏服务器端口)
-                        payload.data(),          // UDP载荷
-                        payload.size()           // 载荷长度
+                    Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(dst_port) +
+                                "] 准备替换payload: " + private_ip + " -> " + proxy_ip_for_lambda);
+
+                    int replaced_send = replace_ip_in_payload(
+                        const_cast<uint8_t*>(payload.data()),
+                        payload.size(),
+                        private_ip,
+                        proxy_ip_for_lambda  // v5.0: 替换为代理IP而不是TCP源IP
                     );
 
-                    if (success) {
-                        Logger::info("[UDP Tunnel|" + to_string(dst_port) +
-                                    "] ✓ 成功伪造源IP发送: " + real_client_ip + ":" + to_string(src_port) +
-                                    " -> " + config.game_server_ip + ":" + to_string(dst_port) +
-                                    " (" + to_string(payload.size()) + "字节)");
+                    if (replaced_send > 0) {
+                        Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(dst_port) +
+                                   "] ✓ 已替换发送payload中的IP: " + private_ip + " -> " +
+                                   proxy_ip_for_lambda + " (替换" + to_string(replaced_send) + "处)");
+                    }
+
+                    // v4.7.0: 使用源端口的socket发送到目标端口
+                    // v5.1修复: 使用socket_key获取此客户端的socket
+                    int udp_fd = (*udp_sockets)[socket_key];
+
+                    // 解析游戏服务器地址
+                    struct addrinfo hints{}, *result = nullptr;
+                    hints.ai_family = AF_UNSPEC;
+                    hints.ai_socktype = SOCK_DGRAM;
+                    hints.ai_protocol = IPPROTO_UDP;
+
+                    string port_str = to_string(dst_port);
+                    int ret = getaddrinfo(config.game_server_ip.c_str(), port_str.c_str(),
+                                        &hints, &result);
+
+                    if (ret == 0 && result != nullptr) {
+                        int sent = sendto(udp_fd, payload.data(), payload.size(), 0,
+                                        result->ai_addr, result->ai_addrlen);
+                        freeaddrinfo(result);
+
+                        if (sent > 0) {
+                            Logger::info("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(dst_port) +
+                                        "] ✓ 成功发送UDP数据: " + config.game_server_ip + ":" +
+                                        to_string(dst_port) + " (" + to_string(sent) + "字节)");
+                        } else {
+                            Logger::error("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(dst_port) +
+                                         "] ✗ UDP发送失败 (errno=" + to_string(errno) +
+                                         ": " + strerror(errno) + ")");
+                        }
                     } else {
-                        Logger::error("[UDP Tunnel|" + to_string(dst_port) +
-                                     "] ✗ Raw Socket发送失败");
+                        Logger::error("[UDP Tunnel|src=" + to_string(src_port) + "|dst=" + to_string(dst_port) +
+                                     "] DNS解析失败: " + config.game_server_ip);
                     }
                 }
             }
@@ -1405,8 +1900,9 @@ private:
             Logger::info("[UDP Tunnel] 开始清理资源");
 
             // **关键修复v3.5.1**: 先shutdown再close所有UDP sockets,强制让阻塞的recvfrom()返回
+            // v5.1修复: pair.first已是string类型，无需to_string()
             for (auto& pair : *udp_sockets) {
-                Logger::debug("[UDP Tunnel|" + to_string(pair.first) + "] 关闭UDP socket");
+                Logger::debug("[UDP Tunnel|" + pair.first + "] 关闭UDP socket");
                 shutdown(pair.second, SHUT_RDWR);  // 先shutdown,强制唤醒阻塞的recvfrom()
                 close(pair.second);
             }
@@ -1414,7 +1910,7 @@ private:
             // 然后等待所有UDP接收线程结束
             for (auto& pair : *udp_recv_threads) {
                 if (pair.second && pair.second->joinable()) {
-                    Logger::debug("[UDP Tunnel|" + to_string(pair.first) + "] 等待接收线程结束");
+                    Logger::debug("[UDP Tunnel|" + pair.first + "] 等待接收线程结束");
                     pair.second->join();
                 }
                 // 智能指针自动释放，无需delete - 修复了原来第1324行的线程安全问题!

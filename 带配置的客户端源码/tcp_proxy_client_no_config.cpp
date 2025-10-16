@@ -1186,7 +1186,8 @@ private:
 bool inject_udp_response(HANDLE windivert_handle,
                          const string& local_ip, uint16_t local_port,
                          const string& remote_ip, uint16_t remote_port,
-                         const uint8_t* payload, size_t len) {
+                         const uint8_t* payload, size_t len,
+                         const WINDIVERT_ADDRESS& interface_addr) {
     if (len > 65535) {
         Logger::error("[UDP] 响应包过大: " + to_string(len));
         return false;
@@ -1275,10 +1276,12 @@ bool inject_udp_response(HANDLE windivert_handle,
     }
     Logger::info("[UDP注入] 完整包头(前" + to_string(header_len) + "字节):\n                    " + packet_header_hex);
 
-    // 注入包
-    WINDIVERT_ADDRESS addr = {};
+    // 注入包 - 使用保存的接口地址信息
+    WINDIVERT_ADDRESS addr = interface_addr;
     addr.Outbound = 0;  // Inbound（发给游戏客户端）
     Logger::info("[UDP注入] WinDivert方向: Inbound (Outbound=0)");
+    Logger::info("[UDP注入] 接口信息: IfIdx=" + to_string(addr.Network.IfIdx) +
+                " SubIfIdx=" + to_string(addr.Network.SubIfIdx));
 
     UINT send_len = 0;
     BOOL inject_result = WinDivertSend(windivert_handle, packet.data(), (UINT)packet.size(), &send_len, &addr);
@@ -1327,6 +1330,9 @@ private:
     map<uint32_t, string> udp_conn_map;
     // 保存客户端IP用于握手响应(从第一个UDP包获取)
     string udp_client_ip;
+    // 保存UDP接口地址信息(从第一个UDP包获取)
+    WINDIVERT_ADDRESS udp_interface_addr;
+    bool udp_interface_addr_saved;
 
 public:
     TCPProxyClient(const string& game_ip, const string& tunnel_ip, uint16_t tport)
@@ -1335,7 +1341,9 @@ public:
           conn_id_counter(1),
           udp_conn_id_counter(100000),  // UDP连接ID从100000开始
           udp_tunnel_sock(INVALID_SOCKET),
-          udp_tunnel_ready(false) {
+          udp_tunnel_ready(false),
+          udp_interface_addr_saved(false) {
+        memset(&udp_interface_addr, 0, sizeof(udp_interface_addr));
     }
 
     ~TCPProxyClient() {
@@ -1531,7 +1539,7 @@ private:
                 const uint8_t* payload = (payload_len > 0) ? &packet_buf[payload_offset] : nullptr;
 
                 handle_udp_packet(src_ip, src_port, dst_ip, dst_port,
-                                 payload, payload_len);
+                                 payload, payload_len, addr);
             }
 
             // 包被拦截，不重新注入（DROP）
@@ -1688,7 +1696,8 @@ private:
 
     void handle_udp_packet(const string& src_ip, uint16_t src_port,
                           const string& dst_ip, uint16_t dst_port,
-                          const uint8_t* payload, int payload_len) {
+                          const uint8_t* payload, int payload_len,
+                          const WINDIVERT_ADDRESS& addr) {
         // 打印完整载荷（16字节一行，格式化显示）
         string hex_dump = "";
         if (payload_len > 0) {
@@ -1728,6 +1737,15 @@ private:
             if (udp_client_ip.empty()) {
                 udp_client_ip = src_ip;
                 Logger::debug("[UDP] 保存客户端IP: " + udp_client_ip);
+            }
+
+            // 保存UDP接口地址信息(从第一个UDP包获取,用于注入响应)
+            if (!udp_interface_addr_saved) {
+                udp_interface_addr = addr;
+                udp_interface_addr_saved = true;
+                Logger::debug("[UDP] 保存接口地址: IfIdx=" + to_string(addr.Network.IfIdx) +
+                            " SubIfIdx=" + to_string(addr.Network.SubIfIdx) +
+                            " Direction=" + string(addr.Outbound ? "Outbound" : "Inbound"));
             }
 
             auto it = udp_port_map.find(port_key);
@@ -1983,12 +2001,16 @@ private:
                     // 响应方向: 游戏服务器 -> 游戏客户端,所以local=游戏客户端,remote=游戏服务器
 
                     string client_ip;
+                    WINDIVERT_ADDRESS iface_addr;
+                    bool addr_available;
                     {
                         lock_guard<mutex> lock(udp_lock);
                         client_ip = udp_client_ip;
+                        iface_addr = udp_interface_addr;
+                        addr_available = udp_interface_addr_saved;
                     }
 
-                    if (!client_ip.empty()) {
+                    if (!client_ip.empty() && addr_available) {
                         Logger::info("[UDP|握手响应] 准备注入握手响应: " +
                                    client_ip + ":" + to_string(dst_port) + " ← " +
                                    game_server_ip + ":" + to_string(src_port) +
@@ -1997,26 +2019,35 @@ private:
                         inject_udp_response(windivert_handle,
                                           client_ip, dst_port,           // 本地游戏客户端
                                           game_server_ip, src_port,      // 远程游戏服务器
-                                          payload.data(), payload.size());
+                                          payload.data(), payload.size(),
+                                          iface_addr);
 
                         Logger::info("[UDP|握手响应] ✓ 已注入握手响应");
                     } else {
-                        Logger::warning("[UDP|握手响应] 无法注入握手响应: 客户端IP未知");
+                        if (client_ip.empty()) {
+                            Logger::warning("[UDP|握手响应] 无法注入握手响应: 客户端IP未知");
+                        } else {
+                            Logger::warning("[UDP|握手响应] 无法注入握手响应: 接口地址信息未就绪");
+                        }
                     }
                     continue;  // 握手包处理完成
                 }
 
                 // 查找对应的UDP连接并注入响应
                 string port_key;
+                WINDIVERT_ADDRESS iface_addr;
+                bool addr_available;
                 {
                     lock_guard<mutex> lock(udp_lock);
                     auto it = udp_conn_map.find(conn_id);
                     if (it != udp_conn_map.end()) {
                         port_key = it->second;
                     }
+                    iface_addr = udp_interface_addr;
+                    addr_available = udp_interface_addr_saved;
                 }
 
-                if (!port_key.empty()) {
+                if (!port_key.empty() && addr_available) {
                     // 解析port_key: "local_ip:local_port:remote_ip:remote_port"
                     size_t pos1 = port_key.find(':');
                     size_t pos2 = port_key.find(':', pos1 + 1);
@@ -2035,12 +2066,17 @@ private:
                                    " (" + to_string(payload.size()) + "字节)");
 
                         inject_udp_response(windivert_handle, local_ip, local_port,
-                                          remote_ip, src_port, payload.data(), payload.size());
+                                          remote_ip, src_port, payload.data(), payload.size(),
+                                          iface_addr);
                     } else {
                         Logger::error("[UDP] 解析port_key失败: " + port_key);
                     }
                 } else {
-                    Logger::warning("[UDP] 未找到conn_id=" + to_string(conn_id) + "对应的映射");
+                    if (port_key.empty()) {
+                        Logger::warning("[UDP] 未找到conn_id=" + to_string(conn_id) + "对应的映射");
+                    } else {
+                        Logger::warning("[UDP] 无法注入UDP响应: 接口地址信息未就绪");
+                    }
                 }
             }
         }
