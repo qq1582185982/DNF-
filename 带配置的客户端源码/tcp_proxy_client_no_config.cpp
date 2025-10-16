@@ -1,10 +1,15 @@
 /*
- * DNF游戏代理客户端 - C++ 版本 v12.2.0 (流式转发优化)
+ * DNF游戏代理客户端 - C++ 版本 v12.3.0 (动态窗口跟随)
  * 从自身exe末尾读取配置
  *
- * v12.2.0更新: 流式转发优化 ⭐ 解决组队延迟
+ * v12.3.0更新: 动态窗口跟随 ⭐ 完全模拟游戏客户端
+ *             - data_window完全跟随游戏客户端的真实窗口值
+ *             - 不再硬编码窗口大小（65535或245）
+ *             - 游戏客户端会根据网络状况动态调整窗口
+ *             - 代理完全模拟真实游戏行为，避免检测风险
+ *
+ * v12.2.0更新: 流式转发优化
  *             - 移除人为流控限制（窗口从245→65535字节）
- *             - 彻底解决组队/频道延迟问题
  *             - 启动握手测试，避免首次连接失败
  *
  * v12.1.0更新: 动态IP配置
@@ -1227,12 +1232,12 @@ UINT32 query_loopback_ifidx(const string& adapter_name) {
 // 主配置函数：自动设置虚拟网卡（v12.1.0 支持动态IP）
 bool auto_setup_loopback_adapter(const string& primary_ip, const string& secondary_ip) {
     cout << "========================================" << endl;
-    cout << "虚拟网卡自动配置 (v12.1.0)" << endl;
+    cout << "虚拟网卡自动配置 (v12.3.0)" << endl;
     cout << "========================================" << endl;
     cout << endl;
 
     Logger::info("========================================");
-    Logger::info("虚拟网卡自动配置 (v12.2.0)");
+    Logger::info("虚拟网卡自动配置 (v12.3.0)");
     Logger::info("  主IP（游戏服务器）: " + primary_ip);
     Logger::info("  辅助IP（虚拟客户端）: " + secondary_ip);
     Logger::info("========================================");
@@ -1421,14 +1426,19 @@ public:
           tunnel_sock(INVALID_SOCKET), running(false), established(false), closing(false),
           last_window_probe_time(0), window_zero_start_time(0), window_probe_logged(false) {
 
-        // v12.2.0: 流式转发 - 移除人为流控，使用最大窗口
-        // 原因: 小窗口(245字节)导致组队时延迟严重，频繁触发窗口探测
-        // 改为65535字节，让TCP协议栈自己管理流量，延迟降到最低
-        data_window = 65535;  // 使用TCP最大窗口，彻底解决组队延迟
+        // v12.3.0: 动态窗口 - 完全跟随游戏客户端的真实窗口值
+        // 原理: 游戏客户端会根据网络状况动态调整窗口大小
+        //      我们作为代理应该完全模拟游戏客户端的行为
+        //      data_window将在update_window()中同步为client_window的值
+        // 初始值: 使用14600字节作为初始值（标准MSS*10，握手前的合理默认值）
+        data_window = 14600;  // 初始值，将在收到第一个包时同步为游戏客户端的真实窗口
 
-        // 旧代码（保留注释供参考）：
+        // v12.2.0旧代码（保留注释供参考）：
+        // data_window = 65535;  // 硬编码最大窗口
+        //
+        // 更旧代码：
         // if (dport == 10011) {
-        //     data_window = 245;   // 频道服务器，组队时会阻塞
+        //     data_window = 245;   // 频道服务器
         // } else if (dport == 7001) {
         //     data_window = 228;   // 登录服务器
         // } else {
@@ -1560,17 +1570,22 @@ public:
 
     void update_window(uint16_t window) {
         if (window != client_window) {
-            uint16_t old_window = client_window;
-            client_window = window;
+            uint16_t old_client_window = client_window;
+            uint16_t old_data_window = data_window;
 
-            if (window < 8192 || window == 0) {
-                Logger::debug("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
-                           "] 游戏客户端窗口变化: " + to_string(old_window) + " → " +
-                           to_string(window) + "字节");
+            client_window = window;
+            data_window = window;  // v12.3.0: 同步data_window，完全模拟游戏客户端
+
+            // 记录窗口变化（仅在显著变化或小窗口时记录）
+            if (window < 8192 || window == 0 || abs((int)window - (int)old_client_window) > 8192) {
+                Logger::info("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
+                           "] 窗口同步: client_window " + to_string(old_client_window) + "→" + to_string(window) +
+                           ", data_window " + to_string(old_data_window) + "→" + to_string(data_window) +
+                           " (v12.3.0: 动态跟随)");
             }
 
             // 窗口打开时，尝试发送缓冲区数据
-            if (old_window < window && window > 0) {
+            if (old_client_window < window && window > 0) {
                 lock_guard<mutex> lock(send_lock);
                 if (!send_buffer.empty()) {
                     Logger::debug("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
@@ -2985,7 +3000,7 @@ int main() {
     }
 
     cout << "============================================================" << endl;
-    cout << "DNF游戏代理客户端 v12.2.0 (C++ 版本 - 流式转发)" << endl;
+    cout << "DNF游戏代理客户端 v12.3.0 (C++ 版本 - 动态窗口跟随)" << endl;
     cout << "编译时间: " << __DATE__ << " " << __TIME__ << endl;
     cout << "============================================================" << endl;
     cout << endl;
