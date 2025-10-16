@@ -1,6 +1,23 @@
 /*
- * DNF游戏代理客户端 - C++ 版本 v6.0 (无硬编码配置 + UDP支持)
+ * DNF游戏代理客户端 - C++ 版本 v11.0 (虚拟网卡双IP方案)
  * 从自身exe末尾读取配置
+ *
+ * v11.0更新: 虚拟网卡双IP方案 ⭐ 最终解决方案
+ *            问题根源: 游戏同时验证3个条件：
+ *                     1. UDP源IP必须在本机网卡上（Windows限制）
+ *                     2. UDP源IP = 游戏服务器IP（192.168.2.106）
+ *                     3. payload中的客户端IP也必须在本机网卡上，且 ≠ 服务器IP
+ *            v10.0失败原因: payload IP（外网用户真实IP）不在本机任何网卡上
+ *            解决方案: 虚拟网卡配置两个IP地址
+ *                     - 主IP: 192.168.2.106（游戏服务器IP，用作UDP源IP）
+ *                     - 辅助IP: 192.168.2.200（虚拟客户端IP，用于payload）
+ *            使用方法: 1. 安装虚拟网卡
+ *                     2. 配置主IP: 192.168.2.106
+ *                     3. 配置辅助IP: 192.168.2.200
+ *                     4. 查询IfIdx并修改 g_loopback_adapter_ifidx
+ *                     5. 重新编译测试
+ *
+ * v10.0更新: 虚拟网卡单IP方案（外网用户失败，payload IP验证不通过）
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -41,6 +58,12 @@
 #include "embedded_windivert.h"
 
 using namespace std;
+
+// ==================== v10.0 虚拟网卡配置 ====================
+// 用于解决跨子网UDP源IP验证问题
+// 设置为0表示使用物理网卡（自动检测），设置为具体值则使用指定的虚拟网卡IfIdx
+// 如何获取虚拟网卡IfIdx：netsh interface ipv4 show interfaces
+UINT32 g_loopback_adapter_ifidx = 50;  // ⭐ 虚拟网卡IfIdx (以太网 2: 192.168.2.106)
 
 // ==================== WinDivert 自动部署 ====================
 
@@ -1276,12 +1299,24 @@ bool inject_udp_response(HANDLE windivert_handle,
     }
     Logger::info("[UDP注入] 完整包头(前" + to_string(header_len) + "字节):\n                    " + packet_header_hex);
 
-    // 注入包 - 使用保存的接口地址信息
-    WINDIVERT_ADDRESS addr = interface_addr;
+    // v10.0: 注入包 - 根据配置选择物理网卡或虚拟网卡
+    WINDIVERT_ADDRESS addr = {};
     addr.Outbound = 0;  // Inbound（发给游戏客户端）
-    Logger::info("[UDP注入] WinDivert方向: Inbound (Outbound=0)");
-    Logger::info("[UDP注入] 接口信息: IfIdx=" + to_string(addr.Network.IfIdx) +
-                " SubIfIdx=" + to_string(addr.Network.SubIfIdx));
+
+    if (g_loopback_adapter_ifidx > 0) {
+        // 使用虚拟网卡注入（绕过Windows跨子网源IP限制）
+        addr.Network.IfIdx = g_loopback_adapter_ifidx;
+        addr.Network.SubIfIdx = 0;
+        Logger::info("[UDP注入] v10.0 使用虚拟网卡注入 (IfIdx=" + to_string(g_loopback_adapter_ifidx) + ")");
+        Logger::info("[UDP注入] WinDivert方向: Inbound (Outbound=0)");
+    } else {
+        // 使用物理网卡注入（原有逻辑）
+        addr = interface_addr;
+        addr.Outbound = 0;
+        Logger::info("[UDP注入] 使用物理网卡注入 (IfIdx=" + to_string(addr.Network.IfIdx) +
+                    " SubIfIdx=" + to_string(addr.Network.SubIfIdx) + ")");
+        Logger::info("[UDP注入] WinDivert方向: Inbound (Outbound=0)");
+    }
 
     UINT send_len = 0;
     BOOL inject_result = WinDivertSend(windivert_handle, packet.data(), (UINT)packet.size(), &send_len, &addr);
@@ -1854,16 +1889,23 @@ private:
         Logger::info("[UDP] 已发送握手请求(第一部分) (conn_id=0xFFFFFFFF, port=10011)");
 
         // ===== 新协议: 发送客户端IPv4地址(4字节) =====
-        // 获取该连接所在接口的IPv4地址
-        string interface_ipv4 = get_ipv4_from_socket_interface(udp_tunnel_sock);
-        if (interface_ipv4.empty()) {
-            Logger::error("[UDP] 无法获取连接接口的IPv4地址");
-            closesocket(udp_tunnel_sock);
-            udp_tunnel_sock = INVALID_SOCKET;
-            return false;
+        // v11.0: 使用虚拟网卡时，发送虚拟客户端IP而不是真实IP
+        string interface_ipv4;
+        if (g_loopback_adapter_ifidx > 0) {
+            // 使用虚拟客户端IP（必须在虚拟网卡上配置此IP作为辅助地址）
+            interface_ipv4 = "192.168.2.200";
+            Logger::info("[UDP] v11.0 使用虚拟客户端IP: " + interface_ipv4 + " (payload中的客户端IP)");
+        } else {
+            // 获取该连接所在接口的IPv4地址
+            interface_ipv4 = get_ipv4_from_socket_interface(udp_tunnel_sock);
+            if (interface_ipv4.empty()) {
+                Logger::error("[UDP] 无法获取连接接口的IPv4地址");
+                closesocket(udp_tunnel_sock);
+                udp_tunnel_sock = INVALID_SOCKET;
+                return false;
+            }
+            Logger::info("[UDP] 连接接口的IPv4地址: " + interface_ipv4 + " (将发送给服务器用于源IP伪造)");
         }
-
-        Logger::info("[UDP] 连接接口的IPv4地址: " + interface_ipv4 + " (将发送给服务器用于源IP伪造)");
 
         // 将IPv4字符串转换为4字节网络字节序
         sockaddr_in temp_addr{};
