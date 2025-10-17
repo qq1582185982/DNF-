@@ -1,66 +1,8 @@
 /*
- * DNF游戏代理客户端 - C++ 版本 v12.3.4 (固定窗口修复)
+ * DNF游戏代理客户端 - C++ 版本 v12.3.4
  * 从自身exe末尾读取配置
  *
- * v12.3.4更新: 固定窗口修复 🔧 解决频道切换/角色选择卡死
- *             - 恢复data_window为固定值（按端口：245/228/229字节）
- *             - 问题：v12.3.0让data_window跟随游戏窗口，游戏窗口=0时代理告诉服务器窗口也是0
- *             - 结果：服务器停止发送，游戏在等待完整数据包，永久死锁
- *             - 方案：client_window和data_window解耦，data_window保持固定不变
- *             - 效果：服务器持续发送，游戏能收到完整数据包，正常处理后窗口恢复
- *
- * v12.3.3更新: 控制台输出优化 📝 极简控制台输出
- *             - 删除游戏服务器/隧道服务器IP显示
- *             - 简化虚拟网卡配置标题（删除详细框架）
- *             - 简化自动安装详细步骤输出
- *             - 简化IP配置过程输出
- *             - 简化手动安装提示（一行搞定）
- *             - 简化测试连接输出
- *             - 用户只看到：检测、配置、测试、就绪
- *
- * v12.3.2更新: 启动日志优化
- *             - IP计算、网卡检测、自动安装、IP配置日志改为DEBUG级别
- *
- * v12.3.1更新: 运行日志优化 📝 减少运行时日志
- *             - 窗口同步日志改为DEBUG级别（变化太频繁）
- *             - UDP注入详细日志改为DEBUG级别（技术细节）
- *             - 拦截UDP包日志改为DEBUG级别（hex dump太长）
- *             - 仅保留用户需要知道的关键信息（连接、错误、警告）
- *
- * v12.3.0更新: 动态窗口跟随 ⭐ 完全模拟游戏客户端
- *             - data_window完全跟随游戏客户端的真实窗口值
- *             - 不再硬编码窗口大小（65535或245）
- *             - 游戏客户端会根据网络状况动态调整窗口
- *             - 代理完全模拟真实游戏行为，避免检测风险
- *
- * v12.2.0更新: 流式转发优化
- *             - 移除人为流控限制（窗口从245→65535字节）
- *             - 启动握手测试，避免首次连接失败
- *
- * v12.1.0更新: 动态IP配置
- *             - 根据游戏服务器IP自动计算辅助IP（同网段.252）
- *             - 支持任意网段切换
- *
- * v12.0更新: 虚拟网卡自动配置 ⭐ 最终完善版本
- *            新增功能: 程序启动时自动检测和配置虚拟网卡
- *                     1. 自动检测虚拟网卡是否已安装
- *                     2. 未安装时显示详细的手动安装指南
- *                     3. 自动配置双IP地址(192.168.2.106 + 192.168.2.200)
- *                     4. 自动查询并设置IfIdx
- *                     5. 所有步骤写入日志，方便调试
- *            使用方法: 直接运行，程序会引导完成所有配置
- *
- * v11.0更新: 虚拟网卡双IP方案 ⭐ 最终解决方案
- *            问题根源: 游戏同时验证3个条件：
- *                     1. UDP源IP必须在本机网卡上（Windows限制）
- *                     2. UDP源IP = 游戏服务器IP（192.168.2.106）
- *                     3. payload中的客户端IP也必须在本机网卡上，且 ≠ 服务器IP
- *            v10.0失败原因: payload IP（外网用户真实IP）不在本机任何网卡上
- *            解决方案: 虚拟网卡配置两个IP地址
- *                     - 主IP: 192.168.2.106（游戏服务器IP，用作UDP源IP）
- *                     - 辅助IP: 192.168.2.200（虚拟客户端IP，用于payload）
- *
- * v10.0更新: 虚拟网卡单IP方案（外网用户失败，payload IP验证不通过）
+ * 版本历史详见: VERSION_HISTORY.md
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -116,9 +58,9 @@
 
 using namespace std;
 
-// ==================== v12.0 虚拟网卡自动配置 ====================
+// ==================== 虚拟网卡自动配置 ====================
 // 用于解决跨子网UDP源IP验证问题
-// v12.0: 自动检测并配置虚拟网卡，程序启动时自动设置此值
+// 自动检测并配置虚拟网卡，程序启动时自动设置此值
 UINT32 g_loopback_adapter_ifidx = 0;  // 0 = 需要自动配置，非0 = 已配置的IfIdx
 
 // 虚拟网卡配置常量
@@ -1094,7 +1036,6 @@ bool check_ip_configured(const string& adapter_name, const char* ip) {
 // 配置IP地址（主IP + 辅助IP）
 bool configure_loopback_ips(const string& adapter_name, const string& primary_ip, const string& secondary_ip) {
     try {
-        // v12.3.3: 简化输出
         Logger::debug("[IP配置] 开始配置，网卡: " + adapter_name);
         Logger::debug("[IP配置] 主IP: " + primary_ip + ", 辅助IP: " + secondary_ip);
 
@@ -1114,7 +1055,6 @@ bool configure_loopback_ips(const string& adapter_name, const string& primary_ip
 
     // 使用PowerShell WMI方法配置双IP（更可靠）
     if (!primary_configured || !secondary_configured) {
-        // v12.3.3: 简化输出
         Logger::debug("[IP配置] 使用PowerShell WMI方法配置双IP");
 
         // 构建PowerShell命令：配置双IP地址（使用动态IP）
@@ -1271,11 +1211,10 @@ UINT32 query_loopback_ifidx(const string& adapter_name) {
     return ifidx;
 }
 
-// 主配置函数：自动设置虚拟网卡（v12.1.0 支持动态IP）
+// 主配置函数：自动设置虚拟网卡（支持动态IP）
 bool auto_setup_loopback_adapter(const string& primary_ip, const string& secondary_ip) {
-    // v12.3.3: 简化控制台输出，用户不需要看到详细的配置过程
     Logger::debug("========================================");
-    Logger::debug("虚拟网卡自动配置 (v12.3.3)");
+    Logger::debug("虚拟网卡自动配置");
     Logger::debug("  主IP（游戏服务器）: " + primary_ip);
     Logger::debug("  辅助IP（虚拟客户端）: " + secondary_ip);
     Logger::debug("========================================");
@@ -1442,13 +1381,10 @@ public:
           tunnel_sock(INVALID_SOCKET), running(false), established(false), closing(false),
           last_window_probe_time(0), window_zero_start_time(0), window_probe_logged(false) {
 
-        // v12.3.4: 固定窗口 - 恢复旧版本逻辑，解决死锁问题
-        // 问题分析：v12.3.0让data_window跟随游戏窗口，当游戏窗口=0时
-        //          代理告诉服务器窗口也是0，服务器停止发送，导致死锁
+        // 固定窗口 - 解决死锁问题
         // 关键设计：client_window和data_window解耦
         //          - client_window：跟踪游戏窗口，控制代理→游戏注入速率
         //          - data_window：固定值，告诉服务器代理的接收窗口
-        // 方案：恢复按端口设置固定窗口，data_window不再跟随游戏窗口变化
         if (dport == 10011) {
             data_window = 1024;   // 频道服务器
         } else if (dport == 7001) {
@@ -1585,9 +1521,9 @@ public:
             uint16_t old_client_window = client_window;
 
             client_window = window;
-            // v12.3.4: data_window保持固定不变，不跟随游戏窗口
+            // data_window保持固定不变，不跟随游戏窗口
 
-            // v12.3.1: 窗口变化改为DEBUG级别（变化太频繁，用户不需要看到）
+            // 窗口变化改为DEBUG级别（变化太频繁）
             // 仅在窗口归零或显著变化时记录
             if (window == 0) {
                 Logger::info("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
@@ -2098,7 +2034,6 @@ bool inject_udp_response(HANDLE windivert_handle,
     WinDivertHelperCalcChecksums(packet.data(), (UINT)packet.size(), NULL, 0);
 
     // === 打印详细的注入信息 ===
-    // v12.3.1: UDP注入详细日志改为DEBUG级别（用户不需要看到技术细节）
     // 读取计算后的校验和
     uint16_t ip_checksum = ntohs(*(uint16_t*)&ip_header[10]);
     uint16_t udp_checksum = ntohs(*(uint16_t*)&udp_header[6]);
@@ -2145,7 +2080,7 @@ bool inject_udp_response(HANDLE windivert_handle,
     }
     Logger::debug("[UDP注入] 完整包头(前" + to_string(header_len) + "字节):\n                    " + packet_header_hex);
 
-    // v10.0: 注入包 - 根据配置选择物理网卡或虚拟网卡
+    // 注入包 - 根据配置选择物理网卡或虚拟网卡
     WINDIVERT_ADDRESS addr = {};
     addr.Outbound = 0;  // Inbound（发给游戏客户端）
 
@@ -2153,7 +2088,7 @@ bool inject_udp_response(HANDLE windivert_handle,
         // 使用虚拟网卡注入（绕过Windows跨子网源IP限制）
         addr.Network.IfIdx = g_loopback_adapter_ifidx;
         addr.Network.SubIfIdx = 0;
-        Logger::debug("[UDP注入] v10.0 使用虚拟网卡注入 (IfIdx=" + to_string(g_loopback_adapter_ifidx) + ")");
+        Logger::debug("[UDP注入] 使用虚拟网卡注入 (IfIdx=" + to_string(g_loopback_adapter_ifidx) + ")");
         Logger::debug("[UDP注入] WinDivert方向: Inbound (Outbound=0)");
     } else {
         // 使用物理网卡注入（原有逻辑）
@@ -2191,7 +2126,7 @@ private:
     string game_server_ip;
     string tunnel_server_ip;
     uint16_t tunnel_port;
-    string secondary_ip;  // v12.1.0: 虚拟客户端IP（动态）
+    string secondary_ip;  // 虚拟客户端IP（动态）
 
     HANDLE windivert_handle;
     atomic<bool> running;
@@ -2520,7 +2455,7 @@ private:
                 conn = nullptr;
             }
 
-            // v12.3.4: 游戏重启时源端口会变化，需要清理相同(src_ip, dst_port)的所有旧连接
+            // 游戏重启时源端口会变化，需要清理相同(src_ip, dst_port)的所有旧连接
             // 问题：旧连接key=(ip, old_port, 7001), 新连接key=(ip, new_port, 7001)
             // 如果只检查exact key，旧连接永久残留
             vector<tuple<string, uint16_t, uint16_t>> keys_to_remove;
@@ -2607,7 +2542,7 @@ private:
                           const string& dst_ip, uint16_t dst_port,
                           const uint8_t* payload, int payload_len,
                           const WINDIVERT_ADDRESS& addr) {
-        // v12.3.1: 拦截UDP包的详细日志改为DEBUG级别
+        // 拦截UDP包的详细日志改为DEBUG级别
         // 打印完整载荷（16字节一行，格式化显示）
         string hex_dump = "";
         if (payload_len > 0) {
@@ -2764,12 +2699,12 @@ private:
         Logger::info("[UDP] 已发送握手请求(第一部分) (conn_id=0xFFFFFFFF, port=10011)");
 
         // ===== 新协议: 发送客户端IPv4地址(4字节) =====
-        // v12.1.0: 使用虚拟网卡时，发送动态虚拟客户端IP而不是真实IP
+        // 使用虚拟网卡时，发送动态虚拟客户端IP而不是真实IP
         string interface_ipv4;
         if (g_loopback_adapter_ifidx > 0) {
             // 使用动态虚拟客户端IP（从配置自动计算的辅助IP）
             interface_ipv4 = secondary_ip;
-            Logger::info("[UDP] v12.2.0 使用虚拟客户端IP: " + interface_ipv4 + " (payload中的客户端IP)");
+            Logger::info("[UDP] 使用虚拟客户端IP: " + interface_ipv4 + " (payload中的客户端IP)");
         } else {
             // 获取该连接所在接口的IPv4地址
             interface_ipv4 = get_ipv4_from_socket_interface(udp_tunnel_sock);
@@ -3043,7 +2978,7 @@ int main() {
     }
 
     cout << "============================================================" << endl;
-    cout << "DNF游戏代理客户端 v12.3.4 (C++ 版本 - 固定窗口修复)" << endl;
+    cout << "DNF游戏代理客户端 v12.3.4" << endl;
     cout << "编译时间: " << __DATE__ << " " << __TIME__ << endl;
     cout << "============================================================" << endl;
     cout << endl;
