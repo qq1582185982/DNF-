@@ -1,6 +1,24 @@
 /*
- * DNF游戏代理客户端 - C++ 版本 v12.3.0 (动态窗口跟随)
+ * DNF游戏代理客户端 - C++ 版本 v12.3.3 (控制台输出优化)
  * 从自身exe末尾读取配置
+ *
+ * v12.3.3更新: 控制台输出优化 📝 极简控制台输出
+ *             - 删除游戏服务器/隧道服务器IP显示
+ *             - 简化虚拟网卡配置标题（删除详细框架）
+ *             - 简化自动安装详细步骤输出
+ *             - 简化IP配置过程输出
+ *             - 简化手动安装提示（一行搞定）
+ *             - 简化测试连接输出
+ *             - 用户只看到：检测、配置、测试、就绪
+ *
+ * v12.3.2更新: 启动日志优化
+ *             - IP计算、网卡检测、自动安装、IP配置日志改为DEBUG级别
+ *
+ * v12.3.1更新: 运行日志优化 📝 减少运行时日志
+ *             - 窗口同步日志改为DEBUG级别（变化太频繁）
+ *             - UDP注入详细日志改为DEBUG级别（技术细节）
+ *             - 拦截UDP包日志改为DEBUG级别（hex dump太长）
+ *             - 仅保留用户需要知道的关键信息（连接、错误、警告）
  *
  * v12.3.0更新: 动态窗口跟随 ⭐ 完全模拟游戏客户端
  *             - data_window完全跟随游戏客户端的真实窗口值
@@ -374,7 +392,7 @@ string get_local_ipv4_address() {
 
 // ==================== 配置读取 ====================
 
-bool read_config_from_self(string& game_ip, string& tunnel_ip, int& port) {
+bool read_config_from_self(string& game_ip, string& tunnel_ip, int& port, string& version_name) {
     // 1. 获取当前exe路径
     char exe_path[MAX_PATH];
     if (GetModuleFileNameA(NULL, exe_path, MAX_PATH) == 0) {
@@ -428,7 +446,7 @@ bool read_config_from_self(string& game_ip, string& tunnel_ip, int& port) {
     string json_content = tail_content.substr(start_pos, end_pos - start_pos);
 
     // 7. 简单解析JSON (不使用外部库)
-    // 期望格式: {"game_server_ip":"192.168.1.100","tunnel_server_ip":"10.0.0.50","tunnel_port":33223}
+    // 期望格式: {"game_server_ip":"192.168.1.100","tunnel_server_ip":"10.0.0.50","tunnel_port":33223,"version_name":"龙鸣86"}
 
     // 查找game_server_ip
     size_t game_ip_pos = json_content.find("\"game_server_ip\"");
@@ -468,6 +486,26 @@ bool read_config_from_self(string& game_ip, string& tunnel_ip, int& port) {
         port = stoi(port_str);
     } catch (...) {
         return false;
+    }
+
+    // 查找version_name（可选字段）
+    size_t version_pos = json_content.find("\"version_name\"");
+    if (version_pos != string::npos) {
+        size_t version_colon = json_content.find(":", version_pos);
+        if (version_colon != string::npos) {
+            size_t version_quote1 = json_content.find("\"", version_colon);
+            if (version_quote1 != string::npos) {
+                size_t version_quote2 = json_content.find("\"", version_quote1 + 1);
+                if (version_quote2 != string::npos) {
+                    version_name = json_content.substr(version_quote1 + 1, version_quote2 - version_quote1 - 1);
+                }
+            }
+        }
+    }
+
+    // 如果没有找到version_name，使用默认值
+    if (version_name.empty()) {
+        version_name = "未命名版本";
     }
 
     return true;
@@ -571,8 +609,8 @@ string Logger::current_log_level = "INFO";
 // 在程序启动时主动连接隧道服务器进行握手测试
 // 目的：预热整个代理链路，避免第一次连接失败
 bool test_tunnel_handshake(const string& tunnel_ip, uint16_t tunnel_port) {
-    cout << "[启动测试] 正在测试到隧道服务器的连接..." << endl;
-    Logger::info("[启动测试] 开始握手测试 -> " + tunnel_ip + ":" + to_string(tunnel_port));
+    cout << "[启动测试] 正在测试代理链路..." << endl;
+    Logger::debug("[启动测试] 开始握手测试 -> " + tunnel_ip + ":" + to_string(tunnel_port));
 
     // 使用getaddrinfo支持域名/IPv4/IPv6
     struct addrinfo hints{}, *result = nullptr, *rp = nullptr;
@@ -621,7 +659,7 @@ bool test_tunnel_handshake(const string& tunnel_ip, uint16_t tunnel_port) {
     freeaddrinfo(result);
 
     if (!connected || test_sock == INVALID_SOCKET) {
-        cout << "[启动测试] ✗ 无法连接到隧道服务器" << endl;
+        cout << "✗ 代理链路测试失败" << endl;
         Logger::error("[启动测试] 所有连接尝试均失败");
         return false;
     }
@@ -648,27 +686,27 @@ bool test_tunnel_handshake(const string& tunnel_ip, uint16_t tunnel_port) {
     closesocket(test_sock);
 
     if (recv_len > 0) {
-        cout << "[启动测试] ✓ 隧道服务器响应正常 (收到 " << recv_len << " 字节)" << endl;
-        Logger::info("[启动测试] 收到服务器响应: " + to_string(recv_len) + "字节");
+        cout << "✓ 代理链路测试通过响应正常 (收到 " << recv_len << " 字节)" << endl;
+        Logger::debug("[启动测试] 收到服务器响应: " + to_string(recv_len) + "字节");
     } else if (recv_len == 0) {
         // 服务器关闭连接，这也是正常的（说明连接建立成功）
-        cout << "[启动测试] ✓ 隧道服务器连接正常 (连接已建立)" << endl;
-        Logger::info("[启动测试] 服务器接受连接并关闭");
+        cout << "✓ 代理链路测试通过连接正常 (连接已建立)" << endl;
+        Logger::debug("[启动测试] 服务器接受连接并关闭");
     } else {
         // 超时或错误，但连接已建立，仍然算成功
         int err = WSAGetLastError();
         if (err == WSAETIMEDOUT) {
-            cout << "[启动测试] ✓ 隧道服务器连接正常 (超时，但连接已建立)" << endl;
-            Logger::info("[启动测试] 接收超时，但TCP连接已成功建立");
+            cout << "✓ 代理链路测试通过连接正常 (超时，但连接已建立)" << endl;
+            Logger::debug("[启动测试] 接收超时，但TCP连接已成功建立");
         } else {
-            cout << "[启动测试] ⚠ 连接已建立，但接收时出错 (错误码: " << err << ")" << endl;
-            Logger::warning("[启动测试] 接收错误: " + to_string(err) + "，但连接已建立");
+            cout << "✓ 代理链路测试通过 (连接已建立)" << endl;
+            Logger::debug("[启动测试] 接收错误: " + to_string(err) + "，但连接已建立");
         }
     }
 
-    Logger::info("[启动测试] ========================================");
-    Logger::info("[启动测试] 握手测试完成，代理链路就绪");
-    Logger::info("[启动测试] ========================================");
+    Logger::debug("[启动测试] ========================================");
+    Logger::debug("[启动测试] 握手测试完成，代理链路就绪");
+    Logger::debug("[启动测试] ========================================");
 
     return true;
 }
@@ -689,8 +727,7 @@ string calculate_secondary_ip(const string& primary_ip) {
     // 拼接 .252
     string secondary_ip = network_prefix + ".252";
 
-    Logger::info("[IP计算] 主IP: " + primary_ip + " → 辅助IP: " + secondary_ip);
-    cout << "[IP计算] 辅助IP: " + secondary_ip + " (虚拟客户端IP)" << endl;
+    Logger::debug("[IP计算] 主IP: " + primary_ip + " → 辅助IP: " + secondary_ip);
 
     return secondary_ip;
 }
@@ -699,18 +736,17 @@ string calculate_secondary_ip(const string& primary_ip) {
 
 // 完全自动安装Microsoft Loopback Adapter（适配所有Windows系统）
 bool install_loopback_adapter_auto() {
-    Logger::info("[自动安装] 开始安装虚拟网卡");
-    cout << "正在自动安装 Microsoft Loopback Adapter..." << endl;
+    Logger::debug("[自动安装] 开始安装虚拟网卡");
+    cout << "  正在自动安装..." << endl;
 
     // 方法1: 使用SetupAPI创建虚拟设备（适用于所有Windows版本）
-    Logger::info("[自动安装] 方法1: 使用SetupAPI");
-    cout << "  [方法1] 使用 SetupAPI 创建设备..." << endl;
+    Logger::debug("[自动安装] 方法1: 使用SetupAPI");
 
     HDEVINFO device_info_set = SetupDiCreateDeviceInfoList(&GUID_DEVCLASS_NET, NULL);
     if (device_info_set == INVALID_HANDLE_VALUE) {
         DWORD error = GetLastError();
         Logger::error("[自动安装] SetupDiCreateDeviceInfoList 失败，错误码: " + to_string(error));
-        cout << "    失败：无法创建设备信息集 (错误码: " << error << ")" << endl;
+        Logger::debug("    失败：无法创建设备信息集 (错误码: " + to_string(error) + ")");
         return false;
     }
 
@@ -723,7 +759,7 @@ bool install_loopback_adapter_auto() {
                                    DICD_GENERATE_ID, &device_info_data)) {
         DWORD error = GetLastError();
         Logger::error("[自动安装] SetupDiCreateDeviceInfo 失败，错误码: " + to_string(error));
-        cout << "    失败：无法创建设备信息 (错误码: " << error << ")" << endl;
+        Logger::debug("    失败：无法创建设备信息 (错误码: " + to_string(error) + ")");
         SetupDiDestroyDeviceInfoList(device_info_set);
         return false;
     }
@@ -734,7 +770,7 @@ bool install_loopback_adapter_auto() {
                                            HARDWARE_ID_LEN * sizeof(WCHAR))) {
         DWORD error = GetLastError();
         Logger::error("[自动安装] SetupDiSetDeviceRegistryProperty 失败，错误码: " + to_string(error));
-        cout << "    失败：无法设置硬件ID (错误码: " << error << ")" << endl;
+        Logger::debug("    失败：无法设置硬件ID (错误码: " + to_string(error) + ")");
         SetupDiDestroyDeviceInfoList(device_info_set);
         return false;
     }
@@ -743,30 +779,30 @@ bool install_loopback_adapter_auto() {
     if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE, device_info_set, &device_info_data)) {
         DWORD error = GetLastError();
         Logger::error("[自动安装] SetupDiCallClassInstaller(DIF_REGISTERDEVICE) 失败，错误码: " + to_string(error));
-        cout << "    失败：无法注册设备 (错误码: " << error << ")" << endl;
+        Logger::debug("    失败：无法注册设备 (错误码: " + to_string(error) + ")");
         SetupDiDestroyDeviceInfoList(device_info_set);
         return false;
     }
 
-    cout << "    ✓ 设备已注册" << endl;
-    Logger::info("[自动安装] 设备已注册");
+    Logger::debug("    ✓ 设备已注册");
+    Logger::debug("[自动安装] 设备已注册");
 
     // 安装驱动
     if (!SetupDiCallClassInstaller(DIF_INSTALLDEVICE, device_info_set, &device_info_data)) {
         DWORD error = GetLastError();
-        Logger::error("[自动安装] SetupDiCallClassInstaller(DIF_INSTALLDEVICE) 失败，错误码: " + to_string(error));
-        cout << "    失败：驱动安装失败 (错误码: " << error << ")" << endl;
+        Logger::debug("[自动安装] 方法1失败，尝试其他方法 (错误码: " + to_string(error) + ")");
+        Logger::debug("    失败：驱动安装失败 (错误码: " + to_string(error) + ")");
 
         // 注意：不清理设备，保留已注册的设备给方法2使用
-        Logger::info("[自动安装] 保留已注册的设备，尝试其他安装方法");
+        Logger::debug("[自动安装] 保留已注册的设备，尝试其他安装方法");
         SetupDiDestroyDeviceInfoList(device_info_set);
 
         // 尝试方法2
         goto method2;
     }
 
-    cout << "    ✓ 驱动已安装" << endl;
-    Logger::info("[自动安装] 驱动安装成功");
+    Logger::debug("    ✓ 驱动已安装");
+    Logger::debug("[自动安装] 驱动安装成功");
     SetupDiDestroyDeviceInfoList(device_info_set);
 
     // 等待设备初始化
@@ -777,8 +813,8 @@ bool install_loopback_adapter_auto() {
 
 method2:
     // 方法2: 使用UpdateDriverForPlugAndPlayDevices API（推荐）
-    Logger::info("[自动安装] 方法2: 使用UpdateDriverForPlugAndPlayDevices");
-    cout << "  [方法2] 使用驱动更新API安装..." << endl;
+    Logger::debug("[自动安装] 方法2: 使用UpdateDriverForPlugAndPlayDevices");
+    Logger::debug("  [方法2] 使用驱动更新API安装...");
 
     // 加载newdev.dll
     typedef BOOL (WINAPI *UpdateDriverForPlugAndPlayDevicesW_t)(
@@ -801,29 +837,28 @@ method2:
             GetWindowsDirectoryW(inf_path, MAX_PATH);
             wcscat(inf_path, L"\\inf\\netloop.inf");
 
-            Logger::info("[自动安装] 调用UpdateDriverForPlugAndPlayDevices");
+            Logger::debug("[自动安装] 调用UpdateDriverForPlugAndPlayDevices");
             cout << "    安装驱动..." << endl;
 
             if (UpdateDriverFunc(NULL, L"*msloop", inf_path,
                                 INSTALLFLAG_FORCE | INSTALLFLAG_NONINTERACTIVE,
                                 &reboot_required)) {
-                cout << "    ✓ 驱动安装成功" << endl;
-                Logger::info("[自动安装] 方法2成功");
+                Logger::debug("    ✓ 驱动安装成功");
+                Logger::debug("[自动安装] 方法2成功");
                 FreeLibrary(newdev);
                 Sleep(3000);
                 return true;
             } else {
                 DWORD error = GetLastError();
-                Logger::error("[自动安装] UpdateDriverForPlugAndPlayDevices 失败，错误码: " + to_string(error));
-                cout << "    失败 (错误码: " << error << ")" << endl;
+                Logger::debug("[自动安装] 方法2失败，尝试其他方法 (错误码: " + to_string(error) + ")");
             }
         }
         FreeLibrary(newdev);
     }
 
     // 方法3: 使用pnputil命令（Windows Vista+）
-    cout << "  [方法3] 使用pnputil命令..." << endl;
-    Logger::info("[自动安装] 方法3: 使用pnputil");
+    Logger::debug("  [方法3] 使用pnputil命令...");
+    Logger::debug("[自动安装] 方法3: 使用pnputil");
 
     STARTUPINFOA si = {sizeof(si)};
     PROCESS_INFORMATION pi;
@@ -841,18 +876,18 @@ method2:
         CloseHandle(pi.hThread);
 
         if (exit_code == 0) {
-            cout << "    ✓ pnputil安装成功" << endl;
-            Logger::info("[自动安装] 方法3成功");
+            Logger::debug("    ✓ pnputil安装成功");
+            Logger::debug("[自动安装] 方法3成功");
             Sleep(3000);
             return true;
         } else {
-            Logger::error("[自动安装] pnputil失败，退出码: " + to_string(exit_code));
+            Logger::debug("[自动安装] 方法3失败，尝试其他方法 (退出码: " + to_string(exit_code) + ")");
         }
     }
 
     // 方法4: 使用PowerShell（Windows 7+）
-    cout << "  [方法4] 使用PowerShell脚本..." << endl;
-    Logger::info("[自动安装] 方法4: 使用PowerShell");
+    Logger::debug("  [方法4] 使用PowerShell脚本...");
+    Logger::debug("[自动安装] 方法4: 使用PowerShell");
 
     cmd = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Add-WindowsDriver -Online -Driver $env:windir\\inf\\netloop.inf\"";
     if (CreateProcessA(NULL, (LPSTR)cmd.c_str(), NULL, NULL, FALSE,
@@ -864,15 +899,15 @@ method2:
         CloseHandle(pi.hThread);
 
         if (exit_code == 0) {
-            cout << "    ✓ PowerShell安装成功" << endl;
-            Logger::info("[自动安装] 方法4成功");
+            Logger::debug("    ✓ PowerShell安装成功");
+            Logger::debug("[自动安装] 方法4成功");
             Sleep(3000);
             return true;
         }
     }
 
     Logger::error("[自动安装] 所有自动安装方法均失败");
-    cout << "  ✗ 自动安装失败" << endl;
+    Logger::debug("  ✗ 自动安装失败");
     return false;
 }
 
@@ -1052,28 +1087,28 @@ bool check_ip_configured(const string& adapter_name, const char* ip) {
 // 配置IP地址（主IP + 辅助IP）
 bool configure_loopback_ips(const string& adapter_name, const string& primary_ip, const string& secondary_ip) {
     try {
-        cout << "正在配置虚拟网卡IP地址..." << endl;
-        Logger::info("[IP配置] 开始配置，网卡: " + adapter_name);
-        Logger::info("[IP配置] 主IP: " + primary_ip + ", 辅助IP: " + secondary_ip);
+        // v12.3.3: 简化输出
+        Logger::debug("[IP配置] 开始配置，网卡: " + adapter_name);
+        Logger::debug("[IP配置] 主IP: " + primary_ip + ", 辅助IP: " + secondary_ip);
 
         // 检查IP是否已配置
-        Logger::info("[IP配置] 检查当前IP配置");
+        Logger::debug("[IP配置] 检查当前IP配置");
         bool primary_configured = check_ip_configured(adapter_name, primary_ip.c_str());
-        Logger::info("[IP配置] 主IP检查完成: " + string(primary_configured ? "已配置" : "未配置"));
+        Logger::debug("[IP配置] 主IP检查完成: " + string(primary_configured ? "已配置" : "未配置"));
 
         bool secondary_configured = check_ip_configured(adapter_name, secondary_ip.c_str());
-        Logger::info("[IP配置] 辅助IP检查完成: " + string(secondary_configured ? "已配置" : "未配置"));
+        Logger::debug("[IP配置] 辅助IP检查完成: " + string(secondary_configured ? "已配置" : "未配置"));
 
     if (primary_configured && secondary_configured) {
         cout << "  IP地址已正确配置" << endl;
-        Logger::info("[IP配置] IP已配置，跳过");
+        Logger::debug("[IP配置] IP已配置，跳过");
         return true;
     }
 
     // 使用PowerShell WMI方法配置双IP（更可靠）
     if (!primary_configured || !secondary_configured) {
-        cout << "  使用PowerShell配置双IP..." << endl;
-        Logger::info("[IP配置] 使用PowerShell WMI方法配置双IP");
+        // v12.3.3: 简化输出
+        Logger::debug("[IP配置] 使用PowerShell WMI方法配置双IP");
 
         // 构建PowerShell命令：配置双IP地址（使用动态IP）
         string ps_command = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"";
@@ -1083,32 +1118,32 @@ bool configure_loopback_ips(const string& adapter_name, const string& primary_ip
         ps_command += "if ($result.ReturnValue -eq 0) { Write-Host 'SUCCESS' } else { exit 1 } ";
         ps_command += "} else { exit 2 }\"";
 
-        Logger::info("[IP配置] PowerShell命令: " + ps_command);
+        Logger::debug("[IP配置] PowerShell命令: " + ps_command);
 
         bool success = false;
         for (int retry = 0; retry < 3 && !success; retry++) {
             if (retry > 0) {
                 cout << "    重试 " << retry << "/3..." << endl;
-                Logger::info("[IP配置] 重试PowerShell配置，第" + to_string(retry) + "次");
+                Logger::debug("[IP配置] 重试PowerShell配置，第" + to_string(retry) + "次");
                 Sleep(3000);  // 等待网卡初始化
             }
 
             int result = system(ps_command.c_str());
-            Logger::info("[IP配置] PowerShell命令执行结果: " + to_string(result));
+            Logger::debug("[IP配置] PowerShell命令执行结果: " + to_string(result));
 
             if (result == 0) {
                 success = true;
-                cout << "  ✓ PowerShell配置成功" << endl;
+                Logger::debug("  ✓ PowerShell配置成功");
                 Sleep(2000);  // 等待配置生效
             }
         }
 
         if (!success) {
             Logger::error("[IP配置] PowerShell配置失败");
-            cout << "  ⚠ PowerShell配置失败，尝试备用方案..." << endl;
+            Logger::debug("  ⚠ PowerShell配置失败，尝试备用方案...");
 
             // 备用方案：使用netsh逐个配置（使用动态IP）
-            cout << "  使用netsh配置主IP..." << endl;
+            Logger::debug("  使用netsh配置主IP...");
             string cmd1 = "netsh interface ip set address \"" + adapter_name + "\" static " +
                          primary_ip + " " + string(LOOPBACK_ADAPTER_SUBNET);
             system(cmd1.c_str());
@@ -1128,8 +1163,8 @@ bool configure_loopback_ips(const string& adapter_name, const string& primary_ip
     secondary_configured = check_ip_configured(adapter_name, secondary_ip.c_str());
 
         if (primary_configured && secondary_configured) {
-            cout << "  ✓ IP地址配置成功" << endl;
-            Logger::info("[IP配置] ✓ 配置成功");
+            cout << "  ✓ IP配置完成" << endl;
+            Logger::debug("[IP配置] ✓ 配置成功");
             return true;
         } else {
             cout << "  ⚠ IP地址自动配置失败" << endl;
@@ -1165,7 +1200,7 @@ bool configure_loopback_ips(const string& adapter_name, const string& primary_ip
 
             if (primary_configured && secondary_configured) {
                 cout << "  ✓ 检测到IP配置成功" << endl;
-                Logger::info("[IP配置] ✓ 手动配置成功");
+                Logger::debug("[IP配置] ✓ 手动配置成功");
                 return true;
             } else {
                 cout << "  ✗ 仍未检测到正确的IP配置" << endl;
@@ -1231,48 +1266,29 @@ UINT32 query_loopback_ifidx(const string& adapter_name) {
 
 // 主配置函数：自动设置虚拟网卡（v12.1.0 支持动态IP）
 bool auto_setup_loopback_adapter(const string& primary_ip, const string& secondary_ip) {
-    cout << "========================================" << endl;
-    cout << "虚拟网卡自动配置 (v12.3.0)" << endl;
-    cout << "========================================" << endl;
-    cout << endl;
-
-    Logger::info("========================================");
-    Logger::info("虚拟网卡自动配置 (v12.3.0)");
-    Logger::info("  主IP（游戏服务器）: " + primary_ip);
-    Logger::info("  辅助IP（虚拟客户端）: " + secondary_ip);
-    Logger::info("========================================");
+    // v12.3.3: 简化控制台输出，用户不需要看到详细的配置过程
+    Logger::debug("========================================");
+    Logger::debug("虚拟网卡自动配置 (v12.3.3)");
+    Logger::debug("  主IP（游戏服务器）: " + primary_ip);
+    Logger::debug("  辅助IP（虚拟客户端）: " + secondary_ip);
+    Logger::debug("========================================");
 
     // 1. 查找虚拟网卡
     cout << "[1/3] 检测虚拟网卡..." << endl;
-    Logger::info("[1/3] 检测虚拟网卡");
+    Logger::debug("[1/3] 检测虚拟网卡");
     string adapter_name = find_loopback_adapter_name(primary_ip);
 
     if (adapter_name.empty()) {
         cout << "  未找到虚拟网卡，开始自动安装..." << endl;
-        Logger::info("[1/3] 未找到虚拟网卡，开始自动安装");
+        Logger::debug("[1/3] 未找到虚拟网卡，开始自动安装");
         cout << endl;
 
         // 调用自动安装函数
         if (!install_loopback_adapter_auto()) {
-            cout << endl;
-            cout << "========================================" << endl;
-            cout << "自动安装失败，请手动安装" << endl;
-            cout << "========================================" << endl;
-            cout << endl;
-            cout << "手动安装步骤（只需30秒）：" << endl;
-            cout << "1. 按 Win+X，选择 \"设备管理器\"" << endl;
-            cout << "2. 点击顶部菜单 \"操作\" → \"添加过时硬件\"" << endl;
-            cout << "3. 选择 \"安装我手动从列表选择的硬件\"" << endl;
-            cout << "4. 类别选择 \"网络适配器\"" << endl;
-            cout << "5. 厂商选择 \"Microsoft\"" << endl;
-            cout << "6. 型号选择 \"Microsoft KM-TEST 环回适配器\"" << endl;
-            cout << "   (英文系统为 \"Microsoft KM-TEST Loopback Adapter\")" << endl;
-            cout << "7. 点击 \"下一步\" 完成安装" << endl;
-            cout << endl;
-            cout << "安装完成后，按任意键继续..." << endl;
-            cout << "========================================" << endl;
+            cout << "  ⚠ 自动安装失败，请手动安装" << endl;
+            cout << "  手动安装步骤：设备管理器 → 操作 → 添加过时硬件 → 网络适配器 → Microsoft → Microsoft KM-TEST 环回适配器" << endl;
+            cout << "  安装完成后，按任意键继续..." << endl;
             system("pause");
-            cout << endl;
         }
 
         // 循环检测（无论自动安装是否成功都要检测）
@@ -1281,7 +1297,7 @@ bool auto_setup_loopback_adapter(const string& primary_ip, const string& seconda
             adapter_name = find_loopback_adapter_name();
             if (!adapter_name.empty()) {
                 cout << "  ✓ 检测到虚拟网卡: " << adapter_name << endl;
-                Logger::info("[1/3] 检测到虚拟网卡: " + adapter_name);
+                Logger::debug("[1/3] 检测到虚拟网卡: " + adapter_name);
                 break;
             }
             if (retry < 14) {
@@ -1297,14 +1313,14 @@ bool auto_setup_loopback_adapter(const string& primary_ip, const string& seconda
         }
     } else {
         cout << "  ✓ 找到虚拟网卡: " << adapter_name << endl;
-        Logger::info("[1/3] 找到虚拟网卡: " + adapter_name);
+        Logger::debug("[1/3] 找到虚拟网卡: " + adapter_name);
     }
 
     cout << endl;
 
     // 2. 配置IP地址（使用动态IP）
     cout << "[2/3] 配置IP地址..." << endl;
-    Logger::info("[2/3] 配置IP地址");
+    Logger::debug("[2/3] 配置IP地址");
     if (!configure_loopback_ips(adapter_name, primary_ip, secondary_ip)) {
         return false;
     }
@@ -1313,7 +1329,7 @@ bool auto_setup_loopback_adapter(const string& primary_ip, const string& seconda
 
     // 3. 查询IfIdx
     cout << "[3/3] 查询网卡索引..." << endl;
-    Logger::info("[3/3] 查询网卡索引");
+    Logger::debug("[3/3] 查询网卡索引");
     UINT32 ifidx = query_loopback_ifidx(adapter_name);
     if (ifidx == 0) {
         cout << "  ✗ 无法查询IfIdx" << endl;
@@ -1321,26 +1337,19 @@ bool auto_setup_loopback_adapter(const string& primary_ip, const string& seconda
         return false;
     }
 
-    cout << "  ✓ 网卡索引: " << ifidx << endl;
-    Logger::info("[3/3] IfIdx=" + to_string(ifidx));
+    Logger::debug("[3/3] IfIdx=" + to_string(ifidx));
 
     // 设置全局变量
     g_loopback_adapter_ifidx = ifidx;
 
     cout << endl;
-    cout << "========================================" << endl;
     cout << "✓ 虚拟网卡配置完成" << endl;
-    cout << "  网卡名称: " << adapter_name << endl;
-    cout << "  主IP（游戏服务器）: " << primary_ip << endl;
-    cout << "  辅助IP（虚拟客户端）: " << secondary_ip << endl;
-    cout << "  IfIdx: " << ifidx << endl;
-    cout << "========================================" << endl;
     cout << endl;
 
-    Logger::info("========================================");
-    Logger::info("✓ 虚拟网卡配置完成");
-    Logger::info("  网卡: " + adapter_name + ", 主IP: " + primary_ip + ", 辅助IP: " + secondary_ip + ", IfIdx: " + to_string(ifidx));
-    Logger::info("========================================");
+    Logger::debug("========================================");
+    Logger::debug("✓ 虚拟网卡配置完成");
+    Logger::debug("  网卡: " + adapter_name + ", 主IP: " + primary_ip + ", 辅助IP: " + secondary_ip + ", IfIdx: " + to_string(ifidx));
+    Logger::debug("========================================");
 
     return true;
 }
@@ -1576,12 +1585,15 @@ public:
             client_window = window;
             data_window = window;  // v12.3.0: 同步data_window，完全模拟游戏客户端
 
-            // 记录窗口变化（仅在显著变化或小窗口时记录）
-            if (window < 8192 || window == 0 || abs((int)window - (int)old_client_window) > 8192) {
+            // v12.3.1: 窗口变化改为DEBUG级别（变化太频繁，用户不需要看到）
+            // 仅在窗口归零或显著变化时记录
+            if (window == 0) {
                 Logger::info("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
+                           "] 窗口已关闭: " + to_string(old_client_window) + "→0 (将触发窗口探测)");
+            } else {
+                Logger::debug("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
                            "] 窗口同步: client_window " + to_string(old_client_window) + "→" + to_string(window) +
-                           ", data_window " + to_string(old_data_window) + "→" + to_string(data_window) +
-                           " (v12.3.0: 动态跟随)");
+                           ", data_window " + to_string(old_data_window) + "→" + to_string(data_window));
             }
 
             // 窗口打开时，尝试发送缓冲区数据
@@ -2084,24 +2096,25 @@ bool inject_udp_response(HANDLE windivert_handle,
     WinDivertHelperCalcChecksums(packet.data(), (UINT)packet.size(), NULL, 0);
 
     // === 打印详细的注入信息 ===
+    // v12.3.1: UDP注入详细日志改为DEBUG级别（用户不需要看到技术细节）
     // 读取计算后的校验和
     uint16_t ip_checksum = ntohs(*(uint16_t*)&ip_header[10]);
     uint16_t udp_checksum = ntohs(*(uint16_t*)&udp_header[6]);
 
-    Logger::info("[UDP注入] ========== 开始注入UDP响应 ==========");
-    Logger::info("[UDP注入] IP: " + remote_ip + ":" + to_string(remote_port) +
+    Logger::debug("[UDP注入] ========== 开始注入UDP响应 ==========");
+    Logger::debug("[UDP注入] IP: " + remote_ip + ":" + to_string(remote_port) +
                 " → " + local_ip + ":" + to_string(local_port));
-    Logger::info("[UDP注入] 包大小: " + to_string(packet.size()) + "字节 (IP头:20 + UDP头:8 + 载荷:" + to_string(len) + ")");
+    Logger::debug("[UDP注入] 包大小: " + to_string(packet.size()) + "字节 (IP头:20 + UDP头:8 + 载荷:" + to_string(len) + ")");
 
     // 打印IP头关键字段
     char ip_checksum_hex[8];
     sprintf(ip_checksum_hex, "0x%04x", ip_checksum);
-    Logger::info("[UDP注入] IP校验和: " + string(ip_checksum_hex));
+    Logger::debug("[UDP注入] IP校验和: " + string(ip_checksum_hex));
 
     // 打印UDP头关键字段
     char udp_checksum_hex[8];
     sprintf(udp_checksum_hex, "0x%04x", udp_checksum);
-    Logger::info("[UDP注入] UDP校验和: " + string(udp_checksum_hex));
+    Logger::debug("[UDP注入] UDP校验和: " + string(udp_checksum_hex));
 
     // 打印完整payload hex dump
     if (len > 0) {
@@ -2114,7 +2127,7 @@ bool inject_udp_response(HANDLE windivert_handle,
             sprintf(buf, "%02x ", payload[i]);
             hex_dump += buf;
         }
-        Logger::info("[UDP注入] Payload(" + to_string(len) + "字节):\n                    " + hex_dump);
+        Logger::debug("[UDP注入] Payload(" + to_string(len) + "字节):\n                    " + hex_dump);
     }
 
     // 打印完整IP+UDP包头(前28字节)
@@ -2128,7 +2141,7 @@ bool inject_udp_response(HANDLE windivert_handle,
         sprintf(buf, "%02x ", packet[i]);
         packet_header_hex += buf;
     }
-    Logger::info("[UDP注入] 完整包头(前" + to_string(header_len) + "字节):\n                    " + packet_header_hex);
+    Logger::debug("[UDP注入] 完整包头(前" + to_string(header_len) + "字节):\n                    " + packet_header_hex);
 
     // v10.0: 注入包 - 根据配置选择物理网卡或虚拟网卡
     WINDIVERT_ADDRESS addr = {};
@@ -2138,26 +2151,26 @@ bool inject_udp_response(HANDLE windivert_handle,
         // 使用虚拟网卡注入（绕过Windows跨子网源IP限制）
         addr.Network.IfIdx = g_loopback_adapter_ifidx;
         addr.Network.SubIfIdx = 0;
-        Logger::info("[UDP注入] v10.0 使用虚拟网卡注入 (IfIdx=" + to_string(g_loopback_adapter_ifidx) + ")");
-        Logger::info("[UDP注入] WinDivert方向: Inbound (Outbound=0)");
+        Logger::debug("[UDP注入] v10.0 使用虚拟网卡注入 (IfIdx=" + to_string(g_loopback_adapter_ifidx) + ")");
+        Logger::debug("[UDP注入] WinDivert方向: Inbound (Outbound=0)");
     } else {
         // 使用物理网卡注入（原有逻辑）
         addr = interface_addr;
         addr.Outbound = 0;
-        Logger::info("[UDP注入] 使用物理网卡注入 (IfIdx=" + to_string(addr.Network.IfIdx) +
+        Logger::debug("[UDP注入] 使用物理网卡注入 (IfIdx=" + to_string(addr.Network.IfIdx) +
                     " SubIfIdx=" + to_string(addr.Network.SubIfIdx) + ")");
-        Logger::info("[UDP注入] WinDivert方向: Inbound (Outbound=0)");
+        Logger::debug("[UDP注入] WinDivert方向: Inbound (Outbound=0)");
     }
 
     UINT send_len = 0;
     BOOL inject_result = WinDivertSend(windivert_handle, packet.data(), (UINT)packet.size(), &send_len, &addr);
     DWORD err = GetLastError();
 
-    Logger::info("[UDP注入] WinDivertSend返回: " + string(inject_result ? "成功" : "失败") +
+    Logger::debug("[UDP注入] WinDivertSend返回: " + string(inject_result ? "成功" : "失败") +
                 ", 发送字节=" + to_string(send_len) +
                 ", 期望字节=" + to_string(packet.size()) +
                 ", WSA错误码=" + to_string(err));
-    Logger::info("[UDP注入] ========== 注入完成 ==========");
+    Logger::debug("[UDP注入] ========== 注入完成 ==========");
 
     if (!inject_result) {
         Logger::error("[UDP] ❌ 注入UDP包失败: 错误码=" + to_string(err));
@@ -2565,6 +2578,7 @@ private:
                           const string& dst_ip, uint16_t dst_port,
                           const uint8_t* payload, int payload_len,
                           const WINDIVERT_ADDRESS& addr) {
+        // v12.3.1: 拦截UDP包的详细日志改为DEBUG级别
         // 打印完整载荷（16字节一行，格式化显示）
         string hex_dump = "";
         if (payload_len > 0) {
@@ -2578,7 +2592,7 @@ private:
             }
         }
 
-        Logger::info("[🔍拦截UDP] " + to_string(src_port) + "→" + to_string(dst_port) +
+        Logger::debug("[🔍拦截UDP] " + to_string(src_port) + "→" + to_string(dst_port) +
                    " 载荷=" + to_string(payload_len) + "字节" +
                    (payload_len > 0 ? "\n                    " + hex_dump : ""));
 
@@ -3000,7 +3014,7 @@ int main() {
     }
 
     cout << "============================================================" << endl;
-    cout << "DNF游戏代理客户端 v12.3.0 (C++ 版本 - 动态窗口跟随)" << endl;
+    cout << "DNF游戏代理客户端 v12.3.3 (C++ 版本 - 控制台输出优化)" << endl;
     cout << "编译时间: " << __DATE__ << " " << __TIME__ << endl;
     cout << "============================================================" << endl;
     cout << endl;
@@ -3010,8 +3024,9 @@ int main() {
     string GAME_SERVER_IP;
     string TUNNEL_SERVER_IP;
     int TUNNEL_PORT;
+    string VERSION_NAME;
 
-    if (!read_config_from_self(GAME_SERVER_IP, TUNNEL_SERVER_IP, TUNNEL_PORT)) {
+    if (!read_config_from_self(GAME_SERVER_IP, TUNNEL_SERVER_IP, TUNNEL_PORT, VERSION_NAME)) {
         cout << "错误: 无法读取配置" << endl;
         cout << endl;
         cout << "此程序需要配置才能运行。" << endl;
@@ -3023,8 +3038,6 @@ int main() {
     }
 
     cout << "✓ 配置读取成功" << endl;
-    cout << "  游戏服务器: " << GAME_SERVER_IP << endl;
-    cout << "  隧道服务器: " << TUNNEL_SERVER_IP << ":" << TUNNEL_PORT << endl;
     cout << endl;
 
     // ========== 步骤2: 计算辅助IP ==========
@@ -3038,9 +3051,7 @@ int main() {
         return 1;
     }
 
-    cout << "✓ IP分配方案：" << endl;
-    cout << "  主IP（游戏服务器）: " << GAME_SERVER_IP << endl;
-    cout << "  辅助IP（虚拟客户端）: " << SECONDARY_IP << endl;
+    cout << "✓ IP分配完成" << endl;
     cout << endl;
 
     // ========== 步骤3: 配置虚拟网卡（使用动态IP） ==========
@@ -3065,7 +3076,7 @@ int main() {
     cout << "✓ WinDivert 文件已部署" << endl;
 
     // 动态加载 WinDivert.dll（从临时目录）
-    cout << "正在加载 WinDivert.dll..." << endl;
+    Logger::debug("正在加载 WinDivert.dll: " + dll_path);
     if (!LoadWinDivert(dll_path.c_str())) {
         cout << "错误: 无法加载 WinDivert.dll" << endl;
         Logger::error("LoadWinDivert() 失败: " + dll_path);
@@ -3073,7 +3084,7 @@ int main() {
         system("pause");
         return 1;
     }
-    cout << "✓ WinDivert 组件加载成功" << endl;
+    Logger::debug("✓ WinDivert 组件加载成功");
     cout << endl;
 
     cout << "============================================================" << endl;
@@ -3096,17 +3107,8 @@ int main() {
     // ========== 步骤5: 启动握手测试 ==========
     cout << "[步骤5/5] 测试代理链路..." << endl;
     if (!test_tunnel_handshake(TUNNEL_SERVER_IP, TUNNEL_PORT)) {
-        cout << endl;
-        cout << "⚠ 警告: 握手测试失败！" << endl;
-        cout << "可能的原因:" << endl;
-        cout << "  1. 隧道服务器未启动或网络不通" << endl;
-        cout << "  2. 防火墙阻止了连接" << endl;
-        cout << "  3. 服务器地址或端口配置错误" << endl;
-        cout << endl;
-        cout << "您可以:" << endl;
-        cout << "  - 按任意键继续运行(可能无法正常工作)" << endl;
-        cout << "  - 或按Ctrl+C退出并检查网络/服务器配置" << endl;
-        cout << endl;
+        cout << "⚠ 警告: 代理链路测试失败（可能服务器未启动）" << endl;
+        cout << "按任意键继续..." << endl;
         Logger::warning("握手测试失败，但允许继续运行");
         system("pause");
     } else {
@@ -3116,6 +3118,20 @@ int main() {
     cout << endl;
     cout << "============================================================" << endl;
     cout << "✓ 系统就绪！现在可以启动游戏了" << endl;
+
+    // 设置金色显示版本名称
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO consoleInfo;
+    GetConsoleScreenBufferInfo(hConsole, &consoleInfo);
+    WORD savedAttributes = consoleInfo.wAttributes;
+
+    // 金色 = 红色 + 绿色 + 高亮
+    SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
+    cout << "当前版本 " << VERSION_NAME << endl;
+
+    // 恢复原来的颜色
+    SetConsoleTextAttribute(hConsole, savedAttributes);
+
     cout << "============================================================" << endl;
     cout << endl;
     cout << "按Ctrl+C退出..." << endl;

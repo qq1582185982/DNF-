@@ -107,7 +107,7 @@ int main() {
     cout << endl;
 
     // ==================== 收集配置 ====================
-    string game_ip, tunnel_ip;
+    string game_ip, tunnel_ip, version_name;
     int tunnel_port;
 
     cout << "请输入配置信息（直接回车使用默认值）" << endl;
@@ -198,6 +198,18 @@ int main() {
         }
     }
 
+    // 输入版本名称
+    cout << "版本名称 [默认: 未命名版本]: ";
+    string name_input;
+    getline(cin, name_input);
+    name_input = trim(name_input);
+
+    if (name_input.empty()) {
+        version_name = "未命名版本";
+    } else {
+        version_name = name_input;
+    }
+
     cout << endl;
     cout << "========================================" << endl;
     cout << "配置摘要" << endl;
@@ -205,6 +217,7 @@ int main() {
     cout << "游戏服务器地址:   " << game_ip << endl;
     cout << "隧道服务器地址:   " << tunnel_ip << endl;
     cout << "隧道端口:         " << tunnel_port << endl;
+    cout << "版本名称:         " << version_name << endl;
     cout << "========================================" << endl;
     cout << endl;
 
@@ -257,7 +270,8 @@ int main() {
     json << "{";
     json << "\"game_server_ip\":\"" << game_ip << "\",";
     json << "\"tunnel_server_ip\":\"" << tunnel_ip << "\",";
-    json << "\"tunnel_port\":" << tunnel_port;
+    json << "\"tunnel_port\":" << tunnel_port << ",";
+    json << "\"version_name\":\"" << version_name << "\"";
     json << "}";
     json << "[CONFIG_END]";
 
