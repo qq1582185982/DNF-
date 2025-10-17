@@ -1,6 +1,13 @@
 /*
- * DNF游戏代理客户端 - C++ 版本 v12.3.3 (控制台输出优化)
+ * DNF游戏代理客户端 - C++ 版本 v12.3.4 (固定窗口修复)
  * 从自身exe末尾读取配置
+ *
+ * v12.3.4更新: 固定窗口修复 🔧 解决频道切换/角色选择卡死
+ *             - 恢复data_window为固定值（按端口：245/228/229字节）
+ *             - 问题：v12.3.0让data_window跟随游戏窗口，游戏窗口=0时代理告诉服务器窗口也是0
+ *             - 结果：服务器停止发送，游戏在等待完整数据包，永久死锁
+ *             - 方案：client_window和data_window解耦，data_window保持固定不变
+ *             - 效果：服务器持续发送，游戏能收到完整数据包，正常处理后窗口恢复
  *
  * v12.3.3更新: 控制台输出优化 📝 极简控制台输出
  *             - 删除游戏服务器/隧道服务器IP显示
@@ -1435,24 +1442,20 @@ public:
           tunnel_sock(INVALID_SOCKET), running(false), established(false), closing(false),
           last_window_probe_time(0), window_zero_start_time(0), window_probe_logged(false) {
 
-        // v12.3.0: 动态窗口 - 完全跟随游戏客户端的真实窗口值
-        // 原理: 游戏客户端会根据网络状况动态调整窗口大小
-        //      我们作为代理应该完全模拟游戏客户端的行为
-        //      data_window将在update_window()中同步为client_window的值
-        // 初始值: 使用14600字节作为初始值（标准MSS*10，握手前的合理默认值）
-        data_window = 14600;  // 初始值，将在收到第一个包时同步为游戏客户端的真实窗口
-
-        // v12.2.0旧代码（保留注释供参考）：
-        // data_window = 65535;  // 硬编码最大窗口
-        //
-        // 更旧代码：
-        // if (dport == 10011) {
-        //     data_window = 245;   // 频道服务器
-        // } else if (dport == 7001) {
-        //     data_window = 228;   // 登录服务器
-        // } else {
-        //     data_window = 229;   // 其他端口
-        // }
+        // v12.3.4: 固定窗口 - 恢复旧版本逻辑，解决死锁问题
+        // 问题分析：v12.3.0让data_window跟随游戏窗口，当游戏窗口=0时
+        //          代理告诉服务器窗口也是0，服务器停止发送，导致死锁
+        // 关键设计：client_window和data_window解耦
+        //          - client_window：跟踪游戏窗口，控制代理→游戏注入速率
+        //          - data_window：固定值，告诉服务器代理的接收窗口
+        // 方案：恢复按端口设置固定窗口，data_window不再跟随游戏窗口变化
+        if (dport == 10011) {
+            data_window = 1024;   // 频道服务器
+        } else if (dport == 7001) {
+            data_window = 1024;   // 登录服务器
+        } else {
+            data_window = 1024;   // 其他端口
+        }
     }
 
     ~TCPConnection() {
@@ -1580,20 +1583,19 @@ public:
     void update_window(uint16_t window) {
         if (window != client_window) {
             uint16_t old_client_window = client_window;
-            uint16_t old_data_window = data_window;
 
             client_window = window;
-            data_window = window;  // v12.3.0: 同步data_window，完全模拟游戏客户端
+            // v12.3.4: data_window保持固定不变，不跟随游戏窗口
 
             // v12.3.1: 窗口变化改为DEBUG级别（变化太频繁，用户不需要看到）
             // 仅在窗口归零或显著变化时记录
             if (window == 0) {
                 Logger::info("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
-                           "] 窗口已关闭: " + to_string(old_client_window) + "→0 (将触发窗口探测)");
+                           "] 游戏窗口已关闭: " + to_string(old_client_window) + "→0 (代理窗口固定:" + to_string(data_window) + ")");
             } else {
                 Logger::debug("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
-                           "] 窗口同步: client_window " + to_string(old_client_window) + "→" + to_string(window) +
-                           ", data_window " + to_string(old_data_window) + "→" + to_string(data_window));
+                           "] 游戏窗口: " + to_string(old_client_window) + "→" + to_string(window) +
+                           " (代理窗口固定:" + to_string(data_window) + ")");
             }
 
             // 窗口打开时，尝试发送缓冲区数据
@@ -2511,11 +2513,38 @@ private:
 
         if (flags & 0x02) {  // SYN
             if (conn) {
-                // 已存在旧连接，先清理
+                // 已存在完全相同key的旧连接，先清理
                 Logger::debug("[连接] 收到新SYN，清理旧连接 (端口" + to_string(dst_port) + ")");
                 conn->stop();
                 delete conn;
                 conn = nullptr;
+            }
+
+            // v12.3.4: 游戏重启时源端口会变化，需要清理相同(src_ip, dst_port)的所有旧连接
+            // 问题：旧连接key=(ip, old_port, 7001), 新连接key=(ip, new_port, 7001)
+            // 如果只检查exact key，旧连接永久残留
+            vector<tuple<string, uint16_t, uint16_t>> keys_to_remove;
+            for (auto& pair : connections) {
+                auto& key = pair.first;
+                // 相同源IP和目标端口，但源端口不同（游戏重启场景）
+                if (get<0>(key) == src_ip && get<2>(key) == dst_port && get<1>(key) != src_port) {
+                    keys_to_remove.push_back(key);
+                }
+            }
+
+            if (!keys_to_remove.empty()) {
+                Logger::info("[🔧清理] 收到新SYN，清理 " + src_ip + " 到端口" + to_string(dst_port) +
+                           " 的旧连接（共" + to_string(keys_to_remove.size()) + "个）");
+                for (auto& key : keys_to_remove) {
+                    auto it = connections.find(key);
+                    if (it != connections.end()) {
+                        Logger::info("[🔧清理] 清理旧连接: " + src_ip + ":" +
+                                   to_string(get<1>(key)) + " → 端口" + to_string(dst_port));
+                        it->second->stop();
+                        delete it->second;
+                        connections.erase(it);
+                    }
+                }
             }
 
             // 创建新连接
@@ -3014,7 +3043,7 @@ int main() {
     }
 
     cout << "============================================================" << endl;
-    cout << "DNF游戏代理客户端 v12.3.3 (C++ 版本 - 控制台输出优化)" << endl;
+    cout << "DNF游戏代理客户端 v12.3.4 (C++ 版本 - 固定窗口修复)" << endl;
     cout << "编译时间: " << __DATE__ << " " << __TIME__ << endl;
     cout << "============================================================" << endl;
     cout << endl;
