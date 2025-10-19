@@ -1,5 +1,5 @@
 /*
- * DNF游戏代理客户端 - C++ 版本 v12.3.5
+ * DNF游戏代理客户端 - C++ 版本 v13.0.4
  * 从自身exe末尾读取配置
  *
  * 版本历史详见: VERSION_HISTORY.md
@@ -56,6 +56,10 @@
 // 包含嵌入式 WinDivert 文件
 #include "embedded_windivert.h"
 
+// 包含TAP-Windows虚拟网卡（v13.0.0新特性）
+#include "tap_embedded.h"
+#include "tap_adapter.h"
+
 using namespace std;
 
 // ==================== 虚拟网卡自动配置 ====================
@@ -66,9 +70,10 @@ UINT32 g_loopback_adapter_ifidx = 0;  // 0 = 需要自动配置，非0 = 已配�
 // 虚拟网卡配置常量
 const char* LOOPBACK_ADAPTER_SUBNET = "255.255.255.0";        // 子网掩码
 
+// v13.0.0: 已替换为TAP-Windows方案，以下KM-TEST函数保留但不再使用
 // 虚拟网卡配置函数声明（实现在Logger类之后）
-bool install_loopback_adapter_auto();
-bool auto_setup_loopback_adapter(const string& primary_ip, const string& secondary_ip);
+// bool install_loopback_adapter_auto();
+// bool auto_setup_loopback_adapter(const string& primary_ip, const string& secondary_ip);
 
 // ==================== WinDivert 自动部署 ====================
 
@@ -2996,15 +3001,23 @@ int main() {
     cout << "✓ IP分配完成" << endl;
     cout << endl;
 
-    // ========== 步骤3: 配置虚拟网卡（使用动态IP） ==========
-    cout << "[步骤3/5] 配置虚拟网卡..." << endl;
-    if (!auto_setup_loopback_adapter(GAME_SERVER_IP, SECONDARY_IP)) {
-        cout << "错误: 虚拟网卡配置失败，程序无法继续运行" << endl;
-        Logger::error("虚拟网卡配置失败");
+    // ========== 步骤3: 配置虚拟网卡（使用TAP-Windows，v13.0.0） ==========
+    cout << "[步骤3/5] 配置TAP虚拟网卡..." << endl;
+    Logger::info("开始配置TAP-Windows虚拟网卡");
+
+    TAPAdapter tap;
+    if (!tap.setup(GAME_SERVER_IP, SECONDARY_IP)) {
+        cout << "错误: TAP虚拟网卡配置失败，程序无法继续运行" << endl;
+        cout << "提示: 请确保以管理员身份运行此程序" << endl;
+        Logger::error("TAP虚拟网卡配置失败");
         Logger::close();
         system("pause");
         return 1;
     }
+
+    // 设置全局网卡索引
+    g_loopback_adapter_ifidx = tap.get_ifidx();
+    Logger::info("✓ TAP虚拟网卡配置完成，IfIdx=" + to_string(g_loopback_adapter_ifidx));
 
     // ========== 步骤4: 部署WinDivert ==========
     cout << "[步骤4/5] 部署WinDivert组件..." << endl;
