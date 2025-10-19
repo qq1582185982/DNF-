@@ -1,5 +1,5 @@
 /*
- * DNF游戏代理客户端 - C++ 版本 v12.3.4
+ * DNF游戏代理客户端 - C++ 版本 v12.3.5
  * 从自身exe末尾读取配置
  *
  * 版本历史详见: VERSION_HISTORY.md
@@ -2448,39 +2448,17 @@ private:
 
         if (flags & 0x02) {  // SYN
             if (conn) {
-                // 已存在完全相同key的旧连接，先清理
-                Logger::debug("[连接] 收到新SYN，清理旧连接 (端口" + to_string(dst_port) + ")");
+                // 已存在完全相同key的旧连接（相同源端口），这是重连场景，清理旧连接
+                Logger::info("[🔧清理] 收到新SYN，清理旧连接 " + src_ip + ":" +
+                           to_string(src_port) + " → 端口" + to_string(dst_port) + " (重连)");
                 conn->stop();
                 delete conn;
                 conn = nullptr;
             }
 
-            // 游戏重启时源端口会变化，需要清理相同(src_ip, dst_port)的所有旧连接
-            // 问题：旧连接key=(ip, old_port, 7001), 新连接key=(ip, new_port, 7001)
-            // 如果只检查exact key，旧连接永久残留
-            vector<tuple<string, uint16_t, uint16_t>> keys_to_remove;
-            for (auto& pair : connections) {
-                auto& key = pair.first;
-                // 相同源IP和目标端口，但源端口不同（游戏重启场景）
-                if (get<0>(key) == src_ip && get<2>(key) == dst_port && get<1>(key) != src_port) {
-                    keys_to_remove.push_back(key);
-                }
-            }
-
-            if (!keys_to_remove.empty()) {
-                Logger::info("[🔧清理] 收到新SYN，清理 " + src_ip + " 到端口" + to_string(dst_port) +
-                           " 的旧连接（共" + to_string(keys_to_remove.size()) + "个）");
-                for (auto& key : keys_to_remove) {
-                    auto it = connections.find(key);
-                    if (it != connections.end()) {
-                        Logger::info("[🔧清理] 清理旧连接: " + src_ip + ":" +
-                                   to_string(get<1>(key)) + " → 端口" + to_string(dst_port));
-                        it->second->stop();
-                        delete it->second;
-                        connections.erase(it);
-                    }
-                }
-            }
+            // 注意：不再清理其他源端口到同一dst_port的连接
+            // 原因：游戏可能同时有多个连接到同一端口（如MySQL 3306），不应误删并发连接
+            // 依靠正常的FIN/RST清理机制来处理连接关闭
 
             // 创建新连接
             int conn_id = conn_id_counter++;
@@ -2978,7 +2956,7 @@ int main() {
     }
 
     cout << "============================================================" << endl;
-    cout << "DNF游戏代理客户端 v12.3.4" << endl;
+    cout << "DNF游戏代理客户端 v12.3.5" << endl;
     cout << "编译时间: " << __DATE__ << " " << __TIME__ << endl;
     cout << "============================================================" << endl;
     cout << endl;
