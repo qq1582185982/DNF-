@@ -2454,8 +2454,7 @@ private:
         if (flags & 0x02) {  // SYN
             if (conn) {
                 // 已存在完全相同key的旧连接（相同源端口），这是重连场景，清理旧连接
-                Logger::info("[🔧清理] 收到新SYN，清理旧连接 " + src_ip + ":" +
-                           to_string(src_port) + " → 端口" + to_string(dst_port) + " (重连)");
+                Logger::info("[🔧清理] 收到新SYN，清理旧连接 端口" + to_string(src_port) + " → 端口" + to_string(dst_port) + " (重连)");
                 conn->stop();
                 delete conn;
                 conn = nullptr;
@@ -2584,9 +2583,8 @@ private:
                 conn_id = udp_conn_id_counter++;
                 udp_port_map[port_key] = conn_id;
                 udp_conn_map[conn_id] = port_key;
-                Logger::info("[UDP|" + to_string(conn_id) + "] 新UDP流: " +
-                           src_ip + ":" + to_string(src_port) + " → " +
-                           dst_ip + ":" + to_string(dst_port));
+                Logger::info("[UDP|" + to_string(conn_id) + "] 新UDP流: 端口" +
+                           to_string(src_port) + " → 端口" + to_string(dst_port));
             }
         }
 
@@ -2650,7 +2648,7 @@ private:
 
             if (connect(udp_tunnel_sock, rp->ai_addr, (int)rp->ai_addrlen) != SOCKET_ERROR) {
                 connected = true;
-                Logger::info("[UDP] Tunnel连接成功: " + tunnel_server_ip + ":" + to_string(tunnel_port));
+                Logger::info("[UDP] Tunnel连接成功");
                 break;
             }
 
@@ -2687,7 +2685,7 @@ private:
         if (g_loopback_adapter_ifidx > 0) {
             // 使用动态虚拟客户端IP（从配置自动计算的辅助IP）
             interface_ipv4 = secondary_ip;
-            Logger::info("[UDP] 使用虚拟客户端IP: " + interface_ipv4 + " (payload中的客户端IP)");
+            Logger::info("[UDP] 使用虚拟客户端IP");
         } else {
             // 获取该连接所在接口的IPv4地址
             interface_ipv4 = get_ipv4_from_socket_interface(udp_tunnel_sock);
@@ -2697,7 +2695,7 @@ private:
                 udp_tunnel_sock = INVALID_SOCKET;
                 return false;
             }
-            Logger::info("[UDP] 连接接口的IPv4地址: " + interface_ipv4 + " (将发送给服务器用于源IP伪造)");
+            Logger::info("[UDP] 连接接口的IPv4地址已获取");
         }
 
         // 将IPv4字符串转换为4字节网络字节序
@@ -2846,9 +2844,8 @@ private:
                     }
 
                     if (!client_ip.empty() && addr_available) {
-                        Logger::info("[UDP|握手响应] 准备注入握手响应: " +
-                                   client_ip + ":" + to_string(dst_port) + " ← " +
-                                   game_server_ip + ":" + to_string(src_port) +
+                        Logger::info("[UDP|握手响应] 准备注入握手响应: 端口" +
+                                   to_string(dst_port) + " ← 端口" + to_string(src_port) +
                                    " (" + to_string(data_len) + "字节)");
 
                         inject_udp_response(windivert_handle,
@@ -2895,9 +2892,8 @@ private:
                         uint16_t remote_port = (uint16_t)stoi(port_key.substr(pos3 + 1));
 
                         // 使用工具函数注入UDP响应
-                        Logger::info("[UDP|" + to_string(conn_id) + "] 准备注入UDP响应: " +
-                                   local_ip + ":" + to_string(local_port) + " ← " +
-                                   remote_ip + ":" + to_string(src_port) +
+                        Logger::info("[UDP|" + to_string(conn_id) + "] 准备注入UDP响应: 端口" +
+                                   to_string(local_port) + " ← 端口" + to_string(src_port) +
                                    " (" + to_string(payload.size()) + "字节)");
 
                         inject_udp_response(windivert_handle, local_ip, local_port,
