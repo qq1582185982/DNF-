@@ -18,8 +18,8 @@
 #include <setupapi.h>
 #include <devguid.h>
 #include <newdev.h>
-#include <string>
 #include <fstream>
+#include <string>
 #include <iostream>
 
 #pragma comment(lib, "iphlpapi.lib")
@@ -355,19 +355,46 @@ private:
         return found_name;
     }
 
+    // 检查网卡管理状态（是否被用户禁用）
+    bool is_adapter_disabled() {
+        // 使用netsh查询网卡状态，输出到临时文件
+        string temp_file = temp_dir + "adapter_status.txt";
+        string cmd = "netsh interface show interface name=\"" + adapter_name_gbk + "\" > \"" + temp_file + "\" 2>&1";
+        system(cmd.c_str());
+
+        // 读取输出
+        ifstream file(temp_file);
+        if (!file.is_open()) {
+            return false;  // 查询失败，假设已启用
+        }
+
+        string line;
+        bool is_disabled = false;
+        while (getline(file, line)) {
+            // 查找管理状态行，包含"已禁用"或"Disabled"
+            if (line.find("已禁用") != string::npos ||
+                line.find("Disabled") != string::npos) {
+                is_disabled = true;
+                break;
+            }
+        }
+        file.close();
+
+        // 删除临时文件
+        DeleteFileA(temp_file.c_str());
+
+        return is_disabled;
+    }
+
     // 配置IP地址
     bool configure_ips(const string& primary_ip, const string& secondary_ip) {
         cout << "[4/5] 配置IP地址..." << endl;
 
-        // 只有已存在的网卡才需要启用（刚安装的网卡跳过，直接配置IP）
-        if (!just_installed) {
-            cout << "  正在启用网卡..." << endl;
-            string cmd_enable = "netsh interface set interface name=\"" + adapter_name_gbk + "\" enable";
-            int ret_enable = system(cmd_enable.c_str());
-            if (ret_enable != 0) {
-                cerr << "  ✗ 网卡启用失败（错误码: " << ret_enable << "）" << endl;
-                return false;
-            }
+        // 只有网卡被禁用时才执行启用命令（已启用或刚安装的跳过）
+        if (!just_installed && is_adapter_disabled()) {
+            cout << "  检测到网卡被禁用，正在启用..." << endl;
+            string cmd_enable = "netsh interface set interface name=\"" + adapter_name_gbk + "\" enable >nul 2>&1";
+            system(cmd_enable.c_str());
             Sleep(2000);  // 等待网卡启用
             cout << "  ✓ 网卡已启用" << endl;
         }
@@ -391,7 +418,7 @@ private:
             }
         }
         Sleep(500);
-        cout << "  ✓ 主IP: " << primary_ip << endl;
+        cout << "  ✓ 主IP配置完成" << endl;
 
         // 添加辅助IP
         string cmd_add2 = "netsh interface ip add address " + to_string(adapter_ifidx) +
@@ -402,7 +429,7 @@ private:
             cerr << "  ✗ 辅助IP配置失败" << endl;
             // 辅助IP失败不致命，继续
         } else {
-            cout << "  ✓ 辅助IP: " << secondary_ip << endl;
+            cout << "  ✓ 辅助IP配置完成" << endl;
         }
         Sleep(500);
 
