@@ -895,6 +895,7 @@ private:
     // 线程2：转发游戏服务器→客户端（完全按照Python版本）
     void forward_game_to_client() {
         uint8_t buffer[65536];  // v12.2.0: 增大到64KB，配合流式转发
+        const int MAX_RECV_SIZE = 65535;  // v12.3.6: 限制recv大小，防止uint16_t溢出
 
         Logger::debug("[连接" + to_string(conn_id) + "] 游戏→客户端转发线程已启动");
 
@@ -903,8 +904,9 @@ private:
 
         try {
             while (running) {
-                // recv(4096) - 与Python版本一致
-                int n = recv(game_fd, buffer, sizeof(buffer), 0);
+                // **v12.3.6修复: 限制recv大小为65535，防止data_len字段溢出**
+                // 协议data_len是uint16_t(2字节)，最大65535
+                int n = recv(game_fd, buffer, MAX_RECV_SIZE, 0);
 
                 // ===== 关键诊断点：游戏服务器断开 =====
                 if (n <= 0) {
@@ -944,13 +946,47 @@ private:
                 last_recv_time = chrono::system_clock::now();
                 last_recv_size = n;
 
-                // **v3.5.4: 添加边界检查** (v5.1: 更新为65536)
-                if (n > 65536) {
-                    Logger::error("[连接" + to_string(conn_id) + "] [!!!CRITICAL!!!] recv()返回异常大小: " +
-                                to_string(n) + " > 65536,这是不可能的!buffer大小只有65536!");
-                    Logger::error("[连接" + to_string(conn_id) + "] 这表明内存已损坏或n被篡改,立即停止转发");
-                    running = false;
-                    break;
+                // **v12.3.6修复: 防止uint16_t溢出**
+                // 协议data_len字段是uint16_t(2字节)，最大值65535
+                // 但buffer大小是65536，recv可能返回65536导致溢出为0！
+                if (n > 65535) {
+                    Logger::warning("[连接" + to_string(conn_id) + "] ⚠ recv返回" + to_string(n) +
+                                  "字节，超过uint16_t最大值65535，需要分包发送");
+                    // 先发送65535字节
+                    int first_part = 65535;
+                    int second_part = n - 65535;
+
+                    // 发送第一部分
+                    uint8_t response1[65535 + 7];
+                    memset(response1, 0, sizeof(response1));
+                    response1[0] = 0x01;
+                    *(uint32_t*)(response1 + 1) = htonl(conn_id);
+                    *(uint16_t*)(response1 + 5) = htons(first_part);
+                    memcpy(response1 + 7, buffer, first_part);
+
+                    if (!sendall(client_fd, response1, 7 + first_part)) {
+                        Logger::error("[连接" + to_string(conn_id) + "] 发送第一部分失败");
+                        running = false;
+                        break;
+                    }
+                    Logger::debug("[连接" + to_string(conn_id) + "] 已发送第一部分: 65535字节");
+
+                    // 发送第二部分
+                    uint8_t response2[second_part + 7];
+                    memset(response2, 0, sizeof(response2));
+                    response2[0] = 0x01;
+                    *(uint32_t*)(response2 + 1) = htonl(conn_id);
+                    *(uint16_t*)(response2 + 5) = htons(second_part);
+                    memcpy(response2 + 7, buffer + first_part, second_part);
+
+                    if (!sendall(client_fd, response2, 7 + second_part)) {
+                        Logger::error("[连接" + to_string(conn_id) + "] 发送第二部分失败");
+                        running = false;
+                        break;
+                    }
+                    Logger::debug("[连接" + to_string(conn_id) + "] 已发送第二部分: " + to_string(second_part) + "字节");
+
+                    continue;  // 跳过后面的正常发送流程
                 }
 
                 Logger::debug("[连接" + to_string(conn_id) + "] [CHECKPOINT-1] 准备打印hex preview, n=" + to_string(n));
@@ -999,10 +1035,23 @@ private:
 
                 // 封装协议：msg_type(1) + conn_id(4) + data_len(2) + payload
                 uint8_t response[65536 + 7];  // v12.2.0: 配合更大的缓冲区
+
+                // **v12.3.6修复: 清零response数组，防止栈上垃圾数据被发送**
+                // 问题：response是栈上未初始化数组，残留数据可能导致客户端解析错误
+                memset(response, 0, 7 + n);  // 只清零需要发送的部分，提高效率
+
                 response[0] = 0x01;
                 *(uint32_t*)(response + 1) = htonl(conn_id);
                 *(uint16_t*)(response + 5) = htons(n);
-                memcpy(response + 7, buffer, n);
+                if (n > 0) {
+                    memcpy(response + 7, buffer, n);
+                }
+
+                // **v12.3.6: 添加诊断日志，检测异常的n值**
+                // 注意：n=0的情况已经在前面的 if (n <= 0) 中处理了，这里不会到达
+                if (n > 60000 && n <= 65535) {
+                    Logger::debug("[连接" + to_string(conn_id) + "] 大数据包: " + to_string(n) + "字节");
+                }
 
                 Logger::debug("[连接" + to_string(conn_id) + "] [CHECKPOINT-4] 协议封装完成,准备调用sendall(), 总大小=" +
                             to_string(7 + n));

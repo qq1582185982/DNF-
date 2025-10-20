@@ -1756,7 +1756,7 @@ private:
                     int in_flight = server_seq - client_acked_seq;
                     int window_available = max(0, (int)client_window - in_flight);
 
-                    Logger::warning("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
+                    Logger::debug("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
                                   "] ⚠ 缓冲区过大: " + to_string(send_buffer.size()) + "字节 " +
                                   "(窗口:" + to_string(client_window) +
                                   " 飞行:" + to_string(in_flight) +
@@ -1782,10 +1782,52 @@ private:
                 uint32_t msg_conn_id = ntohl(*(uint32_t*)&buffer[1]);
                 uint16_t data_len = ntohs(*(uint16_t*)&buffer[5]);
 
+                // 调试：打印协议头解析结果
+                static int parse_count = 0;
+                bool abnormal = (data_len == 0 || data_len > 65535 || msg_type != 1 || msg_conn_id != (uint32_t)conn_id);
+                if (parse_count < 20 || parse_count % 100 == 0 || abnormal) {
+                    Logger::debug("[连接" + to_string(conn_id) + "] 协议头: type=" +
+                                to_string((int)msg_type) + " conn_id=" + to_string(msg_conn_id) +
+                                " data_len=" + to_string(data_len) + " buffer_size=" + to_string(buffer.size()));
+
+                    // 如果异常，打印buffer前30字节
+                    if (abnormal) {
+                        string buf_hex;
+                        for (size_t i = 0; i < min((size_t)30, buffer.size()); i++) {
+                            char hex[4];
+                            sprintf(hex, "%02x ", buffer[i]);
+                            buf_hex += hex;
+                        }
+                        Logger::warning("[连接" + to_string(conn_id) + "] ⚠ 异常协议头! Buffer: " + buf_hex);
+                    }
+                }
+                parse_count++;
+
+                // 检测conn_id错误（可能是协议不同步）
                 if (msg_conn_id != (uint32_t)conn_id) {
-                    Logger::warning("[连接" + to_string(conn_id) + "] 收到错误连接ID: " +
-                                  to_string(msg_conn_id));
-                    break;
+                    static int error_count = 0;
+                    error_count++;
+
+                    // 只打印前几次错误，避免日志爆炸
+                    if (error_count <= 5) {
+                        string buffer_hex;
+                        for (size_t i = 0; i < min((size_t)30, buffer.size()); i++) {
+                            char hex[4];
+                            sprintf(hex, "%02x ", buffer[i]);
+                            buffer_hex += hex;
+                        }
+                        Logger::warning("[连接" + to_string(conn_id) + "] 收到错误连接ID: " +
+                                      to_string(msg_conn_id) + " (期望:" + to_string(conn_id) +
+                                      ") Buffer: " + buffer_hex);
+                    }
+
+                    if (error_count == 6) {
+                        Logger::warning("[连接" + to_string(conn_id) + "] 后续错误将被抑制...");
+                    }
+
+                    // 跳过1字节，尝试重新同步协议
+                    buffer.erase(buffer.begin(), buffer.begin() + 1);
+                    continue;
                 }
 
                 if (msg_type != 0x01) {
@@ -1796,22 +1838,39 @@ private:
                 }
 
                 if (buffer.size() < 7 + data_len) {
-                    Logger::debug("[连接" + to_string(conn_id) + "] 等待更多数据");
+                    Logger::debug("[连接" + to_string(conn_id) + "] 等待更多数据 (需要" +
+                                to_string(7 + data_len) + "字节，当前" + to_string(buffer.size()) + "字节)");
                     break;
                 }
 
+                size_t before_size = buffer.size();
                 vector<uint8_t> payload(buffer.begin() + 7, buffer.begin() + 7 + data_len);
                 buffer.erase(buffer.begin(), buffer.begin() + 7 + data_len);
+                size_t after_size = buffer.size();
 
-                // 打印完整载荷（16字节一行，格式化显示）
+                // 验证消费的字节数
+                size_t consumed = before_size - after_size;
+                if (consumed != 7 + data_len) {
+                    Logger::warning("[连接" + to_string(conn_id) + "] ⚠ 字节消费异常: 期望" +
+                                  to_string(7 + data_len) + "实际" + to_string(consumed));
+                }
+
+                // 打印载荷（大数据包只打印前128字节）
+                const int MAX_HEX_DUMP = 128;
                 string hex_dump = "";
-                for (int i = 0; i < (int)payload.size(); i++) {
+                int dump_size = min((int)payload.size(), MAX_HEX_DUMP);
+
+                for (int i = 0; i < dump_size; i++) {
                     if (i > 0 && i % 16 == 0) {
                         hex_dump += "\n                    ";
                     }
                     char buf[4];
                     sprintf(buf, "%02x ", payload[i]);
                     hex_dump += buf;
+                }
+
+                if (payload.size() > MAX_HEX_DUMP) {
+                    hex_dump += "\n                    ... (省略 " + to_string(payload.size() - MAX_HEX_DUMP) + " 字节)";
                 }
 
                 Logger::debug("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
