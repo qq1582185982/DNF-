@@ -1,5 +1,18 @@
 /*
- * DNF 隧道服务器 - C++ 版本 v5.1
+ * DNF 隧道服务器 - C++ 版本 v5.2
+ * v5.2更新: 🔥修复多网卡环境下UDP路由问题 - bind到proxy_local_ip而非INADDR_ANY
+ *          问题描述: 服务器有多个网卡（如192.168.2.75 + 108.2.2.55）
+ *                   游戏服务器在特定网段（如108.2.2.66）
+ *                   UDP socket bind到INADDR_ANY时，操作系统可能选择错误的源IP
+ *                   导致游戏服务器的UDP响应无法正确路由回代理服务器
+ *          解决方案: UDP socket bind到proxy_local_ip（get_local_ip()返回的最佳路由IP）
+ *                   确保UDP包从与游戏服务器同网段的网卡发出
+ *                   游戏服务器的响应能正确路由回来
+ *          修改位置: handle_udp_tunnel函数，UDP socket创建逻辑（约1877-1912行）
+ *          关键优势: - 支持多网卡/多IP环境
+ *                   - 跨网段UDP转发正常工作
+ *                   - 不需要手动配置路由
+ *                   - 自动选择最佳网卡
  * v5.1更新: 配合客户端v12.2.0流式转发优化
  *          - recv缓冲区 4KB → 64KB
  *          - socket缓冲区增大到256KB
@@ -1877,9 +1890,16 @@ private:
                             // v4.9.0: 普通bind到源端口（不做源IP欺骗）
                             // v5.1修复: bind失败时允许系统自动分配（支持多用户共享端口）
                             // 原因: 多个客户端可能使用相同源端口，第一个成功bind，后续使用自动分配
+                            // v5.2修复: bind到proxy_local_ip而不是INADDR_ANY，解决多网卡环境下UDP路由问题
                             struct sockaddr_in local_addr{};
                             local_addr.sin_family = AF_INET;
-                            local_addr.sin_addr.s_addr = INADDR_ANY;  // 使用代理服务器自己的IP
+                            // 使用proxy_local_ip确保UDP包从正确的网卡发出（与游戏服务器同网段）
+                            if (inet_pton(AF_INET, proxy_ip_for_lambda.c_str(), &local_addr.sin_addr) != 1) {
+                                Logger::warning("[UDP Tunnel|" + socket_key +
+                                              "] proxy_local_ip无效(" + proxy_ip_for_lambda +
+                                              ")，回退到INADDR_ANY");
+                                local_addr.sin_addr.s_addr = INADDR_ANY;
+                            }
                             local_addr.sin_port = htons(src_port);
 
                             bool bind_success = true;
@@ -1901,7 +1921,8 @@ private:
                             (*udp_sockets)[socket_key] = udp_fd;
                             if (bind_success) {
                                 Logger::info("[UDP Tunnel|" + socket_key +
-                                           "] ✓ 创建UDP socket并bind到端口 " + to_string(src_port));
+                                           "] ✓ 创建UDP socket并bind到 " + proxy_ip_for_lambda +
+                                           ":" + to_string(src_port));
                             } else {
                                 Logger::info("[UDP Tunnel|" + socket_key +
                                            "] ✓ 创建UDP socket（系统自动分配端口）");
