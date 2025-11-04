@@ -557,7 +557,7 @@ private:
 // 静态成员初始化
 ofstream Logger::log_file;
 bool Logger::file_enabled = false;
-string Logger::current_log_level = "INFO";
+string Logger::current_log_level = "INFO";  // v12.3.6: 改为DEBUG级别用于测试
 
 // ==================== 启动握手测试 ====================
 // 在程序启动时主动连接隧道服务器进行握手测试
@@ -2823,7 +2823,7 @@ private:
         return true;
     }
 
-    // 接收UDP响应的线程
+    // 接收UDP响应的线程（v12.3.6: 添加自动重连机制）
     void recv_udp_responses() {
         Logger::info("[UDP] ========================================");
         Logger::info("[UDP] 响应接收线程已启动");
@@ -2834,8 +2834,17 @@ private:
 
         vector<uint8_t> buffer;
         uint8_t recv_buf[4096];
+        int reconnect_attempts = 0;
+        const int MAX_RECONNECT_ATTEMPTS = 5;
+        const int RECONNECT_DELAY_MS = 3000;  // 3秒重连间隔
 
-        while (running && udp_tunnel_sock != INVALID_SOCKET) {
+        while (running) {
+            // 检查UDP tunnel连接状态
+            if (udp_tunnel_sock == INVALID_SOCKET) {
+                Logger::warning("[UDP] Tunnel未连接，停止接收");
+                break;
+            }
+
             Logger::info("[UDP] 准备调用recv() - socket=" + to_string(udp_tunnel_sock) +
                         ", buffer_size=" + to_string(sizeof(recv_buf)));
 
@@ -2846,15 +2855,56 @@ private:
                         ", WSAError=" + to_string(err));
 
             if (n <= 0) {
+                // v12.3.6修复: UDP tunnel断开时自动重连
                 if (n == 0) {
-                    Logger::info("[UDP] Tunnel连接被服务器关闭 (recv返回0)");
+                    Logger::warning("[UDP] ⚠ Tunnel连接被服务器关闭 (recv返回0)");
+                } else if (err == WSAETIMEDOUT || err == 10060) {
+                    Logger::warning("[UDP] ⚠ Tunnel接收超时 (WSA错误=" + to_string(err) + ")");
+                } else if (err == WSAECONNRESET || err == 10054) {
+                    Logger::warning("[UDP] ⚠ Tunnel连接被重置 (WSA错误=" + to_string(err) + ")");
                 } else {
                     Logger::error("[UDP] recv()失败: 返回值=" + to_string(n) +
                                 ", WSA错误=" + to_string(err));
                 }
-                Logger::info("[UDP] 退出接收循环");
-                break;
+
+                // 尝试重连
+                if (reconnect_attempts < MAX_RECONNECT_ATTEMPTS) {
+                    reconnect_attempts++;
+                    Logger::info("[UDP] 🔄 尝试重连 (" + to_string(reconnect_attempts) + "/" +
+                                to_string(MAX_RECONNECT_ATTEMPTS) + ")，等待" +
+                                to_string(RECONNECT_DELAY_MS/1000) + "秒...");
+
+                    // 关闭旧socket
+                    {
+                        lock_guard<mutex> lock(udp_lock);
+                        if (udp_tunnel_sock != INVALID_SOCKET) {
+                            closesocket(udp_tunnel_sock);
+                            udp_tunnel_sock = INVALID_SOCKET;
+                        }
+                        udp_tunnel_ready = false;
+                    }
+
+                    Sleep(RECONNECT_DELAY_MS);
+
+                    // 重新创建UDP tunnel
+                    if (create_udp_tunnel()) {
+                        Logger::info("[UDP] ✓ 重连成功！清空缓冲区继续接收");
+                        buffer.clear();  // 清空缓冲区
+                        reconnect_attempts = 0;  // 重置重连计数
+                        continue;  // 继续接收
+                    } else {
+                        Logger::error("[UDP] ✗ 重连失败");
+                        // 继续尝试
+                        continue;
+                    }
+                } else {
+                    Logger::error("[UDP] ❌ 重连次数已达上限，放弃重连");
+                    break;
+                }
             }
+
+            // 成功接收数据，重置重连计数
+            reconnect_attempts = 0;
 
             Logger::info("[UDP] ✓ ←[Tunnel] 成功接收 " + to_string(n) + "字节");
             buffer.insert(buffer.end(), recv_buf, recv_buf + n);
