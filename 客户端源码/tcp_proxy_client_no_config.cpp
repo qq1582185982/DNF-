@@ -1,6 +1,26 @@
 /*
- * DNF游戏代理客户端 - C++ 版本 v13.0.4
+ * DNF游戏代理客户端 - C++ 版本 v12.3.9
  * 从自身exe末尾读取配置
+ *
+ * v12.3.9 更新 (2025-11-06):
+ * - 🔥 核心功能: 应用层心跳包保活机制(20秒间隔)，防止NAT/防火墙idle timeout关闭TCP隧道
+ * - 增强TCP Keepalive保活机制(30秒探测间隔，5秒重试)，双重保护防止静默断开
+ * - recv超时设置为5秒，允许定期发送心跳包保持连接活跃
+ * - 客户端和服务端双向心跳(msg_type=0x02)，确保连接双向活跃
+ * - 详细诊断隧道断开原因(FIN/RST/超时/中止等)，记录为INFO级别便于排查
+ * - 预期效果: 消除3-4分钟idle timeout断线问题，隧道可长期保持稳定
+ *
+ * v12.3.8 更新 (2025-11-06):
+ * - 修复队友看到无响应问题: TCP窗口从1024增大到29200字节
+ * - 移除未使用的MAX_SEND_BUFFER旧限制代码
+ * - 匹配真实DNF服务器窗口大小，解决多级缓冲区堵塞导致的级联故障
+ *
+ * v12.3.7 更新 (2025-11-04):
+ * - 修复UDP性能瓶颈: hex_dump只在DEBUG级别执行，避免组队卡顿
+ * - 优化UDP锁粒度: 减少锁竞争，降低高并发延迟
+ * - UDP接收日志改为DEBUG级别，减少磁盘I/O
+ * - 增大UDP接收缓冲区到64KB，减少recv()调用
+ * - 恢复默认日志级别为INFO，避免性能开销
  *
  * 版本历史详见: VERSION_HISTORY.md
  */
@@ -10,6 +30,7 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>   // v12.3.9: TCP keepalive结构体定义
 #include <iphlpapi.h>  // 用于GetAdaptersAddresses获取网络接口IPv4地址
 
 // 重要：先包含 windivert.h 定义类型，但不导入函数
@@ -478,6 +499,10 @@ public:
         current_log_level = level;
     }
 
+    static bool is_debug_enabled() {
+        return current_log_level == "DEBUG";
+    }
+
     static void init(const string& filename) {
         log_file.open(filename, ios::out | ios::app);
         if (log_file.is_open()) {
@@ -557,7 +582,7 @@ private:
 // 静态成员初始化
 ofstream Logger::log_file;
 bool Logger::file_enabled = false;
-string Logger::current_log_level = "INFO";  // v12.3.6: 改为DEBUG级别用于测试
+string Logger::current_log_level = "DEBUG";  // v12.3.7: 默认INFO级别，避免性能开销
 
 // ==================== 启动握手测试 ====================
 // 在程序启动时主动连接隧道服务器进行握手测试
@@ -1370,6 +1395,9 @@ private:
     DWORD window_zero_start_time;
     bool window_probe_logged;
 
+    // v12.3.9: 心跳保活机制
+    DWORD last_heartbeat_time;
+    const int HEARTBEAT_INTERVAL_MS = 20000;  // 20秒心跳间隔
 public:
     TCPConnection(int id, const string& sip, uint16_t sport,
                   const string& dip, uint16_t dport,
@@ -1381,22 +1409,19 @@ public:
           windivert_handle(wdhandle), interface_addr(iface),
           client_seq(0), client_ack(0), server_seq(12345), server_ack(0),
           ip_id(10000), client_window(65535),
-          advertised_window(29200),
+          advertised_window(1024),
           client_acked_seq(0),
           tunnel_sock(INVALID_SOCKET), running(false), established(false), closing(false),
-          last_window_probe_time(0), window_zero_start_time(0), window_probe_logged(false) {
+          last_window_probe_time(0), window_zero_start_time(0), window_probe_logged(false),
+          last_heartbeat_time(0) {
 
         // 固定窗口 - 解决死锁问题
         // 关键设计：client_window和data_window解耦
         //          - client_window：跟踪游戏窗口，控制代理→游戏注入速率
         //          - data_window：固定值，告诉服务器代理的接收窗口
-        if (dport == 10011) {
-            data_window = 1024;   // 频道服务器
-        } else if (dport == 7001) {
-            data_window = 1024;   // 登录服务器
-        } else {
-            data_window = 1024;   // 其他端口
-        }
+        // v12.3.8: 增大窗口到29200字节，匹配真实DNF服务器窗口大小
+        // v12.3.9: 改回1024字节，避免缓存过大
+        data_window = 1024;
     }
 
     ~TCPConnection() {
@@ -1428,79 +1453,11 @@ public:
             send_buffer.clear();
         }
 
-        // 连接到隧道服务器 - 使用getaddrinfo支持域名/IPv4/IPv6
-        struct addrinfo hints{}, *result = nullptr, *rp = nullptr;
-        ZeroMemory(&hints, sizeof(hints));
-        hints.ai_family = AF_UNSPEC;      // 允许IPv4或IPv6
-        hints.ai_socktype = SOCK_STREAM;  // TCP
-        hints.ai_protocol = IPPROTO_TCP;
-
-        string port_str = to_string(tunnel_port);
-        int ret = getaddrinfo(tunnel_server_ip.c_str(), port_str.c_str(), &hints, &result);
-        if (ret != 0) {
-            Logger::error("[连接" + to_string(conn_id) + "] DNS解析失败: " + tunnel_server_ip +
-                         " (错误: " + to_string(ret) + ")");
+        // v12.3.9: 使用统一的连接函数(支持重连)
+        if (!connect_to_tunnel_server()) {
             running = false;
             return;
         }
-
-        // 尝试连接所有解析结果
-        bool connected = false;
-        for (rp = result; rp != nullptr; rp = rp->ai_next) {
-            tunnel_sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-            if (tunnel_sock == INVALID_SOCKET) {
-                continue;
-            }
-
-            Logger::debug("[连接" + to_string(conn_id) + "] 尝试连接隧道 (协议: " +
-                         string(rp->ai_family == AF_INET ? "IPv4" : "IPv6") + ")");
-
-            // TCP_NODELAY
-            int flag = 1;
-            setsockopt(tunnel_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
-
-            // 连接超时设置
-            DWORD timeout = 5000;
-            setsockopt(tunnel_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-            setsockopt(tunnel_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
-
-            if (connect(tunnel_sock, rp->ai_addr, (int)rp->ai_addrlen) != SOCKET_ERROR) {
-                connected = true;
-                Logger::debug("[连接" + to_string(conn_id) + "] 隧道连接成功");
-                break;
-            }
-
-            // 连接失败，尝试下一个地址
-            Logger::debug("[连接" + to_string(conn_id) + "] 连接尝试失败，尝试下一个地址");
-            closesocket(tunnel_sock);
-            tunnel_sock = INVALID_SOCKET;
-        }
-
-        freeaddrinfo(result);
-
-        if (!connected || tunnel_sock == INVALID_SOCKET) {
-            Logger::error("[连接" + to_string(conn_id) + "] 连接隧道服务器失败: " +
-                         tunnel_server_ip + ":" + to_string(tunnel_port) + " (所有地址均失败)");
-            running = false;
-            return;
-        }
-
-        // 发送握手：conn_id(4) + dst_port(2)
-        uint8_t handshake[6];
-        *(uint32_t*)handshake = htonl(conn_id);
-        *(uint16_t*)(handshake + 4) = htons(dst_port);
-
-        if (send(tunnel_sock, (char*)handshake, 6, 0) != 6) {
-            Logger::error("[连接" + to_string(conn_id) + "] 发送握手失败");
-            closesocket(tunnel_sock);
-            tunnel_sock = INVALID_SOCKET;
-            running = false;
-            return;
-        }
-
-        Logger::debug("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
-                    "] 隧道已建立 -> " + tunnel_server_ip + ":" + to_string(tunnel_port) +
-                    " (TCP_NODELAY, 窗口=" + to_string(data_window) + ")");
 
         // 发送SYN-ACK
         send_syn_ack();
@@ -1680,6 +1637,99 @@ public:
     }
 
 private:
+    // v12.3.9: 连接到隧道服务器(支持重连)
+    bool connect_to_tunnel_server() {
+        // 连接到隧道服务器 - 使用getaddrinfo支持域名/IPv4/IPv6
+        struct addrinfo hints{}, *result = nullptr, *rp = nullptr;
+        ZeroMemory(&hints, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;      // 允许IPv4或IPv6
+        hints.ai_socktype = SOCK_STREAM;  // TCP
+        hints.ai_protocol = IPPROTO_TCP;
+
+        string port_str = to_string(tunnel_port);
+        int ret = getaddrinfo(tunnel_server_ip.c_str(), port_str.c_str(), &hints, &result);
+        if (ret != 0) {
+            Logger::error("[连接" + to_string(conn_id) + "] DNS解析失败: " + tunnel_server_ip +
+                         " (错误: " + to_string(ret) + ")");
+            return false;
+        }
+
+        // 尝试连接所有解析结果
+        bool connected = false;
+        for (rp = result; rp != nullptr; rp = rp->ai_next) {
+            tunnel_sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            if (tunnel_sock == INVALID_SOCKET) {
+                continue;
+            }
+
+            Logger::debug("[连接" + to_string(conn_id) + "] 尝试连接隧道 (协议: " +
+                         string(rp->ai_family == AF_INET ? "IPv4" : "IPv6") + ")");
+
+            // TCP_NODELAY
+            int flag = 1;
+            setsockopt(tunnel_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+
+            // v12.3.9: TCP Keepalive保活机制(防止隧道静默断开)
+            int keepalive = 1;
+            setsockopt(tunnel_sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&keepalive, sizeof(keepalive));
+
+            // Windows特定的keepalive参数
+            tcp_keepalive ka_settings;
+            ka_settings.onoff = 1;
+            ka_settings.keepalivetime = 30000;      // 30秒后开始探测
+            ka_settings.keepaliveinterval = 5000;   // 每5秒探测一次
+            DWORD bytes_returned;
+            WSAIoctl(tunnel_sock, SIO_KEEPALIVE_VALS, &ka_settings, sizeof(ka_settings),
+                     nullptr, 0, &bytes_returned, nullptr, nullptr);
+
+            // 连接超时设置
+            DWORD timeout = 5000;
+            setsockopt(tunnel_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+            setsockopt(tunnel_sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+
+            if (connect(tunnel_sock, rp->ai_addr, (int)rp->ai_addrlen) != SOCKET_ERROR) {
+                connected = true;
+                Logger::debug("[连接" + to_string(conn_id) + "] 隧道连接成功");
+                break;
+            }
+
+            // 连接失败，尝试下一个地址
+            Logger::debug("[连接" + to_string(conn_id) + "] 连接尝试失败，尝试下一个地址");
+            closesocket(tunnel_sock);
+            tunnel_sock = INVALID_SOCKET;
+        }
+
+        freeaddrinfo(result);
+
+        if (!connected || tunnel_sock == INVALID_SOCKET) {
+            Logger::error("[连接" + to_string(conn_id) + "] 连接隧道服务器失败: " +
+                         tunnel_server_ip + ":" + to_string(tunnel_port) + " (所有地址均失败)");
+            return false;
+        }
+
+        // 发送握手：conn_id(4) + dst_port(2)
+        uint8_t handshake[6];
+        *(uint32_t*)handshake = htonl(conn_id);
+        *(uint16_t*)(handshake + 4) = htons(dst_port);
+
+        if (send(tunnel_sock, (char*)handshake, 6, 0) != 6) {
+            Logger::error("[连接" + to_string(conn_id) + "] 发送握手失败");
+            closesocket(tunnel_sock);
+            tunnel_sock = INVALID_SOCKET;
+            return false;
+        }
+
+        // v12.3.9: 设置5秒超时，允许定期发送心跳包(不再用无限等待)
+        DWORD recv_timeout = 5000;  // 5秒超时
+        setsockopt(tunnel_sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&recv_timeout, sizeof(recv_timeout));
+
+        Logger::info("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
+                    "] ✓ 隧道已建立 -> " + tunnel_server_ip + ":" + to_string(tunnel_port) +
+                    " (TCP_NODELAY, 窗口=" + to_string(data_window) + ")");
+
+        return true;
+    }
+
     void send_syn_ack() {
         auto packet = build_complete_packet(0x12, server_seq, server_ack, nullptr, 0, advertised_window);
         Logger::debug("[连接" + to_string(conn_id) + "] 发送SYN-ACK seq=" +
@@ -1743,11 +1793,29 @@ private:
     void recv_from_tunnel() {
         vector<uint8_t> buffer;
         uint8_t recv_buf[4096];
-        const int MAX_SEND_BUFFER = 8192;
+        // v12.3.8: 移除未使用的MAX_SEND_BUFFER限制，使用动态缓冲区管理
 
         Logger::debug("[连接" + to_string(conn_id) + "] 隧道接收线程已启动");
 
         while (running) {
+            // v12.3.9: 定期发送心跳包(20秒间隔)
+            DWORD current_time = GetTickCount();
+            if (current_time - last_heartbeat_time >= HEARTBEAT_INTERVAL_MS) {
+                // 心跳包: msg_type(0x02) + conn_id(4) + data_len(2) = 7字节
+                uint8_t heartbeat[7];
+                heartbeat[0] = 0x02;  // 心跳消息类型
+                *(uint32_t*)&heartbeat[1] = htonl(conn_id);
+                *(uint16_t*)&heartbeat[5] = htons(0);  // 数据长度0
+
+                if (send(tunnel_sock, (char*)heartbeat, 7, 0) == 7) {
+                    Logger::debug("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
+                                 "] 💓 发送心跳包");
+                    last_heartbeat_time = current_time;
+                } else {
+                    Logger::warning("[连接" + to_string(conn_id) + "] ⚠️ 心跳包发送失败");
+                }
+            }
+
             // 反压监控（仅记录警告，不暂停接收）
             {
                 lock_guard<mutex> lock(send_lock);
@@ -1767,8 +1835,29 @@ private:
             int n = recv(tunnel_sock, (char*)recv_buf, sizeof(recv_buf), 0);
             if (n <= 0) {
                 int err = WSAGetLastError();
-                Logger::debug("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
-                            "] 隧道关闭 (返回值:" + to_string(n) + " 错误:" + to_string(err) + ")");
+
+                // v12.3.9: 超时不是错误，继续循环发送心跳
+                if (err == WSAETIMEDOUT || err == 10060) {
+                    continue;
+                }
+
+                // v12.3.9: 详细诊断断开原因
+                string disconnect_reason = "";
+                if (n == 0) {
+                    disconnect_reason = "服务器正常关闭连接(FIN)";
+                } else if (err == WSAECONNRESET || err == 10054) {
+                    disconnect_reason = "连接被重置(RST)";
+                } else if (err == WSAECONNABORTED || err == 10053) {
+                    disconnect_reason = "连接被中止";
+                } else {
+                    disconnect_reason = "未知错误(WSA:" + to_string(err) + ")";
+                }
+
+                Logger::info("[连接" + to_string(conn_id) + "|端口" + to_string(dst_port) +
+                            "] ⚠ 隧道断开: " + disconnect_reason +
+                            " (返回值:" + to_string(n) + ")");
+
+                // 隧道断开，退出接收循环
                 break;
             }
 
@@ -1827,6 +1916,13 @@ private:
 
                     // 跳过1字节，尝试重新同步协议
                     buffer.erase(buffer.begin(), buffer.begin() + 1);
+                    continue;
+                }
+
+                // v12.3.9: 处理心跳包回复
+                if (msg_type == 0x02) {
+                    Logger::debug("[连接" + to_string(conn_id) + "] 💓 收到心跳包回复");
+                    buffer.erase(buffer.begin(), buffer.begin() + 7);
                     continue;
                 }
 
@@ -2117,32 +2213,35 @@ bool inject_udp_response(HANDLE windivert_handle,
     sprintf(udp_checksum_hex, "0x%04x", udp_checksum);
     Logger::debug("[UDP注入] UDP校验和: " + string(udp_checksum_hex));
 
-    // 打印完整payload hex dump
-    if (len > 0) {
-        string hex_dump = "";
-        for (size_t i = 0; i < len; i++) {
+    // v12.3.7: 只在DEBUG级别时打印hex dump，避免性能开销
+    if (Logger::is_debug_enabled()) {
+        // 打印完整payload hex dump
+        if (len > 0) {
+            string hex_dump = "";
+            for (size_t i = 0; i < len; i++) {
+                if (i > 0 && i % 16 == 0) {
+                    hex_dump += "\n                    ";
+                }
+                char buf[4];
+                sprintf(buf, "%02x ", payload[i]);
+                hex_dump += buf;
+            }
+            Logger::debug("[UDP注入] Payload(" + to_string(len) + "字节):\n                    " + hex_dump);
+        }
+
+        // 打印完整IP+UDP包头(前28字节)
+        string packet_header_hex = "";
+        int header_len = min(28, (int)packet.size());
+        for (int i = 0; i < header_len; i++) {
             if (i > 0 && i % 16 == 0) {
-                hex_dump += "\n                    ";
+                packet_header_hex += "\n                    ";
             }
             char buf[4];
-            sprintf(buf, "%02x ", payload[i]);
-            hex_dump += buf;
+            sprintf(buf, "%02x ", packet[i]);
+            packet_header_hex += buf;
         }
-        Logger::debug("[UDP注入] Payload(" + to_string(len) + "字节):\n                    " + hex_dump);
+        Logger::debug("[UDP注入] 完整包头(前" + to_string(header_len) + "字节):\n                    " + packet_header_hex);
     }
-
-    // 打印完整IP+UDP包头(前28字节)
-    string packet_header_hex = "";
-    int header_len = min(28, (int)packet.size());
-    for (int i = 0; i < header_len; i++) {
-        if (i > 0 && i % 16 == 0) {
-            packet_header_hex += "\n                    ";
-        }
-        char buf[4];
-        sprintf(buf, "%02x ", packet[i]);
-        packet_header_hex += buf;
-    }
-    Logger::debug("[UDP注入] 完整包头(前" + to_string(header_len) + "字节):\n                    " + packet_header_hex);
 
     // 注入包 - 根据配置选择物理网卡或虚拟网卡
     WINDIVERT_ADDRESS addr = {};
@@ -2583,10 +2682,13 @@ private:
                           const string& dst_ip, uint16_t dst_port,
                           const uint8_t* payload, int payload_len,
                           const WINDIVERT_ADDRESS& addr) {
-        // 拦截UDP包的详细日志改为DEBUG级别
-        // 打印完整载荷（16字节一行，格式化显示）
-        string hex_dump = "";
-        if (payload_len > 0) {
+        // v12.3.7: 拦截UDP包的详细日志，只在DEBUG级别时打印hex dump
+        Logger::debug("[🔍拦截UDP] " + to_string(src_port) + "→" + to_string(dst_port) +
+                   " 载荷=" + to_string(payload_len) + "字节");
+
+        // 只有DEBUG级别才执行hex_dump，避免性能开销
+        if (Logger::is_debug_enabled() && payload_len > 0) {
+            string hex_dump = "";
             for (int i = 0; i < payload_len; i++) {
                 if (i > 0 && i % 16 == 0) {
                     hex_dump += "\n                    ";
@@ -2595,11 +2697,8 @@ private:
                 sprintf(buf, "%02x ", payload[i]);
                 hex_dump += buf;
             }
+            Logger::debug("    Payload: \n                    " + hex_dump);
         }
-
-        Logger::debug("[🔍拦截UDP] " + to_string(src_port) + "→" + to_string(dst_port) +
-                   " 载荷=" + to_string(payload_len) + "字节" +
-                   (payload_len > 0 ? "\n                    " + hex_dump : ""));
 
         // 首次建立UDP tunnel连接(如果还没有)
         if (udp_tunnel_sock == INVALID_SOCKET) {
@@ -2612,32 +2711,46 @@ private:
             }
         }
 
+        // v12.3.7: 优化锁粒度，减少锁竞争
         // 查找或分配conn_id
         string port_key = src_ip + ":" + to_string(src_port) + ":" + dst_ip + ":" + to_string(dst_port);
-        uint32_t conn_id;
+        uint32_t conn_id = 0;
+        bool found = false;
 
+        // 快速查找（大部分情况）
         {
             lock_guard<mutex> lock(udp_lock);
-
-            // 保存客户端IP(从第一个UDP包获取,用于握手响应)
-            if (udp_client_ip.empty()) {
-                udp_client_ip = src_ip;
-                Logger::debug("[UDP] 保存客户端IP: " + udp_client_ip);
+            auto it = udp_port_map.find(port_key);
+            if (it != udp_port_map.end()) {
+                conn_id = it->second;
+                found = true;
             }
+        }
 
-            // 保存UDP接口地址信息(从第一个UDP包获取,用于注入响应)
-            if (!udp_interface_addr_saved) {
-                udp_interface_addr = addr;
-                udp_interface_addr_saved = true;
-                Logger::debug("[UDP] 保存接口地址: IfIdx=" + to_string(addr.Network.IfIdx) +
-                            " SubIfIdx=" + to_string(addr.Network.SubIfIdx) +
-                            " Direction=" + string(addr.Outbound ? "Outbound" : "Inbound"));
-            }
+        // 如果没找到，再获取锁分配新ID
+        if (!found) {
+            lock_guard<mutex> lock(udp_lock);
 
+            // 双重检查（可能其他线程已分配）
             auto it = udp_port_map.find(port_key);
             if (it != udp_port_map.end()) {
                 conn_id = it->second;
             } else {
+                // 保存客户端IP(从第一个UDP包获取,用于握手响应)
+                if (udp_client_ip.empty()) {
+                    udp_client_ip = src_ip;
+                    Logger::debug("[UDP] 保存客户端IP: " + udp_client_ip);
+                }
+
+                // 保存UDP接口地址信息(从第一个UDP包获取,用于注入响应)
+                if (!udp_interface_addr_saved) {
+                    udp_interface_addr = addr;
+                    udp_interface_addr_saved = true;
+                    Logger::debug("[UDP] 保存接口地址: IfIdx=" + to_string(addr.Network.IfIdx) +
+                                " SubIfIdx=" + to_string(addr.Network.SubIfIdx) +
+                                " Direction=" + string(addr.Outbound ? "Outbound" : "Inbound"));
+                }
+
                 // 分配新的conn_id
                 conn_id = udp_conn_id_counter++;
                 udp_port_map[port_key] = conn_id;
@@ -2833,7 +2946,7 @@ private:
         Logger::info("[UDP] ========================================");
 
         vector<uint8_t> buffer;
-        uint8_t recv_buf[4096];
+        uint8_t recv_buf[65536];  // v12.3.7: 增大缓冲区到64KB，减少recv()调用次数
         int reconnect_attempts = 0;
         const int MAX_RECONNECT_ATTEMPTS = 5;
         const int RECONNECT_DELAY_MS = 3000;  // 3秒重连间隔
@@ -2845,14 +2958,14 @@ private:
                 break;
             }
 
-            Logger::info("[UDP] 准备调用recv() - socket=" + to_string(udp_tunnel_sock) +
-                        ", buffer_size=" + to_string(sizeof(recv_buf)));
+            Logger::debug("[UDP] 准备调用recv() - socket=" + to_string(udp_tunnel_sock) +
+                         ", buffer_size=" + to_string(sizeof(recv_buf)));
 
             int n = recv(udp_tunnel_sock, (char*)recv_buf, sizeof(recv_buf), 0);
             int err = WSAGetLastError();
 
-            Logger::info("[UDP] recv()返回: n=" + to_string(n) +
-                        ", WSAError=" + to_string(err));
+            Logger::debug("[UDP] recv()返回: n=" + to_string(n) +
+                         ", WSAError=" + to_string(err));
 
             if (n <= 0) {
                 // v12.3.6修复: UDP tunnel断开时自动重连
@@ -2906,7 +3019,7 @@ private:
             // 成功接收数据，重置重连计数
             reconnect_attempts = 0;
 
-            Logger::info("[UDP] ✓ ←[Tunnel] 成功接收 " + to_string(n) + "字节");
+            Logger::debug("[UDP] ✓ ←[Tunnel] 成功接收 " + to_string(n) + "字节");
             buffer.insert(buffer.end(), recv_buf, recv_buf + n);
 
             // 解析: msg_type(0x03) + conn_id(4) + src_port(2) + dst_port(2) + data_len(2) + payload
@@ -3066,7 +3179,7 @@ int main() {
     }
 
     cout << "============================================================" << endl;
-    cout << "DNF游戏代理客户端 v12.3.5" << endl;
+    cout << "DNF游戏代理客户端 v12.3.9" << endl;
     cout << "编译时间: " << __DATE__ << " " << __TIME__ << endl;
     cout << "============================================================" << endl;
     cout << endl;

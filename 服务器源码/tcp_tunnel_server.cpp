@@ -870,8 +870,18 @@ private:
                         Logger::debug("[连接" + to_string(conn_id) + "] 客户端→游戏: " +
                                     to_string(payload.size()) + "字节 载荷:" + hex_preview);
                     }
-                    else if (msg_type == 0x02) {  // 窗口更新消息（暂不实现）
+                    else if (msg_type == 0x02) {  // v12.3.9: 心跳消息
                         if (buffer.size() < 7) break;
+
+                        Logger::debug("[连接" + to_string(conn_id) + "] 💓 收到心跳包");
+
+                        // 回复心跳包(保持连接双向活跃)
+                        uint8_t heartbeat_reply[7];
+                        heartbeat_reply[0] = 0x02;
+                        *(uint32_t*)&heartbeat_reply[1] = htonl(conn_id);
+                        *(uint16_t*)&heartbeat_reply[5] = htons(0);
+                        send(client_fd, (char*)heartbeat_reply, 7, 0);
+
                         buffer.erase(buffer.begin(), buffer.begin() + 7);
                     }
                     else if (msg_type == 0x03) {  // UDP消息
