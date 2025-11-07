@@ -589,7 +589,7 @@ private:
 // 静态成员初始化
 ofstream Logger::log_file;
 bool Logger::file_enabled = false;
-string Logger::current_log_level = "DEBUG";  // v12.3.7: 默认INFO级别，避免性能开销
+string Logger::current_log_level = "INFO";  // v12.3.7: 默认INFO级别，避免性能开销
 
 // ==================== 启动握手测试 ====================
 // 在程序启动时主动连接隧道服务器进行握手测试
