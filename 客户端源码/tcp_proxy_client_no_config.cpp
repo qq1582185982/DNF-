@@ -1,6 +1,13 @@
 /*
- * DNF游戏代理客户端 - C++ 版本 v12.3.9
+ * DNF游戏代理客户端 - C++ 版本 v12.3.10
  * 从自身exe末尾读取配置
+ *
+ * v12.3.10 更新 (2025-11-06):
+ * - 🔥 关键修复: TCP半关闭机制(SD_SEND)，解决退出副本时队友崩溃问题
+ * - 退出时等待send_buffer清空(最多5秒)，确保所有数据发送完成
+ * - 停止closing时的窗口探测，避免FIN后序列号混乱
+ * - 延长连接清理延迟到2秒，给网络传输留够时间
+ * - 预期效果: 退出副本时服务器能完整发送退出响应，队友正常收到通知
  *
  * v12.3.9 更新 (2025-11-06):
  * - 🔥 核心功能: 应用层心跳包保活机制(20秒间隔)，防止NAT/防火墙idle timeout关闭TCP隧道
@@ -1625,15 +1632,33 @@ public:
             server_ack = seq + 1;
         }
 
-        // 关闭隧道连接
-        stop();
+        // v12.3.10: 停止窗口探测，防止在FIN后继续发送探测包
+        window_zero_start_time = 0;
+        last_window_probe_time = GetTickCount() + 999999999;
+
+        // v12.3.10: 等待send_buffer清空(最多5秒)
+        int wait_count = 0;
+        while (!send_buffer.empty() && wait_count < 500) {
+            Sleep(10);
+            wait_count++;
+        }
+        if (!send_buffer.empty()) {
+            Logger::warning("[连接" + to_string(conn_id) + "] 超时: send_buffer还有" +
+                          to_string(send_buffer.size()) + "字节未发送");
+        }
+
+        // v12.3.10: TCP半关闭 - 仅关闭发送端，继续接收服务器数据
+        // 这样服务器可以继续发送退出响应给队友，避免队友崩溃
         if (tunnel_sock != INVALID_SOCKET) {
-            shutdown(tunnel_sock, SD_BOTH);
-            Logger::debug("[连接" + to_string(conn_id) + "] 隧道socket已shutdown");
+            shutdown(tunnel_sock, SD_SEND);  // 改用SD_SEND替代SD_BOTH
+            Logger::debug("[连接" + to_string(conn_id) + "] 隧道socket半关闭(SD_SEND)");
         }
 
         // 发送FIN-ACK回复游戏客户端
         send_fin_ack();
+
+        // 最后停止接收线程(让它自然结束)
+        stop();
     }
 
 private:
@@ -1750,6 +1775,9 @@ private:
     }
 
     void send_window_probe() {
+        // v12.3.10: 关闭中不发送探测包，避免FIN后序列号混乱
+        if (closing) return;
+
         // 发送1字节窗口探测包，强制接收方回复ACK更新窗口大小
         if (send_buffer.empty())
             return;
@@ -2637,8 +2665,8 @@ private:
 
             if (flags & 0x01) {  // FIN
                 conn->handle_fin(seq);
-                // 短暂延迟后删除连接，确保FIN-ACK发送完成
-                Sleep(100);
+                // v12.3.10: 延长延迟到2秒，给网络传输和数据清空留够时间
+                Sleep(2000);
                 delete conn;
                 connections.erase(conn_key);
                 Logger::debug("[连接] FIN处理完成，连接已清理");
@@ -3179,7 +3207,7 @@ int main() {
     }
 
     cout << "============================================================" << endl;
-    cout << "DNF游戏代理客户端 v12.3.9" << endl;
+    cout << "DNF游戏代理客户端 v12.3.10" << endl;
     cout << "编译时间: " << __DATE__ << " " << __TIME__ << endl;
     cout << "============================================================" << endl;
     cout << endl;
