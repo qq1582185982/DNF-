@@ -10,7 +10,8 @@
 
 ServerSelectorGUI::ServerSelectorGUI()
     : hwnd(NULL), hInstance(GetModuleHandle(NULL)),
-      selected_index(-1), user_confirmed(false) {
+      selected_index(-1), user_confirmed(false), showing_log(false), is_connected(false),
+      dialog_should_close(false) {
 }
 
 ServerSelectorGUI::~ServerSelectorGUI() {
@@ -25,6 +26,7 @@ bool ServerSelectorGUI::ShowDialog(const std::vector<ServerInfo>& server_list,
     servers = server_list;
     selected_index = -1;
     user_confirmed = false;
+    dialog_should_close = false;
 
     // 初始化窗口
     if (!InitWindow()) {
@@ -38,25 +40,31 @@ bool ServerSelectorGUI::ShowDialog(const std::vector<ServerInfo>& server_list,
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
-    // 消息循环
+    // 消息循环 - 持续运行直到明确要求关闭
     MSG msg;
+    bool result_ready = false;
+    bool result_value = false;
+
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
 
-        // 如果窗口已关闭，退出循环
-        if (!IsWindow(hwnd)) {
+        // 如果用户确认了服务器选择，记录结果但继续运行消息循环
+        if (user_confirmed && !result_ready && selected_index >= 0 && selected_index < (int)servers.size()) {
+            selected_server = servers[selected_index];
+            result_ready = true;
+            result_value = true;
+            // 不退出循环，继续处理消息
+        }
+
+        // 只有当明确要求关闭对话框时才退出
+        if (dialog_should_close || !IsWindow(hwnd)) {
             break;
         }
     }
 
-    // 返回选择结果
-    if (user_confirmed && selected_index >= 0 && selected_index < (int)servers.size()) {
-        selected_server = servers[selected_index];
-        return true;
-    }
-
-    return false;
+    // 返回结果
+    return result_ready ? result_value : false;
 }
 
 bool ServerSelectorGUI::InitWindow() {
@@ -184,6 +192,39 @@ bool ServerSelectorGUI::InitWindow() {
     );
     SendMessage(hBtnCancel, WM_SETFONT, (WPARAM)hButtonFont, TRUE);
 
+    // 8. "查看日志"按钮（放在标题右侧）
+    HWND hBtnShowLog = CreateWindowW(
+        L"BUTTON", L"查看日志",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT,
+        650, 25, 120, 40,
+        hwnd, (HMENU)IDC_BTN_SHOW_LOG, hInstance, NULL
+    );
+    HFONT hSmallFont = CreateFont(
+        16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑"
+    );
+    SendMessage(hBtnShowLog, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
+
+    // 9. 日志文本框（多行只读，初始隐藏）
+    HWND hEditLog = CreateWindowW(
+        L"EDIT", L"",
+        WS_CHILD | WS_BORDER | ES_LEFT | ES_READONLY | ES_MULTILINE |
+        ES_AUTOVSCROLL | WS_VSCROLL,
+        30, 95, 740, 405,
+        hwnd, (HMENU)IDC_EDIT_LOG, hInstance, NULL
+    );
+    SendMessage(hEditLog, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
+
+    // 10. "返回"按钮（初始隐藏）
+    HWND hBtnBack = CreateWindowW(
+        L"BUTTON", L"返回",
+        WS_CHILD | BS_PUSHBUTTON | BS_FLAT,
+        30, 520, 740, 48,
+        hwnd, (HMENU)IDC_BTN_BACK, hInstance, NULL
+    );
+    SendMessage(hBtnBack, WM_SETFONT, (WPARAM)hButtonFont, TRUE);
+
     return true;
 }
 
@@ -281,15 +322,22 @@ void ServerSelectorGUI::OnConnectClick() {
     }
 
     user_confirmed = true;
+    is_connected = true;  // 标记为已连接
 
-    // 关闭窗口
-    DestroyWindow(hwnd);
-    PostQuitMessage(0);
+    // 切换到日志页面，而不是关闭窗口
+    ShowLogPage();
+
+    // 显示连接信息
+    std::wstring server_name = servers[selected_index].name;
+    AppendLog(L"=== 开始连接 ===\r\n");
+    AppendLog(L"服务器: " + server_name + L"\r\n");
+    AppendLog(L"正在建立连接...\r\n\r\n");
 }
 
 void ServerSelectorGUI::OnCancelClick() {
     selected_index = -1;
     user_confirmed = false;
+    dialog_should_close = true;
 
     // 关闭窗口
     DestroyWindow(hwnd);
@@ -313,6 +361,68 @@ void ServerSelectorGUI::OnServerButtonClick(int server_index) {
             }
         }
     }
+}
+
+void ServerSelectorGUI::ShowLogPage() {
+    showing_log = true;
+
+    // 隐藏服务器选择页面的控件
+    for (HWND btn : server_buttons) {
+        ShowWindow(btn, SW_HIDE);
+    }
+    ShowWindow(GetDlgItem(hwnd, IDC_STATIC_LABEL), SW_HIDE);
+    ShowWindow(GetDlgItem(hwnd, IDC_EDIT_DOWNLOAD), SW_HIDE);
+    ShowWindow(GetDlgItem(hwnd, IDC_BTN_CONNECT), SW_HIDE);
+    ShowWindow(GetDlgItem(hwnd, IDC_BTN_CANCEL), SW_HIDE);
+    ShowWindow(GetDlgItem(hwnd, IDC_BTN_SHOW_LOG), SW_HIDE);
+
+    // 显示日志页面的控件
+    ShowWindow(GetDlgItem(hwnd, IDC_EDIT_LOG), SW_SHOW);
+    ShowWindow(GetDlgItem(hwnd, IDC_BTN_BACK), SW_SHOW);
+
+    // 添加初始日志
+    AppendLog(L"=== 日志系统已启动 ===\r\n");
+    AppendLog(L"等待连接...\r\n");
+}
+
+void ServerSelectorGUI::ShowServerPage() {
+    showing_log = false;
+
+    // 显示服务器选择页面的控件
+    for (HWND btn : server_buttons) {
+        ShowWindow(btn, SW_SHOW);
+    }
+    ShowWindow(GetDlgItem(hwnd, IDC_STATIC_LABEL), SW_SHOW);
+    ShowWindow(GetDlgItem(hwnd, IDC_EDIT_DOWNLOAD), SW_SHOW);
+    ShowWindow(GetDlgItem(hwnd, IDC_BTN_CONNECT), SW_SHOW);
+    ShowWindow(GetDlgItem(hwnd, IDC_BTN_CANCEL), SW_SHOW);
+    ShowWindow(GetDlgItem(hwnd, IDC_BTN_SHOW_LOG), SW_SHOW);
+
+    // 隐藏日志页面的控件
+    ShowWindow(GetDlgItem(hwnd, IDC_EDIT_LOG), SW_HIDE);
+    ShowWindow(GetDlgItem(hwnd, IDC_BTN_BACK), SW_HIDE);
+}
+
+void ServerSelectorGUI::AppendLog(const std::wstring& message) {
+    HWND hEditLog = GetDlgItem(hwnd, IDC_EDIT_LOG);
+    if (!hEditLog) return;
+
+    // 获取当前文本长度
+    int len = GetWindowTextLengthW(hEditLog);
+
+    // 将光标移到末尾
+    SendMessageW(hEditLog, EM_SETSEL, len, len);
+
+    // 追加文本
+    SendMessageW(hEditLog, EM_REPLACESEL, FALSE, (LPARAM)message.c_str());
+
+    // 滚动到底部
+    SendMessageW(hEditLog, EM_SCROLLCARET, 0, 0);
+}
+
+// 公共方法：添加日志（供外部调用）
+void ServerSelectorGUI::AddLog(const std::wstring& message) {
+    AppendLog(message);
 }
 
 LRESULT CALLBACK ServerSelectorGUI::WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -411,6 +521,28 @@ LRESULT CALLBACK ServerSelectorGUI::WindowProc(HWND hwnd, UINT msg, WPARAM wPara
                     return 0;
                 } else if (ctrl_id == IDC_BTN_CANCEL) {
                     pThis->OnCancelClick();
+                    return 0;
+                } else if (ctrl_id == IDC_BTN_SHOW_LOG) {
+                    // 切换到日志页面
+                    pThis->ShowLogPage();
+                    return 0;
+                } else if (ctrl_id == IDC_BTN_BACK) {
+                    // 返回服务器选择页面
+                    if (pThis->is_connected) {
+                        // 如果已连接，提示用户
+                        int result = MessageBoxW(hwnd,
+                                                L"当前已建立连接\n\n返回服务器选择页面将断开连接\n确定要继续吗？",
+                                                L"确认",
+                                                MB_YESNO | MB_ICONQUESTION);
+                        if (result == IDYES) {
+                            pThis->is_connected = false;
+                            pThis->user_confirmed = false;
+                            pThis->ShowServerPage();
+                        }
+                    } else {
+                        // 未连接，直接返回
+                        pThis->ShowServerPage();
+                    }
                     return 0;
                 } else if (ctrl_id >= IDC_SERVER_BTN_BASE && ctrl_id < IDC_SERVER_BTN_BASE + 100) {
                     // 服务器按钮点击

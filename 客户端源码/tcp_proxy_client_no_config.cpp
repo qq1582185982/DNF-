@@ -1451,7 +1451,31 @@ bool configure_loopback_ips(const string& adapter_name, const string& primary_ip
             cout << endl;
             cout << "配置完成后，按任意键继续..." << endl;
             cout << "========================================" << endl;
-            system("pause");
+
+            // 构建配置说明消息
+            // 转换string到wstring
+            wstring w_adapter_name(adapter_name.begin(), adapter_name.end());
+            wstring w_primary_ip(primary_ip.begin(), primary_ip.end());
+            wstring w_secondary_ip(secondary_ip.begin(), secondary_ip.end());
+            wstring w_subnet(string(LOOPBACK_ADAPTER_SUBNET).begin(), string(LOOPBACK_ADAPTER_SUBNET).end());
+
+            wstringstream config_msg;
+            config_msg << L"请手动配置TAP虚拟网卡IP地址：\n\n"
+                      << L"1. 打开\"控制面板\" → \"网络和Internet\" → \"网络连接\"\n"
+                      << L"2. 找到\"" << w_adapter_name << L"\"，右键 → 属性\n"
+                      << L"3. 双击\"Internet 协议版本4 (TCP/IPv4)\"\n"
+                      << L"4. 选择\"使用下面的IP地址\"\n"
+                      << L"5. 输入以下信息：\n"
+                      << L"   IP地址: " << w_primary_ip << L"\n"
+                      << L"   子网掩码: " << w_subnet << L"\n"
+                      << L"6. 点击\"高级\"按钮\n"
+                      << L"7. 在\"IP地址\"下点击\"添加\"\n"
+                      << L"8. 添加第二个IP：" << w_secondary_ip << L"\n"
+                      << L"   子网掩码: " << w_subnet << L"\n"
+                      << L"9. 点击\"确定\"保存配置\n\n"
+                      << L"配置完成后点击\"确定\"继续...";
+
+            MessageBoxW(NULL, config_msg.str().c_str(), L"手动配置TAP虚拟网卡", MB_OK | MB_ICONINFORMATION);
             cout << endl;
 
             // 重新验证
@@ -1548,7 +1572,17 @@ bool auto_setup_loopback_adapter(const string& primary_ip, const string& seconda
             cout << "  ⚠ 自动安装失败，请手动安装" << endl;
             cout << "  手动安装步骤：设备管理器 → 操作 → 添加过时硬件 → 网络适配器 → Microsoft → Microsoft KM-TEST 环回适配器" << endl;
             cout << "  安装完成后，按任意键继续..." << endl;
-            system("pause");
+
+            MessageBoxW(NULL,
+                       L"虚拟网卡自动安装失败，请手动安装\n\n"
+                       L"手动安装步骤：\n"
+                       L"1. 打开\"设备管理器\"\n"
+                       L"2. 点击\"操作\" → \"添加过时硬件\"\n"
+                       L"3. 选择\"网络适配器\"\n"
+                       L"4. 选择\"Microsoft\" → \"Microsoft KM-TEST 环回适配器\"\n\n"
+                       L"安装完成后点击\"确定\"继续...",
+                       L"手动安装虚拟网卡",
+                       MB_OK | MB_ICONWARNING);
         }
 
         // 循环检测（无论自动安装是否成功都要检测）
@@ -3454,6 +3488,12 @@ private:
 int main() {
     SetConsoleOutputCP(CP_UTF8);
 
+    // 隐藏控制台窗口
+    HWND console_window = GetConsoleWindow();
+    if (console_window != NULL) {
+        ShowWindow(console_window, SW_HIDE);
+    }
+
     // 创建log目录（如果不存在）
     CreateDirectoryA("log", NULL);
 
@@ -3482,7 +3522,7 @@ int main() {
         cout << "错误: 需要管理员权限" << endl;
         cout << "请右键点击程序，选择\"以管理员身份运行\"" << endl;
         Logger::close();
-        system("pause");
+        MessageBoxW(NULL, L"需要管理员权限\n\n请右键点击程序，选择\"以管理员身份运行\"", L"错误", MB_OK | MB_ICONERROR);
         return 1;
     }
 
@@ -3505,7 +3545,7 @@ int main() {
         cout << "请使用配置注入工具生成带配置的客户端程序。" << endl;
         cout << endl;
         Logger::close();
-        system("pause");
+        MessageBoxW(NULL, L"无法读取API配置\n\n此程序需要配置才能运行。\n请使用配置注入工具生成带配置的客户端程序。", L"配置错误", MB_OK | MB_ICONERROR);
         return 1;
     }
 
@@ -3530,9 +3570,12 @@ int main() {
         cout << "  原因: " << error_str << endl;
         cout << endl;
 
+        // 显示错误消息框
+        wstring msg = L"获取服务器列表失败\n\n原因: " + error_msg;
+        MessageBoxW(NULL, msg.c_str(), L"网络错误", MB_OK | MB_ICONERROR);
+
         delete[] error_str;
         Logger::close();
-        system("pause");
         return 1;
     }
 
@@ -3583,7 +3626,7 @@ int main() {
         cout << "错误: 无法计算辅助IP地址" << endl;
         Logger::error("辅助IP计算失败");
         Logger::close();
-        system("pause");
+        MessageBoxW(NULL, L"无法计算辅助IP地址", L"配置错误", MB_OK | MB_ICONERROR);
         return 1;
     }
 
@@ -3600,7 +3643,7 @@ int main() {
         cout << "提示: 请确保以管理员身份运行此程序" << endl;
         Logger::error("TAP虚拟网卡配置失败");
         Logger::close();
-        system("pause");
+        MessageBoxW(NULL, L"TAP虚拟网卡配置失败\n\n请确保以管理员身份运行此程序", L"配置错误", MB_OK | MB_ICONERROR);
         return 1;
     }
 
@@ -3614,7 +3657,7 @@ int main() {
     if (!deploy_windivert_files(dll_path, sys_path)) {
         cout << "错误: WinDivert 组件部署失败" << endl;
         Logger::close();
-        system("pause");
+        MessageBoxW(NULL, L"WinDivert组件部署失败", L"部署错误", MB_OK | MB_ICONERROR);
         return 1;
     }
     cout << "✓ WinDivert 文件已部署" << endl;
@@ -3625,7 +3668,7 @@ int main() {
         cout << "错误: 无法加载 WinDivert.dll" << endl;
         Logger::error("LoadWinDivert() 失败: " + dll_path);
         Logger::close();
-        system("pause");
+        MessageBoxW(NULL, L"无法加载WinDivert.dll", L"加载错误", MB_OK | MB_ICONERROR);
         return 1;
     }
     Logger::debug("✓ WinDivert 组件加载成功");
@@ -3641,7 +3684,7 @@ int main() {
     if (!client.start()) {
         Logger::error("客户端启动失败");
         Logger::close();
-        system("pause");
+        MessageBoxW(NULL, L"客户端启动失败", L"启动错误", MB_OK | MB_ICONERROR);
         return 1;
     }
 

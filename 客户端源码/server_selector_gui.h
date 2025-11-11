@@ -18,6 +18,9 @@
 #define IDC_STATIC_LABEL   1004  // "下载地址:" 标签
 #define IDC_EDIT_DOWNLOAD  1005  // 下载地址文本框（可复制）
 #define IDC_SERVER_BTN_BASE 2000  // 服务器按钮ID起始值 (2000+索引)
+#define IDC_BTN_SHOW_LOG   1006  // "查看日志" 按钮
+#define IDC_EDIT_LOG       1007  // 日志文本框
+#define IDC_BTN_BACK       1008  // "返回" 按钮
 
 // 服务器选择器类
 class ServerSelectorGUI {
@@ -34,6 +37,15 @@ public:
                    int last_server_id,
                    ServerInfo& selected_server);
 
+    // 添加日志消息（公共方法，供外部调用）
+    void AddLog(const std::wstring& message);
+
+    // 获取窗口句柄
+    HWND GetHWND() const { return hwnd; }
+
+    // 检查窗口是否仍然存在
+    bool IsWindowValid() const { return hwnd != NULL && IsWindow(hwnd); }
+
 private:
     HWND hwnd;
     HINSTANCE hInstance;
@@ -41,6 +53,9 @@ private:
     int selected_index;
     bool user_confirmed;
     std::vector<HWND> server_buttons;  // 存储服务器按钮句柄
+    bool showing_log;  // 是否显示日志页面
+    bool is_connected;  // 是否已连接
+    bool dialog_should_close;  // 对话框是否应该关闭
 
     // 窗口过程函数
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -65,6 +80,15 @@ private:
 
     // 处理服务器按钮点击
     void OnServerButtonClick(int server_index);
+
+    // 切换到日志页面
+    void ShowLogPage();
+
+    // 返回服务器选择页面
+    void ShowServerPage();
+
+    // 添加日志消息
+    void AppendLog(const std::wstring& message);
 };
 
 #endif // SERVER_SELECTOR_GUI_H
