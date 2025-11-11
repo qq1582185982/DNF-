@@ -1,5 +1,18 @@
 /*
- * DNF 隧道服务器 - C++ 版本 v5.2
+ * DNF 隧道服务器 - C++ 版本 v5.3
+ * v5.3更新: 🔥修复游戏服务器连接空闲超时问题 - 启用TCP Keepalive
+ *          问题描述: 游戏服务器在运行约9分钟后发送RST断开连接(errno=104: Connection reset by peer)
+ *                   分析发现用户正在游戏中,但如果一段时间没操作(看剧情、挂机等)
+ *                   服务端→游戏服务器之间没有数据传输,游戏服务器可能检测到TCP空闲而断开
+ *                   客户端心跳包只保持客户端↔服务端隧道活跃,游戏服务器不知道心跳包
+ *          解决方案: 在连接到游戏服务器时启用TCP Keepalive
+ *                   - 60秒无数据后开始探测
+ *                   - 每10秒探测一次
+ *                   - 3次探测失败后断开
+ *          修改位置: connect_to_game_server函数,connect()成功后(约691-700行)
+ *          关键优势: - TCP层面保持连接活跃,防止游戏服务器因空闲断开
+ *                   - 不依赖应用层数据,适用于用户挂机/无操作场景
+ *                   - 与客户端心跳包互补,双重保活机制
  * v5.2更新: 🔥修复多网卡环境下UDP路由问题 - bind到proxy_local_ip而非INADDR_ANY
  *          问题描述: 服务器有多个网卡（如192.168.2.75 + 108.2.2.55）
  *                   游戏服务器在特定网段（如108.2.2.66）
@@ -689,6 +702,28 @@ public:
                 if (connect(game_fd, rp->ai_addr, rp->ai_addrlen) == 0) {
                     // 连接成功
                     Logger::debug("[连接" + to_string(conn_id) + "] 成功连接到游戏服务器");
+
+                    // v5.3: 启用TCP Keepalive，防止游戏服务器因空闲超时断开连接
+                    int keepalive = 1;
+                    if (setsockopt(game_fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) < 0) {
+                        Logger::warning("[连接" + to_string(conn_id) + "] 设置SO_KEEPALIVE失败: " +
+                                      string(strerror(errno)));
+                    }
+
+                    // 设置keepalive参数
+                    int keepidle = 60;     // 60秒无数据后开始探测
+                    int keepinterval = 10; // 每10秒探测一次
+                    int keepcount = 3;     // 3次探测失败后断开
+
+                    setsockopt(game_fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+                    setsockopt(game_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepinterval, sizeof(keepinterval));
+                    setsockopt(game_fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcount, sizeof(keepcount));
+
+                    Logger::info("[连接" + to_string(conn_id) + "] ✓ TCP Keepalive已启用 " +
+                               "(idle=" + to_string(keepidle) + "s, " +
+                               "interval=" + to_string(keepinterval) + "s, " +
+                               "count=" + to_string(keepcount) + ")");
+
                     break;
                 }
 
