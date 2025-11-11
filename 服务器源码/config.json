@@ -1,17 +1,22 @@
-  {
-    "servers": [
-      {
-        "name": "601",
-        "listen_port": 33223,
-        "game_server_ip": "192.168.2.110",
-        "max_connections": 100
-      },
-      {
-        "name": "602",
-        "listen_port": 33224,
-        "game_server_ip": "192.168.2.61",
-        "max_connections": 100
-      }
-    ],
-    "log_level": "INFO"
+{
+  "servers": [
+    {
+      "name": "601",
+      "listen_port": 33223,
+      "game_server_ip": "192.168.2.110",
+      "max_connections": 100
+    },
+    {
+      "name": "602",
+      "listen_port": 33224,
+      "game_server_ip": "192.168.2.61",
+      "max_connections": 100
+    }
+  ],
+  "log_level": "INFO",
+  "api_config": {
+    "enabled": true,
+    "port": 33231,
+    "tunnel_server_ip": "192.168.2.75"
   }
+}

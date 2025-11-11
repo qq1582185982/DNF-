@@ -3,19 +3,20 @@
 CXX = g++
 CXXFLAGS = -std=c++11 -O2 -Wall -pthread
 TARGET = dnf-tunnel-server
-SOURCE = tcp_tunnel_server.cpp
+SOURCES = tcp_tunnel_server.cpp http_api_server.cpp
+HEADERS = http_api_server.h
 
 # 默认目标：动态编译
 all: $(TARGET)
 
-$(TARGET): $(SOURCE)
-	$(CXX) $(CXXFLAGS) $< -o $@
+$(TARGET): $(SOURCES) $(HEADERS)
+	$(CXX) $(CXXFLAGS) $(SOURCES) -o $@
 	@echo "编译完成: $(TARGET)"
 	@echo "运行: ./$(TARGET)"
 
 # 静态编译（兼容性最好）
-static: $(SOURCE)
-	$(CXX) $(CXXFLAGS) -static $< -o $(TARGET)
+static: $(SOURCES) $(HEADERS)
+	$(CXX) $(CXXFLAGS) -static $(SOURCES) -o $(TARGET)
 	@echo "静态编译完成: $(TARGET)"
 	@echo "文件大小:"
 	@ls -lh $(TARGET)

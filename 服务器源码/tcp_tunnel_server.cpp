@@ -229,6 +229,7 @@
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <execinfo.h>
+#include "http_api_server.h"
 
 using namespace std;
 
@@ -245,9 +246,17 @@ struct ServerConfig {
 };
 
 // 全局配置
+// API配置
+struct ApiConfig {
+    bool enabled = true;
+    int port = 33231;
+    string tunnel_server_ip = "192.168.2.75";
+};
+
 struct GlobalConfig {
     vector<ServerConfig> servers;
     string log_level = "INFO";
+    ApiConfig api_config;
 };
 
 // ==================== 日志工具 ====================
@@ -2194,6 +2203,44 @@ GlobalConfig load_config(const string& filename) {
                 global_config.log_level = line.substr(start, end - start);
             }
         }
+
+        // 解析API配置 (简单判断:在api_config后面的字段)
+        static bool in_api_config = false;
+        if (line.find("\"api_config\"") != string::npos) {
+            in_api_config = true;
+        }
+        if (in_api_config && line.find("}") != string::npos) {
+            string trimmed = line;
+            trimmed.erase(0, trimmed.find_first_not_of(" \t"));
+            if (trimmed[0] == '}') {
+                in_api_config = false;
+            }
+        }
+
+        if (in_api_config && !in_servers_array) {
+            if (line.find("\"enabled\"") != string::npos) {
+                if (line.find("true") != string::npos) {
+                    global_config.api_config.enabled = true;
+                } else if (line.find("false") != string::npos) {
+                    global_config.api_config.enabled = false;
+                }
+            }
+            else if (line.find("\"port\"") != string::npos) {
+                size_t pos = line.find(":");
+                if (pos != string::npos) {
+                    string value = line.substr(pos + 1);
+                    int num = extract_number(value);
+                    if (num > 0) global_config.api_config.port = num;
+                }
+            }
+            else if (line.find("\"tunnel_server_ip\"") != string::npos) {
+                size_t start = line.find("\"", line.find(":")) + 1;
+                size_t end = line.find("\"", start);
+                if (start != string::npos && end != string::npos) {
+                    global_config.api_config.tunnel_server_ip = line.substr(start, end - start);
+                }
+            }
+        }
     }
 
     // 如果没有解析到任何服务器，添加默认服务器
@@ -2306,6 +2353,13 @@ bool generate_default_config(const string& filename) {
 // ==================== 信号处理 - 捕获崩溃并记录日志 ====================
 // 使用异步信号安全的函数记录崩溃信息
 void signal_handler(int signum) {
+    // SIGHUP: 重新加载配置
+    if (signum == SIGHUP) {
+        reload_http_api_config();
+        return;
+    }
+
+    // 其他信号: 崩溃处理
     // 只使用异步信号安全的函数: write(), backtrace(), backtrace_symbols_fd()
     const char* msg1 = "\n========================================\n!!! CRASH DETECTED !!!\nSignal: ";
     ssize_t ret;  // 用于接收返回值，避免编译警告
@@ -2346,8 +2400,9 @@ void install_signal_handlers() {
     signal(SIGABRT, signal_handler);  // Abort
     signal(SIGFPE, signal_handler);   // Floating Point Exception
     signal(SIGILL, signal_handler);   // Illegal Instruction
+    signal(SIGHUP, signal_handler);   // Hangup - 用于热重载配置
 
-    Logger::info("信号处理器已安装 (SIGSEGV, SIGABRT, SIGFPE, SIGILL)");
+    Logger::info("信号处理器已安装 (SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGHUP)");
 }
 
 // ==================== 主函数 ====================
@@ -2459,7 +2514,33 @@ int main() {
 
     Logger::info("所有隧道服务器已启动");
     cout << endl;
-    cout << "服务器正在运行，按 Ctrl+C 停止..." << endl;
+
+    // 启动HTTP API服务器 (用于多服务器客户端)
+    pthread_t api_thread = 0;
+    if (global_config.api_config.enabled) {
+        Logger::info("正在启动HTTP API服务器...");
+        Logger::info("API配置: 端口=" + to_string(global_config.api_config.port) +
+                    ", 隧道服务器IP=" + global_config.api_config.tunnel_server_ip);
+
+        api_thread = start_http_api_server(config_file.c_str(),
+                                           global_config.api_config.tunnel_server_ip.c_str(),
+                                           global_config.api_config.port);
+        if (api_thread == 0) {
+            Logger::error("HTTP API服务器启动失败");
+        } else {
+            Logger::info("HTTP API服务器已启动在端口 " + to_string(global_config.api_config.port));
+            cout << "HTTP API: http://" << global_config.api_config.tunnel_server_ip
+                 << ":" << global_config.api_config.port << "/api/servers" << endl;
+        }
+    } else {
+        Logger::info("HTTP API服务器已禁用 (在config.json中设置api_config.enabled=true启用)");
+    }
+
+    cout << endl;
+    cout << "服务器正在运行..." << endl;
+    cout << "  • 停止服务器: Ctrl+C 或 kill <pid>" << endl;
+    cout << "  • 热重载配置: kill -HUP <pid>" << endl;
+    cout << "  • 查看进程ID: echo $$" << endl;
     cout << "============================================================" << endl;
 
     // 等待所有线程
@@ -2467,6 +2548,14 @@ int main() {
         if (t->joinable()) {
             t->join();
         }
+    }
+
+    // 停止HTTP API服务器
+    if (api_thread != 0) {
+        Logger::info("正在停止HTTP API服务器...");
+        stop_http_api_server();
+        pthread_join(api_thread, NULL);
+        Logger::info("HTTP API服务器已停止");
     }
 
     // 智能指针自动清理，无需手动delete

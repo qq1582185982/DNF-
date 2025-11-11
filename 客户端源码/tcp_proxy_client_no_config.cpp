@@ -1,6 +1,16 @@
 /*
- * DNF游戏代理客户端 - C++ 版本 v12.3.12
- * 从自身exe末尾读取配置
+ * DNF游戏代理客户端 - C++ 版本 v12.4.0 (多服务器版)
+ * 从自身exe末尾读取配置，支持HTTP API动态获取服务器列表
+ *
+ * v12.4.0 更新 (2025-11-11):
+ * - 🎯 新功能: 服务器切换功能 - 启动时从HTTP API获取服务器列表并显示GUI选择窗口
+ * - GUI窗口: Win32原生窗口，仿DNF频道选择风格，支持列表选择和双击连接
+ * - 记忆功能: 保存用户上次选择的服务器ID到%APPDATA%\DNFProxy\last_server.ini
+ * - API集成: WinHTTP客户端，支持超时控制(5秒连接,10秒接收)
+ * - 错误处理: API请求失败直接退出，不回退到单服务器模式
+ * - 配置格式: {"config_api_url":"config.server.com","config_api_port":8080,"version_name":"多服务器版v1.0"}
+ * - API格式: {"servers":[{"id":1,"name":"龙鸣86","game_server_ip":"...","tunnel_server_ip":"...","tunnel_port":33223}]}
+ * - 流程优化: 启动流程从5步增加到6步(1.读取API配置 2.获取服务器列表 3.选择服务器 4-6.原有流程)
  *
  * v12.3.12 更新 (2025-11-11):
  * - 🔥 关键修复: TCP握手窗口从1024改为65535，解决游戏客户端窗口被限制问题
@@ -76,6 +86,11 @@
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
+
+// HTTP客户端和服务器选择模块
+#include "http_client.h"
+#include "server_selector_gui.h"
+#include "config_manager.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -391,6 +406,112 @@ string get_local_ipv4_address() {
 
 // ==================== 配置读取 ====================
 
+// 读取API配置（用于获取服务器列表）
+// 期望格式: {"config_api_url":"config.server.com","config_api_port":8080,"version_name":"多服务器版v1.0"}
+bool read_api_config_from_self(string& api_url, int& api_port, string& version_name) {
+    // 1. 获取当前exe路径
+    char exe_path[MAX_PATH];
+    if (GetModuleFileNameA(NULL, exe_path, MAX_PATH) == 0) {
+        return false;
+    }
+
+    // 2. 打开自身文件
+    ifstream file(exe_path, ios::binary | ios::ate);
+    if (!file.is_open()) {
+        return false;
+    }
+
+    // 3. 获取文件大小
+    streamsize file_size = file.tellg();
+    if (file_size < 100) {
+        file.close();
+        return false;
+    }
+
+    // 4. 从末尾搜索配置标记
+    const string END_MARKER = "[CONFIG_END]";
+    const string START_MARKER = "[CONFIG_START]";
+    const int SEARCH_BUFFER_SIZE = 8192;  // 搜索最后8KB
+
+    // 读取文件末尾
+    int search_size = min((streamsize)SEARCH_BUFFER_SIZE, file_size);
+    vector<char> buffer(search_size);
+    file.seekg(file_size - search_size, ios::beg);
+    file.read(buffer.data(), search_size);
+    file.close();
+
+    string tail_content(buffer.data(), search_size);
+
+    // 5. 查找标记
+    size_t end_pos = tail_content.rfind(END_MARKER);
+    if (end_pos == string::npos) {
+        return false;
+    }
+
+    size_t start_pos = tail_content.rfind(START_MARKER, end_pos);
+    if (start_pos == string::npos) {
+        return false;
+    }
+
+    // 6. 提取JSON
+    start_pos += START_MARKER.length();
+    if (start_pos >= end_pos) {
+        return false;
+    }
+
+    string json_content = tail_content.substr(start_pos, end_pos - start_pos);
+
+    // 7. 解析JSON
+    // 查找config_api_url
+    size_t api_url_pos = json_content.find("\"config_api_url\"");
+    if (api_url_pos == string::npos) return false;
+    size_t api_url_colon = json_content.find(":", api_url_pos);
+    if (api_url_colon == string::npos) return false;
+    size_t api_url_quote1 = json_content.find("\"", api_url_colon);
+    if (api_url_quote1 == string::npos) return false;
+    size_t api_url_quote2 = json_content.find("\"", api_url_quote1 + 1);
+    if (api_url_quote2 == string::npos) return false;
+    api_url = json_content.substr(api_url_quote1 + 1, api_url_quote2 - api_url_quote1 - 1);
+
+    // 查找config_api_port
+    size_t api_port_pos = json_content.find("\"config_api_port\"");
+    if (api_port_pos == string::npos) return false;
+    size_t api_port_colon = json_content.find(":", api_port_pos);
+    if (api_port_colon == string::npos) return false;
+    size_t api_port_comma = json_content.find_first_of(",}", api_port_colon);
+    if (api_port_comma == string::npos) return false;
+
+    string port_str = json_content.substr(api_port_colon + 1, api_port_comma - api_port_colon - 1);
+    port_str.erase(remove_if(port_str.begin(), port_str.end(), ::isspace), port_str.end());
+
+    try {
+        api_port = stoi(port_str);
+    } catch (...) {
+        return false;
+    }
+
+    // 查找version_name（可选字段）
+    size_t version_pos = json_content.find("\"version_name\"");
+    if (version_pos != string::npos) {
+        size_t version_colon = json_content.find(":", version_pos);
+        if (version_colon != string::npos) {
+            size_t version_quote1 = json_content.find("\"", version_colon);
+            if (version_quote1 != string::npos) {
+                size_t version_quote2 = json_content.find("\"", version_quote1 + 1);
+                if (version_quote2 != string::npos) {
+                    version_name = json_content.substr(version_quote1 + 1, version_quote2 - version_quote1 - 1);
+                }
+            }
+        }
+    }
+
+    if (version_name.empty()) {
+        version_name = "多服务器版";
+    }
+
+    return true;
+}
+
 bool read_config_from_self(string& game_ip, string& tunnel_ip, int& port, string& version_name) {
     // 1. 获取当前exe路径
     char exe_path[MAX_PATH];
@@ -508,6 +629,130 @@ bool read_config_from_self(string& game_ip, string& tunnel_ip, int& port, string
     }
 
     return true;
+}
+
+// ==================== 服务器列表JSON解析 ====================
+// 解析服务器列表JSON响应
+// 期望格式: {"servers":[{"id":1,"name":"龙鸣86","game_server_ip":"192.168.1.100","tunnel_server_ip":"10.0.0.50","tunnel_port":33223},{},...]}
+vector<ServerInfo> parse_server_list(const string& json_str) {
+    vector<ServerInfo> servers;
+
+    // 查找servers数组
+    size_t servers_pos = json_str.find("\"servers\"");
+    if (servers_pos == string::npos) {
+        throw runtime_error("未找到servers字段");
+    }
+
+    size_t array_start = json_str.find("[", servers_pos);
+    if (array_start == string::npos) {
+        throw runtime_error("servers不是数组格式");
+    }
+
+    size_t array_end = json_str.find("]", array_start);
+    if (array_end == string::npos) {
+        throw runtime_error("servers数组格式错误");
+    }
+
+    string array_content = json_str.substr(array_start + 1, array_end - array_start - 1);
+
+    // 解析每个服务器对象
+    size_t pos = 0;
+    while (pos < array_content.length()) {
+        // 查找对象开始
+        size_t obj_start = array_content.find("{", pos);
+        if (obj_start == string::npos) break;
+
+        size_t obj_end = array_content.find("}", obj_start);
+        if (obj_end == string::npos) break;
+
+        string obj_content = array_content.substr(obj_start, obj_end - obj_start + 1);
+        ServerInfo info;
+
+        // 解析id
+        size_t id_pos = obj_content.find("\"id\"");
+        if (id_pos != string::npos) {
+            size_t id_colon = obj_content.find(":", id_pos);
+            if (id_colon != string::npos) {
+                size_t id_end = obj_content.find_first_of(",}", id_colon);
+                string id_str = obj_content.substr(id_colon + 1, id_end - id_colon - 1);
+                id_str.erase(remove_if(id_str.begin(), id_str.end(), ::isspace), id_str.end());
+                info.id = stoi(id_str);
+            }
+        }
+
+        // 解析name (支持中文,需要转换为wstring)
+        size_t name_pos = obj_content.find("\"name\"");
+        if (name_pos != string::npos) {
+            size_t name_colon = obj_content.find(":", name_pos);
+            if (name_colon != string::npos) {
+                size_t name_quote1 = obj_content.find("\"", name_colon);
+                if (name_quote1 != string::npos) {
+                    size_t name_quote2 = obj_content.find("\"", name_quote1 + 1);
+                    if (name_quote2 != string::npos) {
+                        string name_str = obj_content.substr(name_quote1 + 1, name_quote2 - name_quote1 - 1);
+                        // 转换UTF-8字符串为wstring
+                        int len = MultiByteToWideChar(CP_UTF8, 0, name_str.c_str(), -1, NULL, 0);
+                        if (len > 0) {
+                            wchar_t* wbuf = new wchar_t[len];
+                            MultiByteToWideChar(CP_UTF8, 0, name_str.c_str(), -1, wbuf, len);
+                            info.name = wbuf;
+                            delete[] wbuf;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 解析game_server_ip
+        size_t game_ip_pos = obj_content.find("\"game_server_ip\"");
+        if (game_ip_pos != string::npos) {
+            size_t game_ip_colon = obj_content.find(":", game_ip_pos);
+            if (game_ip_colon != string::npos) {
+                size_t game_ip_quote1 = obj_content.find("\"", game_ip_colon);
+                if (game_ip_quote1 != string::npos) {
+                    size_t game_ip_quote2 = obj_content.find("\"", game_ip_quote1 + 1);
+                    if (game_ip_quote2 != string::npos) {
+                        info.game_server_ip = obj_content.substr(game_ip_quote1 + 1, game_ip_quote2 - game_ip_quote1 - 1);
+                    }
+                }
+            }
+        }
+
+        // 解析tunnel_server_ip
+        size_t tunnel_ip_pos = obj_content.find("\"tunnel_server_ip\"");
+        if (tunnel_ip_pos != string::npos) {
+            size_t tunnel_ip_colon = obj_content.find(":", tunnel_ip_pos);
+            if (tunnel_ip_colon != string::npos) {
+                size_t tunnel_ip_quote1 = obj_content.find("\"", tunnel_ip_colon);
+                if (tunnel_ip_quote1 != string::npos) {
+                    size_t tunnel_ip_quote2 = obj_content.find("\"", tunnel_ip_quote1 + 1);
+                    if (tunnel_ip_quote2 != string::npos) {
+                        info.tunnel_server_ip = obj_content.substr(tunnel_ip_quote1 + 1, tunnel_ip_quote2 - tunnel_ip_quote1 - 1);
+                    }
+                }
+            }
+        }
+
+        // 解析tunnel_port
+        size_t port_pos = obj_content.find("\"tunnel_port\"");
+        if (port_pos != string::npos) {
+            size_t port_colon = obj_content.find(":", port_pos);
+            if (port_colon != string::npos) {
+                size_t port_end = obj_content.find_first_of(",}", port_colon);
+                string port_str = obj_content.substr(port_colon + 1, port_end - port_colon - 1);
+                port_str.erase(remove_if(port_str.begin(), port_str.end(), ::isspace), port_str.end());
+                info.tunnel_port = stoi(port_str);
+            }
+        }
+
+        // 添加到列表
+        servers.push_back(info);
+
+        // 移动到下一个对象
+        pos = obj_end + 1;
+    }
+
+    return servers;
 }
 
 // ==================== 日志工具 ====================
@@ -3227,20 +3472,19 @@ int main() {
     }
 
     cout << "============================================================" << endl;
-    cout << "DNF游戏代理客户端 v12.3.10" << endl;
+    cout << "DNF游戏代理客户端 v12.4.0 (多服务器版)" << endl;
     cout << "编译时间: " << __DATE__ << " " << __TIME__ << endl;
     cout << "============================================================" << endl;
     cout << endl;
 
-    // ========== 步骤1: 读取配置（获取游戏服务器IP） ==========
-    cout << "[步骤1/5] 读取配置..." << endl;
-    string GAME_SERVER_IP;
-    string TUNNEL_SERVER_IP;
-    int TUNNEL_PORT;
+    // ========== 步骤1: 读取API配置并获取服务器列表 ==========
+    cout << "[步骤1/6] 读取API配置..." << endl;
+    string CONFIG_API_URL;
+    int CONFIG_API_PORT;
     string VERSION_NAME;
 
-    if (!read_config_from_self(GAME_SERVER_IP, TUNNEL_SERVER_IP, TUNNEL_PORT, VERSION_NAME)) {
-        cout << "错误: 无法读取配置" << endl;
+    if (!read_api_config_from_self(CONFIG_API_URL, CONFIG_API_PORT, VERSION_NAME)) {
+        cout << "错误: 无法读取API配置" << endl;
         cout << endl;
         cout << "此程序需要配置才能运行。" << endl;
         cout << "请使用配置注入工具生成带配置的客户端程序。" << endl;
@@ -3250,11 +3494,75 @@ int main() {
         return 1;
     }
 
-    cout << "✓ 配置读取成功" << endl;
+    cout << "✓ API配置读取成功" << endl;
+    cout << "  API地址: " << CONFIG_API_URL << ":" << CONFIG_API_PORT << endl;
     cout << endl;
 
-    // ========== 步骤2: 计算辅助IP ==========
-    cout << "[步骤2/5] 计算虚拟网卡IP分配方案..." << endl;
+    // ========== 步骤2: 从API获取服务器列表 ==========
+    cout << "[步骤2/6] 获取服务器列表..." << endl;
+
+    HttpClient http_client;
+    vector<ServerInfo> servers;
+    wstring error_msg;
+
+    if (!http_client.GetServerList(CONFIG_API_URL, CONFIG_API_PORT, "/api/servers", servers, error_msg)) {
+        // 转换wstring到string用于cout输出
+        int len = WideCharToMultiByte(CP_UTF8, 0, error_msg.c_str(), -1, NULL, 0, NULL, NULL);
+        char* error_str = new char[len];
+        WideCharToMultiByte(CP_UTF8, 0, error_msg.c_str(), -1, error_str, len, NULL, NULL);
+
+        cout << "错误: 获取服务器列表失败" << endl;
+        cout << "  原因: " << error_str << endl;
+        cout << endl;
+
+        delete[] error_str;
+        Logger::close();
+        system("pause");
+        return 1;
+    }
+
+    cout << "✓ 获取到 " << servers.size() << " 个服务器" << endl;
+    cout << endl;
+
+    // ========== 步骤3: 显示GUI选择服务器 ==========
+    cout << "[步骤3/6] 选择服务器..." << endl;
+
+    // 读取上次选择的服务器
+    ConfigManager config_mgr;
+    int last_server_id = config_mgr.LoadLastServer();
+
+    // 显示GUI窗口
+    ServerSelectorGUI selector;
+    ServerInfo selected_server;
+
+    if (!selector.ShowDialog(servers, last_server_id, selected_server)) {
+        cout << "用户取消了服务器选择" << endl;
+        Logger::close();
+        return 0;  // 用户取消，正常退出
+    }
+
+    // 保存选择
+    config_mgr.SaveLastServer(selected_server.id);
+
+    // 转换wstring到string
+    int name_len = WideCharToMultiByte(CP_UTF8, 0, selected_server.name.c_str(), -1, NULL, 0, NULL, NULL);
+    char* name_str = new char[name_len];
+    WideCharToMultiByte(CP_UTF8, 0, selected_server.name.c_str(), -1, name_str, name_len, NULL, NULL);
+
+    cout << "✓ 已选择服务器: " << name_str << " (ID: " << selected_server.id << ")" << endl;
+    cout << "  游戏服务器: " << selected_server.game_server_ip << endl;
+    cout << "  隧道服务器: " << selected_server.tunnel_server_ip << ":" << selected_server.tunnel_port << endl;
+    cout << endl;
+
+    delete[] name_str;
+
+    // 使用选中的服务器配置
+    string GAME_SERVER_IP = selected_server.game_server_ip;
+    string TUNNEL_SERVER_IP = selected_server.tunnel_server_ip;
+    int TUNNEL_PORT = selected_server.tunnel_port;
+
+    // ========== 步骤4: 计算辅助IP ==========
+    cout << "[步骤4/6] 计算虚拟网卡IP分配方案..." << endl;
     string SECONDARY_IP = calculate_secondary_ip(GAME_SERVER_IP);
     if (SECONDARY_IP.empty()) {
         cout << "错误: 无法计算辅助IP地址" << endl;
@@ -3267,8 +3575,8 @@ int main() {
     cout << "✓ IP分配完成" << endl;
     cout << endl;
 
-    // ========== 步骤3: 配置虚拟网卡（使用TAP-Windows，v13.0.0） ==========
-    cout << "[步骤3/5] 配置TAP虚拟网卡..." << endl;
+    // ========== 步骤5: 配置虚拟网卡（使用TAP-Windows，v13.0.0） ==========
+    cout << "[步骤5/6] 配置TAP虚拟网卡..." << endl;
     Logger::info("开始配置TAP-Windows虚拟网卡");
 
     TAPAdapter tap;
@@ -3285,8 +3593,8 @@ int main() {
     g_loopback_adapter_ifidx = tap.get_ifidx();
     Logger::info("✓ TAP虚拟网卡配置完成，IfIdx=" + to_string(g_loopback_adapter_ifidx));
 
-    // ========== 步骤4: 部署WinDivert ==========
-    cout << "[步骤4/5] 部署WinDivert组件..." << endl;
+    // ========== 步骤6: 部署WinDivert ==========
+    cout << "[步骤6/6] 部署WinDivert组件..." << endl;
     string dll_path, sys_path;
     if (!deploy_windivert_files(dll_path, sys_path)) {
         cout << "错误: WinDivert 组件部署失败" << endl;
@@ -3323,19 +3631,6 @@ int main() {
     }
 
     cout << "✓ 代理客户端已启动" << endl;
-    cout << endl;
-
-    // ========== 步骤5: 启动握手测试 ==========
-    cout << "[步骤5/5] 测试代理链路..." << endl;
-    if (!test_tunnel_handshake(TUNNEL_SERVER_IP, TUNNEL_PORT)) {
-        cout << "⚠ 警告: 代理链路测试失败（可能服务器未启动）" << endl;
-        cout << "按任意键继续..." << endl;
-        Logger::warning("握手测试失败，但允许继续运行");
-        system("pause");
-    } else {
-        cout << "✓ 代理链路测试通过" << endl;
-    }
-
     cout << endl;
     cout << "============================================================" << endl;
     cout << "✓ 系统就绪！现在可以启动游戏了" << endl;
