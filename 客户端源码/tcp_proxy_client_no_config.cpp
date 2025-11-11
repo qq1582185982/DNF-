@@ -745,6 +745,21 @@ vector<ServerInfo> parse_server_list(const string& json_str) {
             }
         }
 
+        // 解析download_url
+        size_t download_pos = obj_content.find("\"download_url\"");
+        if (download_pos != string::npos) {
+            size_t download_colon = obj_content.find(":", download_pos);
+            if (download_colon != string::npos) {
+                size_t download_quote1 = obj_content.find("\"", download_colon);
+                if (download_quote1 != string::npos) {
+                    size_t download_quote2 = obj_content.find("\"", download_quote1 + 1);
+                    if (download_quote2 != string::npos) {
+                        info.download_url = obj_content.substr(download_quote1 + 1, download_quote2 - download_quote1 - 1);
+                    }
+                }
+            }
+        }
+
         // 添加到列表
         servers.push_back(info);
 

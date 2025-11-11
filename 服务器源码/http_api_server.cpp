@@ -34,6 +34,7 @@ struct ServerConfig {
     string game_server_ip;
     string tunnel_server_ip;
     int tunnel_port;
+    string download_url;  // 客户端下载地址
 
     // 默认构造函数
     ServerConfig() : id(0), tunnel_port(0) {}
@@ -44,7 +45,8 @@ struct ServerConfig {
           name(other.name),
           game_server_ip(other.game_server_ip),
           tunnel_server_ip(other.tunnel_server_ip),
-          tunnel_port(other.tunnel_port) {}
+          tunnel_port(other.tunnel_port),
+          download_url(other.download_url) {}
 
     // 赋值运算符
     ServerConfig& operator=(const ServerConfig& other) {
@@ -54,6 +56,7 @@ struct ServerConfig {
             game_server_ip = other.game_server_ip;
             tunnel_server_ip = other.tunnel_server_ip;
             tunnel_port = other.tunnel_port;
+            download_url = other.download_url;
         }
         return *this;
     }
@@ -223,6 +226,9 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
         int port = extract_json_int(obj, "listen_port");
         printf("  port: %d\n", port);
 
+        string download_url_str = extract_json_string(obj, "download_url");
+        printf("  download_url: %s (长度: %zu)\n", download_url_str.c_str(), download_url_str.length());
+
         // 使用emplace_back避免拷贝
         printf("准备添加到临时列表...\n");
         try {
@@ -232,6 +238,7 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
             s.game_server_ip.assign(game_ip_str.c_str(), game_ip_str.length());
             s.tunnel_server_ip.assign(tunnel_ip_str.c_str(), tunnel_ip_str.length());
             s.tunnel_port = port;
+            s.download_url.assign(download_url_str.c_str(), download_url_str.length());
 
             printf("ServerConfig构造完成，准备push_back...\n");
             temp_servers.push_back(s);
@@ -281,7 +288,8 @@ string generate_server_list_json() {
                  << "\"name\":\"" << s.name << "\","
                  << "\"game_server_ip\":\"" << s.game_server_ip << "\","
                  << "\"tunnel_server_ip\":\"" << s.tunnel_server_ip << "\","
-                 << "\"tunnel_port\":" << s.tunnel_port
+                 << "\"tunnel_port\":" << s.tunnel_port << ","
+                 << "\"download_url\":\"" << s.download_url << "\""
                  << "}";
         }
     }

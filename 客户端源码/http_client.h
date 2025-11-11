@@ -20,6 +20,7 @@ struct ServerInfo {
     std::string game_server_ip;
     std::string tunnel_server_ip;
     int tunnel_port;
+    std::string download_url;    // 客户端下载地址
 };
 
 // HTTP客户端类

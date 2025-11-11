@@ -15,7 +15,9 @@
 #define IDC_SERVER_LIST    1001
 #define IDC_BTN_CONNECT    1002
 #define IDC_BTN_CANCEL     1003
-#define IDC_STATIC_INFO    1004
+#define IDC_STATIC_LABEL   1004  // "下载地址:" 标签
+#define IDC_EDIT_DOWNLOAD  1005  // 下载地址文本框（可复制）
+#define IDC_SERVER_BTN_BASE 2000  // 服务器按钮ID起始值 (2000+索引)
 
 // 服务器选择器类
 class ServerSelectorGUI {
@@ -38,6 +40,7 @@ private:
     std::vector<ServerInfo> servers;
     int selected_index;
     bool user_confirmed;
+    std::vector<HWND> server_buttons;  // 存储服务器按钮句柄
 
     // 窗口过程函数
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -59,6 +62,9 @@ private:
 
     // 处理列表选择变化
     void OnListSelectionChange();
+
+    // 处理服务器按钮点击
+    void OnServerButtonClick(int server_index);
 };
 
 #endif // SERVER_SELECTOR_GUI_H
