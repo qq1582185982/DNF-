@@ -122,11 +122,11 @@ bool ServerSelectorGUI::InitWindow() {
     SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)this);
 
     // 创建控件 - 现代化扁平设计
-    // 1. 标题文本（更现代的样式）
+    // 1. 标题文本（更现代的样式）- 居中显示,透明背景
     HWND hTitle = CreateWindowW(
         L"STATIC", L"选择游戏服务器",
-        WS_CHILD | WS_VISIBLE | SS_CENTER,
-        30, 25, 740, 40,
+        WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
+        270, 25, 240, 40,
         hwnd, NULL, hInstance, NULL
     );
 
@@ -149,11 +149,11 @@ bool ServerSelectorGUI::InitWindow() {
     // 3. 服务器按钮将在PopulateServerList中动态创建
     // 预留空间: 30, 95, 740, 320
 
-    // 4. 下载地址区域标签
+    // 4. 下载地址区域标签 - 缩短宽度以适应文字
     HWND hLabel = CreateWindowW(
         L"STATIC", L"客户端下载地址",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
-        30, 430, 250, 28,
+        30, 430, 160, 28,
         hwnd, (HMENU)IDC_STATIC_LABEL, hInstance, NULL
     );
 
@@ -206,7 +206,7 @@ bool ServerSelectorGUI::InitWindow() {
     );
     SendMessage(hBtnCancel, WM_SETFONT, (WPARAM)hButtonFont, TRUE);
 
-    // 8. "查看日志"按钮（放在标题右侧）
+    // 8. "查看日志"按钮（放在标题右侧）- 加大字体
     HWND hBtnShowLog = CreateWindowW(
         L"BUTTON", L"查看日志",
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT,
@@ -214,7 +214,7 @@ bool ServerSelectorGUI::InitWindow() {
         hwnd, (HMENU)IDC_BTN_SHOW_LOG, hInstance, NULL
     );
     HFONT hSmallFont = CreateFont(
-        16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑"
     );
@@ -742,6 +742,20 @@ LRESULT CALLBACK ServerSelectorGUI::WindowProc(HWND hwnd, UINT msg, WPARAM wPara
             return 1;  // 返回非零表示我们已经处理了背景擦除
         }
 
+        case WM_CTLCOLORSTATIC: {
+            // 让标题和标签STATIC控件使用透明背景，但不包括其他控件
+            HWND hControl = (HWND)lParam;
+            int ctrlID = GetDlgCtrlID(hControl);
+
+            // 只对标题文本和下载地址标签设置透明背景
+            if (ctrlID == IDC_STATIC_LABEL || ctrlID == 0) {
+                HDC hdcStatic = (HDC)wParam;
+                SetBkMode(hdcStatic, TRANSPARENT);
+                return (LRESULT)GetStockObject(NULL_BRUSH);
+            }
+            break;
+        }
+
         case WM_DRAWITEM: {
             // 自定义绘制ListBox项（现代扁平风格）
             LPDRAWITEMSTRUCT lpDIS = (LPDRAWITEMSTRUCT)lParam;
@@ -754,7 +768,7 @@ LRESULT CALLBACK ServerSelectorGUI::WindowProc(HWND hwnd, UINT msg, WPARAM wPara
                 bool isSelected = (lpDIS->itemState & ODS_SELECTED) != 0;
                 bool isFocused = (lpDIS->itemState & ODS_FOCUS) != 0;
 
-                // 设置背景颜色（现代扁平设计）
+                // 设置背景颜色（现代扁平设计）- 使用透明背景
                 COLORREF bgColor;
                 COLORREF textColor;
 
@@ -763,8 +777,8 @@ LRESULT CALLBACK ServerSelectorGUI::WindowProc(HWND hwnd, UINT msg, WPARAM wPara
                     bgColor = RGB(0, 120, 215);
                     textColor = RGB(255, 255, 255);
                 } else {
-                    // 未选中状态：纯白背景
-                    bgColor = RGB(255, 255, 255);
+                    // 未选中状态：透明背景
+                    bgColor = RGB(245, 247, 250);
                     textColor = RGB(32, 32, 32);
                 }
 
