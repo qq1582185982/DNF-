@@ -80,7 +80,7 @@ int main() {
     cout << endl;
 
     // ==================== 收集配置 ====================
-    string api_url, version_name;
+    string api_url;
     int api_port;
 
     cout << "请输入API服务器配置信息" << endl;
@@ -133,25 +133,12 @@ int main() {
         }
     }
 
-    // 输入版本名称
-    cout << "版本名称 [例如: 龙鸣86]: ";
-    string name_input;
-    getline(cin, name_input);
-    name_input = trim(name_input);
-
-    if (name_input.empty()) {
-        version_name = "默认版本";
-    } else {
-        version_name = name_input;
-    }
-
     cout << endl;
     cout << "============================================" << endl;
     cout << "配置摘要" << endl;
     cout << "============================================" << endl;
     cout << "API服务器域名: " << api_url << endl;
     cout << "API端口:       " << api_port << endl;
-    cout << "版本名称:      " << version_name << endl;
     cout << "============================================" << endl;
     cout << endl;
 
@@ -206,8 +193,7 @@ int main() {
     json << "[CONFIG_START]";
     json << "{";
     json << "\"config_api_url\":\"" << api_url << "\",";
-    json << "\"config_api_port\":" << api_port << ",";
-    json << "\"version_name\":\"" << version_name << "\"";
+    json << "\"config_api_port\":" << api_port;
     json << "}";
     json << "[CONFIG_END]";
 
@@ -248,10 +234,11 @@ int main() {
     cout << "    \"servers\": [" << endl;
     cout << "      {" << endl;
     cout << "        \"id\": 1," << endl;
-    cout << "        \"name\": \"" << version_name << "\"," << endl;
+    cout << "        \"name\": \"服务器名称\"," << endl;
     cout << "        \"game_server_ip\": \"192.168.2.110\"," << endl;
     cout << "        \"tunnel_server_ip\": \"192.168.2.75\"," << endl;
-    cout << "        \"tunnel_port\": 33223" << endl;
+    cout << "        \"tunnel_port\": 33223," << endl;
+    cout << "        \"download_url\": \"http://example.com/client.zip\"" << endl;
     cout << "      }" << endl;
     cout << "    ]" << endl;
     cout << "  }" << endl;

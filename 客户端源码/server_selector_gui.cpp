@@ -103,7 +103,7 @@ bool ServerSelectorGUI::InitWindow() {
     int y = (screen_height - window_height) / 2;
 
     hwnd = CreateWindowExW(
-        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST | WS_EX_LAYERED,  // 添加分层窗口支持阴影
+        WS_EX_DLGMODALFRAME | WS_EX_LAYERED,  // 去掉置顶，添加分层窗口支持阴影
         L"DNFServerSelector",
         L"选择服务器",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,  // 添加最小化按钮
