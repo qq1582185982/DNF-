@@ -12,7 +12,8 @@
 ServerSelectorGUI::ServerSelectorGUI()
     : hwnd(NULL), hInstance(GetModuleHandle(NULL)),
       selected_index(-1), user_confirmed(false), showing_log(false), is_connected(false),
-      dialog_should_close(false), child_running(false), child_stdout_read(NULL), child_stdout_write(NULL) {
+      dialog_should_close(false), child_running(false), child_stdout_read(NULL), child_stdout_write(NULL),
+      child_job_object(NULL) {
     ZeroMemory(&child_process, sizeof(child_process));
 }
 
@@ -45,31 +46,15 @@ bool ServerSelectorGUI::ShowDialog(const std::vector<ServerInfo>& server_list,
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
-    // 消息循环 - 持续运行直到明确要求关闭
+    // 消息循环 - 永远运行，直到程序退出
     MSG msg;
-    bool result_ready = false;
-    bool result_value = false;
-
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
-
-        // 如果用户确认了服务器选择，记录结果但继续运行消息循环
-        if (user_confirmed && !result_ready && selected_index >= 0 && selected_index < (int)servers.size()) {
-            selected_server = servers[selected_index];
-            result_ready = true;
-            result_value = true;
-            // 不退出循环，继续处理消息
-        }
-
-        // 只有当明确要求关闭对话框时才退出
-        if (dialog_should_close || !IsWindow(hwnd)) {
-            break;
-        }
     }
 
-    // 返回结果
-    return result_ready ? result_value : false;
+    // 这里永远不会到达（除非用户取消初始化）
+    return false;
 }
 
 bool ServerSelectorGUI::InitWindow() {
@@ -329,6 +314,12 @@ void ServerSelectorGUI::OnConnectClick() {
     // 切换到日志页面
     ShowLogPage();
 
+    // 清空日志（重新连接时）
+    HWND hEditLog = GetDlgItem(hwnd, IDC_EDIT_LOG);
+    if (hEditLog) {
+        SetWindowTextW(hEditLog, L"");
+    }
+
     // 显示连接信息
     std::wstring server_name = servers[selected_index].name;
     AppendLog(L"=== 开始连接 ===\r\n");
@@ -350,13 +341,24 @@ void ServerSelectorGUI::OnCancelClick() {
     // 停止子进程
     StopChildProcess();
 
-    selected_index = -1;
-    user_confirmed = false;
-    dialog_should_close = true;
+    // 获取当前进程名（不包含路径）
+    char exe_path[MAX_PATH];
+    GetModuleFileNameA(NULL, exe_path, MAX_PATH);
+    char* exe_name = strrchr(exe_path, '\\');
+    if (!exe_name) exe_name = exe_path;
+    else exe_name++; // 跳过 '\'
 
-    // 关闭窗口
-    DestroyWindow(hwnd);
-    PostQuitMessage(0);
+    // 强制终止所有同名进程（除了当前进程）
+    DWORD current_pid = GetCurrentProcessId();
+    char cmd[512];
+    sprintf(cmd, "taskkill /F /FI \"IMAGENAME eq %s\" /FI \"PID ne %lu\" >nul 2>&1", exe_name, current_pid);
+    system(cmd);
+
+    // 等待一下确保子进程被终止
+    Sleep(300);
+
+    // 直接终止整个程序（包括当前进程）
+    ExitProcess(0);
 }
 
 void ServerSelectorGUI::OnListSelectionChange() {
@@ -447,6 +449,15 @@ bool ServerSelectorGUI::StartChildProcess(const ServerInfo& server) {
         StopChildProcess();
     }
 
+    // 创建Job对象，用于管理进程树
+    child_job_object = CreateJobObject(NULL, NULL);
+    if (child_job_object) {
+        // 设置Job对象，当主进程关闭时，自动终止所有子进程
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = { 0 };
+        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(child_job_object, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+    }
+
     // 创建管道用于读取子进程输出
     SECURITY_ATTRIBUTES sa;
     sa.nLength = sizeof(SECURITY_ATTRIBUTES);
@@ -454,6 +465,10 @@ bool ServerSelectorGUI::StartChildProcess(const ServerInfo& server) {
     sa.lpSecurityDescriptor = NULL;
 
     if (!CreatePipe(&child_stdout_read, &child_stdout_write, &sa, 0)) {
+        if (child_job_object) {
+            CloseHandle(child_job_object);
+            child_job_object = NULL;
+        }
         return false;
     }
 
@@ -518,7 +533,16 @@ bool ServerSelectorGUI::StartChildProcess(const ServerInfo& server) {
         CloseHandle(child_stdout_write);
         child_stdout_read = NULL;
         child_stdout_write = NULL;
+        if (child_job_object) {
+            CloseHandle(child_job_object);
+            child_job_object = NULL;
+        }
         return false;
+    }
+
+    // 将子进程加入Job对象
+    if (child_job_object) {
+        AssignProcessToJobObject(child_job_object, child_process.hProcess);
     }
 
     // 关闭写入句柄（子进程会使用它）
@@ -543,10 +567,24 @@ void ServerSelectorGUI::StopChildProcess() {
 
     child_running = false;
 
-    // 终止子进程
+    // 方法1：关闭Job对象（这会自动终止所有关联的进程）
+    if (child_job_object) {
+        CloseHandle(child_job_object);
+        child_job_object = NULL;
+        // 等待一下让进程终止
+        Sleep(500);
+    }
+
+    // 方法2：如果Job对象失败，使用TerminateProcess
     if (child_process.hProcess) {
-        TerminateProcess(child_process.hProcess, 0);
-        WaitForSingleObject(child_process.hProcess, 3000);  // 等待最多3秒
+        // 检查进程是否还在运行
+        DWORD exit_code;
+        if (GetExitCodeProcess(child_process.hProcess, &exit_code) && exit_code == STILL_ACTIVE) {
+            // 进程还在运行，终止它
+            TerminateProcess(child_process.hProcess, 0);
+            WaitForSingleObject(child_process.hProcess, 2000);
+        }
+
         CloseHandle(child_process.hProcess);
         CloseHandle(child_process.hThread);
         ZeroMemory(&child_process, sizeof(child_process));

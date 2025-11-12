@@ -61,6 +61,7 @@ private:
     PROCESS_INFORMATION child_process;  // 子进程信息
     HANDLE child_stdout_read;  // 子进程stdout读取句柄
     HANDLE child_stdout_write;  // 子进程stdout写入句柄
+    HANDLE child_job_object;  // Job对象，用于管理进程树
     bool child_running;  // 子进程是否在运行
 
     // 窗口过程函数

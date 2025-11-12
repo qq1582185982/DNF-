@@ -3614,43 +3614,31 @@ int main(int argc, char* argv[]) {
         TUNNEL_SERVER_IP = worker_tunnel_ip;
         TUNNEL_PORT = worker_tunnel_port;
     } else {
-        // GUI模式：显示服务器选择窗口
-        cout << "[步骤3/6] 选择服务器..." << endl;
+        // GUI模式：显示服务器选择窗口，GUI将永远运行直到用户关闭
+        cout << "[步骤3/6] 启动GUI..." << endl;
 
         // 读取上次选择的服务器
         ConfigManager config_mgr;
         int last_server_id = config_mgr.LoadLastServer();
 
-        // 显示GUI窗口
+        // 显示GUI窗口（这个调用将永远不会返回，除非初始化失败）
         ServerSelectorGUI selector;
         ServerInfo selected_server;
 
         if (!selector.ShowDialog(servers, last_server_id, selected_server)) {
-            cout << "用户取消了服务器选择" << endl;
+            cout << "GUI初始化失败" << endl;
             Logger::close();
-            return 0;  // 用户取消，正常退出
+            MessageBoxW(NULL, L"GUI初始化失败", L"错误", MB_OK | MB_ICONERROR);
+            return 1;
         }
 
-        // 保存选择
-        config_mgr.SaveLastServer(selected_server.id);
-
-        // 转换wstring到string
-        int name_len = WideCharToMultiByte(CP_UTF8, 0, selected_server.name.c_str(), -1, NULL, 0, NULL, NULL);
-        char* name_str = new char[name_len];
-        WideCharToMultiByte(CP_UTF8, 0, selected_server.name.c_str(), -1, name_str, name_len, NULL, NULL);
-
-        cout << "✓ 已选择服务器: " << name_str << " (ID: " << selected_server.id << ")" << endl;
-        cout << "  游戏服务器: " << selected_server.game_server_ip << endl;
-        cout << "  隧道服务器: " << selected_server.tunnel_server_ip << ":" << selected_server.tunnel_port << endl;
-        cout << endl;
-
-        delete[] name_str;
-
-        // 使用选中的服务器配置
-        GAME_SERVER_IP = selected_server.game_server_ip;
-        TUNNEL_SERVER_IP = selected_server.tunnel_server_ip;
-        TUNNEL_PORT = selected_server.tunnel_port;
+        // 这里永远不会到达，因为GUI会一直运行
+        // 用户关闭GUI时会调用ExitProcess()直接终止程序
+        return 0;
     }
+
+    // ========== Worker模式继续执行 ==========
+    // 注意：以下代码只在Worker模式下执行
 
     // ========== 步骤4: 计算辅助IP ==========
     cout << "[步骤4/6] 计算虚拟网卡IP分配方案..." << endl;
