@@ -3,23 +3,35 @@
  */
 
 #include "server_selector_gui.h"
+#include "resource.h"
 #include <commctrl.h>
 #include <sstream>
 #include <thread>
+#include <objidl.h>  // IStream
+#include <gdiplus.h>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "ole32.lib")
+
+using namespace Gdiplus;
 
 ServerSelectorGUI::ServerSelectorGUI()
     : hwnd(NULL), hInstance(GetModuleHandle(NULL)),
       selected_index(-1), user_confirmed(false), showing_log(false), is_connected(false),
       dialog_should_close(false), child_running(false), child_stdout_read(NULL), child_stdout_write(NULL),
-      child_job_object(NULL) {
+      child_job_object(NULL), hBackgroundBitmap(NULL), bg_width(0), bg_height(0) {
     ZeroMemory(&child_process, sizeof(child_process));
 }
 
 ServerSelectorGUI::~ServerSelectorGUI() {
     // 停止子进程
     StopChildProcess();
+
+    // 释放背景图片
+    if (hBackgroundBitmap) {
+        DeleteObject(hBackgroundBitmap);
+    }
 
     if (hwnd) {
         DestroyWindow(hwnd);
@@ -34,8 +46,17 @@ bool ServerSelectorGUI::ShowDialog(const std::vector<ServerInfo>& server_list,
     user_confirmed = false;
     dialog_should_close = false;
 
+    // 初始化GDI+
+    GdiplusStartupInput gdiplusStartupInput;
+    ULONG_PTR gdiplusToken;
+    GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
+
+    // 加载背景图片
+    LoadBackgroundImage();
+
     // 初始化窗口
     if (!InitWindow()) {
+        GdiplusShutdown(gdiplusToken);
         return false;
     }
 
@@ -52,6 +73,9 @@ bool ServerSelectorGUI::ShowDialog(const std::vector<ServerInfo>& server_list,
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+
+    // 清理GDI+
+    GdiplusShutdown(gdiplusToken);
 
     // 这里永远不会到达（除非用户取消初始化）
     return false;
@@ -442,6 +466,79 @@ void ServerSelectorGUI::AddLog(const std::wstring& message) {
     AppendLog(message);
 }
 
+// 加载背景图片（从资源）
+bool ServerSelectorGUI::LoadBackgroundImage() {
+    // 从资源加载图片数据（使用RT_RCDATA类型）
+    HRSRC hResource = FindResource(hInstance, MAKEINTRESOURCE(IDB_BACKGROUND), RT_RCDATA);
+    if (!hResource) {
+        // 如果资源加载失败，返回false但不影响程序运行
+        return false;
+    }
+
+    HGLOBAL hMemory = LoadResource(hInstance, hResource);
+    if (!hMemory) return false;
+
+    DWORD dwSize = SizeofResource(hInstance, hResource);
+    LPVOID lpAddress = LockResource(hMemory);
+    if (!lpAddress) return false;
+
+    // 创建流
+    HGLOBAL hGlobal = GlobalAlloc(GMEM_MOVEABLE, dwSize);
+    if (!hGlobal) return false;
+
+    void* pData = GlobalLock(hGlobal);
+    memcpy(pData, lpAddress, dwSize);
+    GlobalUnlock(hGlobal);
+
+    IStream* pStream = NULL;
+    if (CreateStreamOnHGlobal(hGlobal, TRUE, &pStream) != S_OK) {
+        GlobalFree(hGlobal);
+        return false;
+    }
+
+    // 使用GDI+加载图片
+    Bitmap* bitmap = Bitmap::FromStream(pStream);
+    pStream->Release();
+
+    if (!bitmap || bitmap->GetLastStatus() != Ok) {
+        if (bitmap) delete bitmap;
+        return false;
+    }
+
+    // 转换为HBITMAP
+    Color transparent(0, 0, 0, 0);
+    bitmap->GetHBITMAP(transparent, &hBackgroundBitmap);
+    bg_width = bitmap->GetWidth();
+    bg_height = bitmap->GetHeight();
+
+    delete bitmap;
+    return true;
+}
+
+// 绘制背景
+void ServerSelectorGUI::DrawBackground(HDC hdc) {
+    if (!hBackgroundBitmap) return;
+
+    // 获取窗口大小
+    RECT rect;
+    GetClientRect(hwnd, &rect);
+    int win_width = rect.right - rect.left;
+    int win_height = rect.bottom - rect.top;
+
+    // 创建内存DC
+    HDC hdcMem = CreateCompatibleDC(hdc);
+    HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, hBackgroundBitmap);
+
+    // 使用StretchBlt拉伸图片以填充窗口
+    SetStretchBltMode(hdc, HALFTONE);
+    StretchBlt(hdc, 0, 0, win_width, win_height,
+               hdcMem, 0, 0, bg_width, bg_height,
+               SRCCOPY);
+
+    SelectObject(hdcMem, hOldBitmap);
+    DeleteDC(hdcMem);
+}
+
 // 启动子进程
 bool ServerSelectorGUI::StartChildProcess(const ServerInfo& server) {
     // 如果已经有子进程在运行，先停止它
@@ -638,6 +735,13 @@ LRESULT CALLBACK ServerSelectorGUI::WindowProc(HWND hwnd, UINT msg, WPARAM wPara
 
     if (pThis) {
         switch (msg) {
+        case WM_ERASEBKGND: {
+            // 绘制背景图片
+            HDC hdc = (HDC)wParam;
+            pThis->DrawBackground(hdc);
+            return 1;  // 返回非零表示我们已经处理了背景擦除
+        }
+
         case WM_DRAWITEM: {
             // 自定义绘制ListBox项（现代扁平风格）
             LPDRAWITEMSTRUCT lpDIS = (LPDRAWITEMSTRUCT)lParam;

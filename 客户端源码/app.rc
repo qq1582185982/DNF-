@@ -1,0 +1,4 @@
+#include "resource.h"
+
+// 背景图片资源（自定义类型）
+IDB_BACKGROUND RCDATA "background.jpg"

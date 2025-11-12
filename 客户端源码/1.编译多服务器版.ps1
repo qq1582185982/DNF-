@@ -33,16 +33,36 @@ if (-not (Test-Path $vsPath)) {
 Write-Host "✓ Visual Studio 2022 found" -ForegroundColor Green
 Write-Host ""
 
-# Step 3: Compile multi-server version
-Write-Host "[3/3] Compiling multi-server version..." -ForegroundColor Yellow
+# Step 3: Compile resources
+Write-Host "[3/4] Compiling resources..." -ForegroundColor Yellow
+Write-Host "  - Background image: background.jpg" -ForegroundColor Gray
+Write-Host ""
+
+$rcCommand = @"
+"$vsPath" >nul 2>&1 && rc /fo app.res app.rc 2>&1
+"@
+
+$rcOutput = cmd /c $rcCommand
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "Resource compilation FAILED!" -ForegroundColor Red
+    Write-Host $rcOutput
+    exit 1
+}
+Write-Host "✓ Resources compiled" -ForegroundColor Green
+Write-Host ""
+
+# Step 4: Compile multi-server version
+Write-Host "[4/4] Compiling multi-server version..." -ForegroundColor Yellow
 Write-Host "  - Main: tcp_proxy_client_no_config.cpp" -ForegroundColor Gray
 Write-Host "  - HTTP: http_client.cpp" -ForegroundColor Gray
 Write-Host "  - GUI: server_selector_gui.cpp" -ForegroundColor Gray
 Write-Host "  - Config: config_manager.cpp" -ForegroundColor Gray
+Write-Host "  - Resources: app.res" -ForegroundColor Gray
 Write-Host ""
 
 $compileCommand = @"
-"$vsPath" >nul 2>&1 && cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe"DNF_Proxy_Client_MultiServer_v12.4.0.exe" tcp_proxy_client_no_config.cpp http_client.cpp server_selector_gui.cpp config_manager.cpp /link ws2_32.lib advapi32.lib iphlpapi.lib setupapi.lib newdev.lib cfgmgr32.lib winhttp.lib shell32.lib comctl32.lib user32.lib gdi32.lib WinDivert.lib 2>&1
+"$vsPath" >nul 2>&1 && cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe"DNF_Proxy_Client_MultiServer_v12.4.0.exe" tcp_proxy_client_no_config.cpp http_client.cpp server_selector_gui.cpp config_manager.cpp app.res /link ws2_32.lib advapi32.lib iphlpapi.lib setupapi.lib newdev.lib cfgmgr32.lib winhttp.lib shell32.lib comctl32.lib user32.lib gdi32.lib gdiplus.lib ole32.lib WinDivert.lib 2>&1
 "@
 
 $output = cmd /c $compileCommand

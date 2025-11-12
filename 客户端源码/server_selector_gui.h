@@ -64,11 +64,20 @@ private:
     HANDLE child_job_object;  // Job对象，用于管理进程树
     bool child_running;  // 子进程是否在运行
 
+    // 背景图片
+    HBITMAP hBackgroundBitmap;  // 背景位图句柄
+    int bg_width;  // 背景图片宽度
+    int bg_height;  // 背景图片高度
+
     // 窗口过程函数
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
     // 初始化窗口
     bool InitWindow();
+
+    // 背景图片
+    bool LoadBackgroundImage();  // 加载背景图片
+    void DrawBackground(HDC hdc);  // 绘制背景
 
     // 子进程管理
     bool StartChildProcess(const ServerInfo& server);  // 启动子进程
