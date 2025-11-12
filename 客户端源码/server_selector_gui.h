@@ -57,11 +57,22 @@ private:
     bool is_connected;  // 是否已连接
     bool dialog_should_close;  // 对话框是否应该关闭
 
+    // 子进程管理
+    PROCESS_INFORMATION child_process;  // 子进程信息
+    HANDLE child_stdout_read;  // 子进程stdout读取句柄
+    HANDLE child_stdout_write;  // 子进程stdout写入句柄
+    bool child_running;  // 子进程是否在运行
+
     // 窗口过程函数
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
     // 初始化窗口
     bool InitWindow();
+
+    // 子进程管理
+    bool StartChildProcess(const ServerInfo& server);  // 启动子进程
+    void StopChildProcess();  // 停止子进程
+    void ReadChildOutput();  // 读取子进程输出
 
     // 填充服务器列表
     void PopulateServerList(int last_server_id);

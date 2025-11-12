@@ -3485,8 +3485,23 @@ private:
 };
 
 // ==================== 主函数 ====================
-int main() {
+int main(int argc, char* argv[]) {
     SetConsoleOutputCP(CP_UTF8);
+
+    // 检查是否以worker模式启动（作为子进程）
+    bool worker_mode = false;
+    int worker_server_id = 0;
+    string worker_game_ip;
+    string worker_tunnel_ip;
+    int worker_tunnel_port = 0;
+
+    if (argc >= 6 && strcmp(argv[1], "--worker") == 0) {
+        worker_mode = true;
+        worker_server_id = atoi(argv[2]);
+        worker_game_ip = argv[3];
+        worker_tunnel_ip = argv[4];
+        worker_tunnel_port = atoi(argv[5]);
+    }
 
     // 隐藏控制台窗口
     HWND console_window = GetConsoleWindow();
@@ -3582,42 +3597,60 @@ int main() {
     cout << "✓ 获取到 " << servers.size() << " 个服务器" << endl;
     cout << endl;
 
-    // ========== 步骤3: 显示GUI选择服务器 ==========
-    cout << "[步骤3/6] 选择服务器..." << endl;
+    // ========== 步骤3: 选择服务器 ==========
+    string GAME_SERVER_IP;
+    string TUNNEL_SERVER_IP;
+    int TUNNEL_PORT;
 
-    // 读取上次选择的服务器
-    ConfigManager config_mgr;
-    int last_server_id = config_mgr.LoadLastServer();
+    if (worker_mode) {
+        // Worker模式：使用命令行参数
+        cout << "[Worker模式] 使用命令行参数..." << endl;
+        cout << "  服务器ID: " << worker_server_id << endl;
+        cout << "  游戏服务器: " << worker_game_ip << endl;
+        cout << "  隧道服务器: " << worker_tunnel_ip << ":" << worker_tunnel_port << endl;
+        cout << endl;
 
-    // 显示GUI窗口
-    ServerSelectorGUI selector;
-    ServerInfo selected_server;
+        GAME_SERVER_IP = worker_game_ip;
+        TUNNEL_SERVER_IP = worker_tunnel_ip;
+        TUNNEL_PORT = worker_tunnel_port;
+    } else {
+        // GUI模式：显示服务器选择窗口
+        cout << "[步骤3/6] 选择服务器..." << endl;
 
-    if (!selector.ShowDialog(servers, last_server_id, selected_server)) {
-        cout << "用户取消了服务器选择" << endl;
-        Logger::close();
-        return 0;  // 用户取消，正常退出
+        // 读取上次选择的服务器
+        ConfigManager config_mgr;
+        int last_server_id = config_mgr.LoadLastServer();
+
+        // 显示GUI窗口
+        ServerSelectorGUI selector;
+        ServerInfo selected_server;
+
+        if (!selector.ShowDialog(servers, last_server_id, selected_server)) {
+            cout << "用户取消了服务器选择" << endl;
+            Logger::close();
+            return 0;  // 用户取消，正常退出
+        }
+
+        // 保存选择
+        config_mgr.SaveLastServer(selected_server.id);
+
+        // 转换wstring到string
+        int name_len = WideCharToMultiByte(CP_UTF8, 0, selected_server.name.c_str(), -1, NULL, 0, NULL, NULL);
+        char* name_str = new char[name_len];
+        WideCharToMultiByte(CP_UTF8, 0, selected_server.name.c_str(), -1, name_str, name_len, NULL, NULL);
+
+        cout << "✓ 已选择服务器: " << name_str << " (ID: " << selected_server.id << ")" << endl;
+        cout << "  游戏服务器: " << selected_server.game_server_ip << endl;
+        cout << "  隧道服务器: " << selected_server.tunnel_server_ip << ":" << selected_server.tunnel_port << endl;
+        cout << endl;
+
+        delete[] name_str;
+
+        // 使用选中的服务器配置
+        GAME_SERVER_IP = selected_server.game_server_ip;
+        TUNNEL_SERVER_IP = selected_server.tunnel_server_ip;
+        TUNNEL_PORT = selected_server.tunnel_port;
     }
-
-    // 保存选择
-    config_mgr.SaveLastServer(selected_server.id);
-
-    // 转换wstring到string
-    int name_len = WideCharToMultiByte(CP_UTF8, 0, selected_server.name.c_str(), -1, NULL, 0, NULL, NULL);
-    char* name_str = new char[name_len];
-    WideCharToMultiByte(CP_UTF8, 0, selected_server.name.c_str(), -1, name_str, name_len, NULL, NULL);
-
-    cout << "✓ 已选择服务器: " << name_str << " (ID: " << selected_server.id << ")" << endl;
-    cout << "  游戏服务器: " << selected_server.game_server_ip << endl;
-    cout << "  隧道服务器: " << selected_server.tunnel_server_ip << ":" << selected_server.tunnel_port << endl;
-    cout << endl;
-
-    delete[] name_str;
-
-    // 使用选中的服务器配置
-    string GAME_SERVER_IP = selected_server.game_server_ip;
-    string TUNNEL_SERVER_IP = selected_server.tunnel_server_ip;
-    int TUNNEL_PORT = selected_server.tunnel_port;
 
     // ========== 步骤4: 计算辅助IP ==========
     cout << "[步骤4/6] 计算虚拟网卡IP分配方案..." << endl;

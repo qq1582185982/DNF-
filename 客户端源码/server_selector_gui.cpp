@@ -5,16 +5,21 @@
 #include "server_selector_gui.h"
 #include <commctrl.h>
 #include <sstream>
+#include <thread>
 
 #pragma comment(lib, "comctl32.lib")
 
 ServerSelectorGUI::ServerSelectorGUI()
     : hwnd(NULL), hInstance(GetModuleHandle(NULL)),
       selected_index(-1), user_confirmed(false), showing_log(false), is_connected(false),
-      dialog_should_close(false) {
+      dialog_should_close(false), child_running(false), child_stdout_read(NULL), child_stdout_write(NULL) {
+    ZeroMemory(&child_process, sizeof(child_process));
 }
 
 ServerSelectorGUI::~ServerSelectorGUI() {
+    // 停止子进程
+    StopChildProcess();
+
     if (hwnd) {
         DestroyWindow(hwnd);
     }
@@ -321,20 +326,30 @@ void ServerSelectorGUI::OnConnectClick() {
         return;
     }
 
-    user_confirmed = true;
-    is_connected = true;  // 标记为已连接
-
-    // 切换到日志页面，而不是关闭窗口
+    // 切换到日志页面
     ShowLogPage();
 
     // 显示连接信息
     std::wstring server_name = servers[selected_index].name;
     AppendLog(L"=== 开始连接 ===\r\n");
     AppendLog(L"服务器: " + server_name + L"\r\n");
-    AppendLog(L"正在建立连接...\r\n\r\n");
+    AppendLog(L"正在启动隧道进程...\r\n\r\n");
+
+    // 启动子进程
+    if (StartChildProcess(servers[selected_index])) {
+        user_confirmed = true;
+        is_connected = true;  // 标记为已连接
+        AppendLog(L"✓ 隧道进程已启动\r\n\r\n");
+    } else {
+        AppendLog(L"✗ 启动隧道进程失败\r\n\r\n");
+        MessageBoxW(hwnd, L"启动隧道进程失败", L"错误", MB_OK | MB_ICONERROR);
+    }
 }
 
 void ServerSelectorGUI::OnCancelClick() {
+    // 停止子进程
+    StopChildProcess();
+
     selected_index = -1;
     user_confirmed = false;
     dialog_should_close = true;
@@ -423,6 +438,152 @@ void ServerSelectorGUI::AppendLog(const std::wstring& message) {
 // 公共方法：添加日志（供外部调用）
 void ServerSelectorGUI::AddLog(const std::wstring& message) {
     AppendLog(message);
+}
+
+// 启动子进程
+bool ServerSelectorGUI::StartChildProcess(const ServerInfo& server) {
+    // 如果已经有子进程在运行，先停止它
+    if (child_running) {
+        StopChildProcess();
+    }
+
+    // 创建管道用于读取子进程输出
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+
+    if (!CreatePipe(&child_stdout_read, &child_stdout_write, &sa, 0)) {
+        return false;
+    }
+
+    // 确保读取句柄不被继承
+    SetHandleInformation(child_stdout_read, HANDLE_FLAG_INHERIT, 0);
+
+    // 准备启动信息
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.hStdError = child_stdout_write;
+    si.hStdOutput = child_stdout_write;
+    si.dwFlags |= STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;  // 隐藏子进程窗口
+
+    ZeroMemory(&child_process, sizeof(child_process));
+
+    // 获取当前程序路径
+    char exe_path[MAX_PATH];
+    GetModuleFileNameA(NULL, exe_path, MAX_PATH);
+
+    // 构建命令行
+    // 格式: "程序路径" --worker <server_id> <game_server_ip> <tunnel_server_ip> <tunnel_port>
+    char cmdline[2048];
+    sprintf(cmdline, "\"%s\" --worker %d %s %s %d",
+            exe_path,
+            server.id,
+            server.game_server_ip.c_str(),
+            server.tunnel_server_ip.c_str(),
+            server.tunnel_port);
+
+    // 添加调试日志
+    AppendLog(L"启动命令: ");
+    int len = MultiByteToWideChar(CP_ACP, 0, cmdline, -1, NULL, 0);
+    if (len > 0) {
+        wchar_t* wcmdline = new wchar_t[len];
+        MultiByteToWideChar(CP_ACP, 0, cmdline, -1, wcmdline, len);
+        AppendLog(wcmdline);
+        AppendLog(L"\r\n\r\n");
+        delete[] wcmdline;
+    }
+
+    // 启动子进程
+    if (!CreateProcessA(
+        NULL,           // 应用程序名
+        cmdline,        // 命令行
+        NULL,           // 进程安全属性
+        NULL,           // 线程安全属性
+        TRUE,           // 继承句柄
+        CREATE_NO_WINDOW,  // 创建标志：不创建窗口
+        NULL,           // 环境变量
+        NULL,           // 当前目录
+        &si,            // 启动信息
+        &child_process  // 进程信息
+    )) {
+        // 获取错误信息
+        DWORD error = GetLastError();
+        wchar_t error_msg[256];
+        swprintf(error_msg, 256, L"CreateProcess失败，错误码: %d\r\n", error);
+        AppendLog(error_msg);
+        CloseHandle(child_stdout_read);
+        CloseHandle(child_stdout_write);
+        child_stdout_read = NULL;
+        child_stdout_write = NULL;
+        return false;
+    }
+
+    // 关闭写入句柄（子进程会使用它）
+    CloseHandle(child_stdout_write);
+    child_stdout_write = NULL;
+
+    child_running = true;
+
+    // 启动一个线程来读取子进程输出
+    std::thread([this]() {
+        ReadChildOutput();
+    }).detach();
+
+    return true;
+}
+
+// 停止子进程
+void ServerSelectorGUI::StopChildProcess() {
+    if (!child_running) {
+        return;
+    }
+
+    child_running = false;
+
+    // 终止子进程
+    if (child_process.hProcess) {
+        TerminateProcess(child_process.hProcess, 0);
+        WaitForSingleObject(child_process.hProcess, 3000);  // 等待最多3秒
+        CloseHandle(child_process.hProcess);
+        CloseHandle(child_process.hThread);
+        ZeroMemory(&child_process, sizeof(child_process));
+    }
+
+    // 关闭管道
+    if (child_stdout_read) {
+        CloseHandle(child_stdout_read);
+        child_stdout_read = NULL;
+    }
+}
+
+// 读取子进程输出
+void ServerSelectorGUI::ReadChildOutput() {
+    char buffer[4096];
+    DWORD bytes_read;
+
+    while (child_running && child_stdout_read) {
+        if (ReadFile(child_stdout_read, buffer, sizeof(buffer) - 1, &bytes_read, NULL) && bytes_read > 0) {
+            buffer[bytes_read] = '\0';
+
+            // 转换为宽字符
+            int len = MultiByteToWideChar(CP_UTF8, 0, buffer, -1, NULL, 0);
+            if (len > 0) {
+                wchar_t* wbuf = new wchar_t[len];
+                MultiByteToWideChar(CP_UTF8, 0, buffer, -1, wbuf, len);
+
+                // 添加到日志（使用PostMessage确保线程安全）
+                std::wstring* msg = new std::wstring(wbuf);
+                PostMessage(hwnd, WM_USER + 1, 0, (LPARAM)msg);
+
+                delete[] wbuf;
+            }
+        } else {
+            break;
+        }
+    }
 }
 
 LRESULT CALLBACK ServerSelectorGUI::WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -535,6 +696,11 @@ LRESULT CALLBACK ServerSelectorGUI::WindowProc(HWND hwnd, UINT msg, WPARAM wPara
                                                 L"确认",
                                                 MB_YESNO | MB_ICONQUESTION);
                         if (result == IDYES) {
+                            // 停止子进程
+                            pThis->AppendLog(L"\n=== 正在断开连接 ===\r\n");
+                            pThis->StopChildProcess();
+                            pThis->AppendLog(L"✓ 已断开连接\r\n\r\n");
+
                             pThis->is_connected = false;
                             pThis->user_confirmed = false;
                             pThis->ShowServerPage();
@@ -559,6 +725,15 @@ LRESULT CALLBACK ServerSelectorGUI::WindowProc(HWND hwnd, UINT msg, WPARAM wPara
                 return 0;
             }
             break;
+
+        case WM_USER + 1:
+            // 接收从子进程读取线程发送的日志消息
+            if (pThis && lParam) {
+                std::wstring* msg = (std::wstring*)lParam;
+                pThis->AppendLog(*msg);
+                delete msg;
+            }
+            return 0;
 
         case WM_CLOSE:
             pThis->OnCancelClick();
