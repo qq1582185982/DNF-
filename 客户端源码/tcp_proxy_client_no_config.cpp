@@ -87,8 +87,8 @@
 #include <cstring>
 #include <algorithm>
 
-// HTTP客户端和服务器选择模块
-#include "http_client.h"
+// TCP配置客户端和服务器选择模块
+#include "tcp_config_client.h"
 #include "server_selector_gui.h"
 #include "config_manager.h"
 
@@ -868,6 +868,31 @@ ofstream Logger::log_file;
 bool Logger::file_enabled = false;
 string Logger::current_log_level = "DEBUG";  // v12.3.7: 默认INFO级别，避免性能开销
 
+// ==================== 会话UUID ====================
+// 全局会话UUID，用于在服务器日志中唯一标识此客户端
+string g_session_uuid;
+
+// 生成简单的UUID (格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+string generate_session_uuid() {
+    // 使用时间戳和随机数生成UUID
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+
+    // 初始化随机数生成器
+    srand((unsigned int)time(NULL) ^ GetTickCount());
+
+    char uuid[37];
+    sprintf(uuid, "%08x-%04x-%04x-%04x-%08x%04x",
+            (unsigned int)(st.wYear * 10000 + st.wMonth * 100 + st.wDay),  // 8位
+            (unsigned int)(st.wHour * 100 + st.wMinute),                     // 4位
+            (unsigned int)(st.wSecond * 1000 + st.wMilliseconds),           // 4位
+            (unsigned int)(rand() % 65536),                                  // 4位
+            (unsigned int)GetTickCount(),                                    // 8位
+            (unsigned int)(rand() % 65536));                                 // 4位
+
+    return string(uuid);
+}
+
 // ==================== 启动握手测试 ====================
 // 在程序启动时主动连接隧道服务器进行握手测试
 // 目的：预热整个代理链路，避免第一次连接失败
@@ -927,19 +952,22 @@ bool test_tunnel_handshake(const string& tunnel_ip, uint16_t tunnel_port) {
         return false;
     }
 
-    // 发送测试握手包: conn_id(4)=0 + dst_port(2)=65535 (特殊标记表示测试连接)
-    uint8_t handshake[6];
-    *(uint32_t*)handshake = htonl(0);      // conn_id=0 表示测试
-    *(uint16_t*)(handshake + 4) = htons(65535);  // port=65535 表示测试
+    // 发送测试握手包: conn_id(4)=0 + dst_port(2)=65535 (特殊标记表示测试连接) + session_uuid_len(1) + session_uuid(N)
+    uint8_t session_uuid_len = (uint8_t)g_session_uuid.length();
+    vector<uint8_t> handshake(7 + session_uuid_len);
+    *(uint32_t*)&handshake[0] = htonl(0);      // conn_id=0 表示测试
+    *(uint16_t*)&handshake[4] = htons(65535);  // port=65535 表示测试
+    handshake[6] = session_uuid_len;
+    memcpy(&handshake[7], g_session_uuid.c_str(), session_uuid_len);
 
-    if (send(test_sock, (char*)handshake, 6, 0) != 6) {
+    if (send(test_sock, (char*)handshake.data(), handshake.size(), 0) != (int)handshake.size()) {
         cout << "[启动测试] ✗ 发送测试握手失败" << endl;
         Logger::error("[启动测试] 发送握手包失败");
         closesocket(test_sock);
         return false;
     }
 
-    Logger::debug("[启动测试] 已发送测试握手包");
+    Logger::debug("[启动测试] 已发送测试握手包 (含会话UUID: " + g_session_uuid + ")");
 
     // 等待服务器响应（或超时）
     // 服务器可能会发送确认或直接关闭连接，两种情况都算成功
@@ -2046,17 +2074,22 @@ private:
             return false;
         }
 
-        // 发送握手：conn_id(4) + dst_port(2)
-        uint8_t handshake[6];
-        *(uint32_t*)handshake = htonl(conn_id);
-        *(uint16_t*)(handshake + 4) = htons(dst_port);
+        // 发送握手：conn_id(4) + dst_port(2) + session_uuid_len(1) + session_uuid(N)
+        uint8_t session_uuid_len = (uint8_t)g_session_uuid.length();
+        vector<uint8_t> handshake(7 + session_uuid_len);
+        *(uint32_t*)&handshake[0] = htonl(conn_id);
+        *(uint16_t*)&handshake[4] = htons(dst_port);
+        handshake[6] = session_uuid_len;
+        memcpy(&handshake[7], g_session_uuid.c_str(), session_uuid_len);
 
-        if (send(tunnel_sock, (char*)handshake, 6, 0) != 6) {
+        if (send(tunnel_sock, (char*)handshake.data(), handshake.size(), 0) != (int)handshake.size()) {
             Logger::error("[连接" + to_string(conn_id) + "] 发送握手失败");
             closesocket(tunnel_sock);
             tunnel_sock = INVALID_SOCKET;
             return false;
         }
+
+        Logger::debug("[连接" + to_string(conn_id) + "] 已发送握手 (含会话UUID: " + g_session_uuid + ")");
 
         // v12.3.9: 设置5秒超时，允许定期发送心跳包(不再用无限等待)
         DWORD recv_timeout = 5000;  // 5秒超时
@@ -3177,13 +3210,16 @@ private:
             return false;
         }
 
-        // 发送UDP tunnel握手: conn_id(4) = 0xFFFFFFFF (特殊标记) + port(2) = 10011 (使用真实端口)
+        // 发送UDP tunnel握手: conn_id(4) = 0xFFFFFFFF (特殊标记) + port(2) = 10011 (使用真实端口) + session_uuid_len(1) + session_uuid(N)
         // 注意: 服务器会为每个tunnel创建一个TunnelConnection，UDP流量通过这个连接转发
-        uint8_t handshake[6];
-        *(uint32_t*)handshake = htonl(0xFFFFFFFF);  // 特殊conn_id标记UDP tunnel
-        *(uint16_t*)(handshake + 4) = htons(10011);  // 使用10011端口作为默认游戏端口
+        uint8_t session_uuid_len = (uint8_t)g_session_uuid.length();
+        vector<uint8_t> handshake(7 + session_uuid_len);
+        *(uint32_t*)&handshake[0] = htonl(0xFFFFFFFF);  // 特殊conn_id标记UDP tunnel
+        *(uint16_t*)&handshake[4] = htons(10011);  // 使用10011端口作为默认游戏端口
+        handshake[6] = session_uuid_len;
+        memcpy(&handshake[7], g_session_uuid.c_str(), session_uuid_len);
 
-        if (send(udp_tunnel_sock, (char*)handshake, 6, 0) != 6) {
+        if (send(udp_tunnel_sock, (char*)handshake.data(), handshake.size(), 0) != (int)handshake.size()) {
             int err = WSAGetLastError();
             Logger::error("[UDP] 发送UDP握手失败: WSA错误=" + to_string(err));
             closesocket(udp_tunnel_sock);
@@ -3191,7 +3227,7 @@ private:
             return false;
         }
 
-        Logger::info("[UDP] 已发送握手请求(第一部分) (conn_id=0xFFFFFFFF, port=10011)");
+        Logger::info("[UDP] 已发送握手请求(第一部分) (conn_id=0xFFFFFFFF, port=10011, UUID=" + g_session_uuid + ")");
 
         // ===== 新协议: 发送客户端IPv4地址(4字节) =====
         // 使用虚拟网卡时，发送动态虚拟客户端IP而不是真实IP
@@ -3522,6 +3558,10 @@ int main(int argc, char* argv[]) {
     // 初始化日志系统
     Logger::init(log_filename);
 
+    // 生成会话UUID
+    g_session_uuid = generate_session_uuid();
+    Logger::info("[会话] 生成会话UUID: " + g_session_uuid);
+
     // 检查管理员权限
     BOOL is_admin = FALSE;
     PSID admin_group = NULL;
@@ -3568,14 +3608,14 @@ int main(int argc, char* argv[]) {
     cout << "  API地址: " << CONFIG_API_URL << ":" << CONFIG_API_PORT << endl;
     cout << endl;
 
-    // ========== 步骤2: 从API获取服务器列表 ==========
+    // ========== 步骤2: 从TCP服务器获取服务器列表 ==========
     cout << "[步骤2/6] 获取服务器列表..." << endl;
 
-    HttpClient http_client;
+    TcpConfigClient tcp_client;
     vector<ServerInfo> servers;
     wstring error_msg;
 
-    if (!http_client.GetServerList(CONFIG_API_URL, CONFIG_API_PORT, "/api/servers", servers, error_msg)) {
+    if (!tcp_client.GetServerList(CONFIG_API_URL, CONFIG_API_PORT, servers, error_msg)) {
         // 转换wstring到string用于cout输出
         int len = WideCharToMultiByte(CP_UTF8, 0, error_msg.c_str(), -1, NULL, 0, NULL, NULL);
         char* error_str = new char[len];

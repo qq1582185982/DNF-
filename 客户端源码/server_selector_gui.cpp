@@ -229,6 +229,8 @@ bool ServerSelectorGUI::InitWindow() {
         hwnd, (HMENU)IDC_EDIT_LOG, hInstance, NULL
     );
     SendMessage(hEditLog, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
+    // 设置文本框最大长度为5MB，避免日志过多时被截断
+    SendMessage(hEditLog, EM_SETLIMITTEXT, 5 * 1024 * 1024, 0);
 
     // 10. "返回"按钮（初始隐藏）
     HWND hBtnBack = CreateWindowW(
@@ -450,6 +452,27 @@ void ServerSelectorGUI::AppendLog(const std::wstring& message) {
 
     // 获取当前文本长度
     int len = GetWindowTextLengthW(hEditLog);
+
+    // 如果日志超过4MB，清除前半部分（保留后半部分）
+    const int MAX_LOG_SIZE = 4 * 1024 * 1024;  // 4MB
+    if (len > MAX_LOG_SIZE) {
+        // 获取当前所有文本
+        int bufSize = len + 1;
+        wchar_t* buffer = new wchar_t[bufSize];
+        GetWindowTextW(hEditLog, buffer, bufSize);
+
+        // 从中间开始保留后半部分
+        int halfPoint = len / 2;
+        std::wstring keepText = L"...(前半部分日志已清除)\r\n\r\n";
+        keepText += (buffer + halfPoint);
+
+        // 设置新文本
+        SetWindowTextW(hEditLog, keepText.c_str());
+        delete[] buffer;
+
+        // 重新获取长度
+        len = GetWindowTextLengthW(hEditLog);
+    }
 
     // 将光标移到末尾
     SendMessageW(hEditLog, EM_SETSEL, len, len);

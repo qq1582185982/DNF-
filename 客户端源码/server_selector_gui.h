@@ -9,7 +9,7 @@
 #include <windows.h>
 #include <vector>
 #include <string>
-#include "http_client.h"
+#include "tcp_config_client.h"
 
 // 窗口控件ID
 #define IDC_SERVER_LIST    1001

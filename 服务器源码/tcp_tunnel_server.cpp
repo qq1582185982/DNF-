@@ -229,7 +229,7 @@
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <execinfo.h>
-#include "http_api_server.h"
+#include "tcp_config_server.h"
 
 using namespace std;
 
@@ -278,14 +278,15 @@ public:
             file_enabled = true;
             // 不能在这里调用log()因为会死锁，直接输出
             auto now = chrono::system_clock::now();
-            auto time = chrono::system_clock::to_time_t(now);
+            // 强制使用北京时间(UTC+8)
+            auto beijing_time = chrono::system_clock::to_time_t(now + chrono::hours(8));
             auto ms = chrono::duration_cast<chrono::milliseconds>(
                 now.time_since_epoch()) % 1000;
 
             stringstream ss;
-            ss << put_time(localtime(&time), "%Y-%m-%d %H:%M:%S")
+            ss << put_time(gmtime(&beijing_time), "%Y-%m-%d %H:%M:%S")
                << "." << setfill('0') << setw(3) << ms.count()
-               << " [INFO] 日志文件已初始化: " << filename;
+               << " [INFO] 日志文件已初始化(北京时间): " << filename;
 
             string log_line = ss.str();
             cout << log_line << endl;
@@ -339,12 +340,13 @@ private:
         if (level_priority < current_priority) return;
 
         auto now = chrono::system_clock::now();
-        auto time = chrono::system_clock::to_time_t(now);
+        // 强制使用北京时间(UTC+8)
+        auto beijing_time = chrono::system_clock::to_time_t(now + chrono::hours(8));
         auto ms = chrono::duration_cast<chrono::milliseconds>(
             now.time_since_epoch()) % 1000;
 
         stringstream ss;
-        ss << put_time(localtime(&time), "%Y-%m-%d %H:%M:%S")
+        ss << put_time(gmtime(&beijing_time), "%Y-%m-%d %H:%M:%S")
            << "." << setfill('0') << setw(3) << ms.count()
            << " [" << level << "] " << msg;
 
@@ -372,12 +374,27 @@ string Logger::current_log_level = "INFO";
 // payload_len: 数据长度
 // old_ip: 要替换的IP地址(如"192.168.2.75")
 // new_ip: 新的IP地址(如"222.187.12.82")
+// conn_id: 连接ID（用于日志）
+// session_uuid: 会话UUID（用于日志）
 // 返回: 替换次数
 int replace_ip_in_payload(uint8_t* payload, size_t payload_len,
-                         const string& old_ip, const string& new_ip) {
+                         const string& old_ip, const string& new_ip,
+                         int conn_id = 0, const string& session_uuid = "") {
+    // 生成日志前缀
+    string log_prefix;
+    if (conn_id > 0 && !session_uuid.empty()) {
+        log_prefix = "[连接" + to_string(conn_id) + "|" + session_uuid + "][IP替换] ";
+    } else if (conn_id > 0) {
+        log_prefix = "[连接" + to_string(conn_id) + "][IP替换] ";
+    } else if (!session_uuid.empty()) {
+        log_prefix = "[" + session_uuid + "][IP替换] ";
+    } else {
+        log_prefix = "[IP替换] ";
+    }
+
     // 检查payload是否足够大(至少4字节才可能包含IP)
     if (payload_len < 4) {
-        Logger::debug("[IP替换] payload太小(" + to_string(payload_len) +
+        Logger::debug(log_prefix + "payload太小(" + to_string(payload_len) +
                      "字节),跳过IP替换");
         return 0;
     }
@@ -386,7 +403,7 @@ int replace_ip_in_payload(uint8_t* payload, size_t payload_len,
     struct in_addr old_addr, new_addr;
     if (inet_pton(AF_INET, old_ip.c_str(), &old_addr) != 1 ||
         inet_pton(AF_INET, new_ip.c_str(), &new_addr) != 1) {
-        Logger::error("[IP替换] IP地址格式错误: " + old_ip + " -> " + new_ip);
+        Logger::error(log_prefix + "IP地址格式错误: " + old_ip + " -> " + new_ip);
         return 0;
     }
 
@@ -409,10 +426,10 @@ int replace_ip_in_payload(uint8_t* payload, size_t payload_len,
 
     // ===== 详细调试信息 =====
     char debug_buf[200];
-    sprintf(debug_buf, "[IP替换调试] old_bytes=[%02x,%02x,%02x,%02x] old_ip_be=0x%08x old_ip_reversed=0x%08x",
+    sprintf(debug_buf, "调试: old_bytes=[%02x,%02x,%02x,%02x] old_ip_be=0x%08x old_ip_reversed=0x%08x",
             old_bytes[0], old_bytes[1], old_bytes[2], old_bytes[3],
             old_ip_be, old_ip_reversed);
-    Logger::debug(string(debug_buf));
+    Logger::debug(log_prefix + string(debug_buf));
 
     // 打印查找的目标
     if (payload_len >= 4) {
@@ -420,7 +437,7 @@ int replace_ip_in_payload(uint8_t* payload, size_t payload_len,
         sprintf(hex, "%02x %02x %02x %02x (大端) / %02x %02x %02x %02x (DNF反向)",
                 old_bytes[0], old_bytes[1], old_bytes[2], old_bytes[3],
                 old_bytes[3], old_bytes[2], old_bytes[1], old_bytes[0]);
-        Logger::debug("[IP替换] 查找IP " + old_ip + " 格式: " + string(hex));
+        Logger::debug(log_prefix + "查找IP " + old_ip + " 格式: " + string(hex));
 
         // 打印payload前64字节
         string payload_hex = "";
@@ -430,7 +447,7 @@ int replace_ip_in_payload(uint8_t* payload, size_t payload_len,
             payload_hex += hbuf;
             if ((i + 1) % 16 == 0) payload_hex += "\n                    ";
         }
-        Logger::debug("[IP替换] Payload(" + to_string(payload_len) + "字节):\n                    " + payload_hex);
+        Logger::debug(log_prefix + "Payload(" + to_string(payload_len) + "字节):\n                    " + payload_hex);
     }
 
     // 扫描payload,查找并替换IP
@@ -441,18 +458,18 @@ int replace_ip_in_payload(uint8_t* payload, size_t payload_len,
         // 详细调试：打印每个位置的扫描结果（只打印前10个位置）
         if (i < 10 && payload_len <= 20) {
             char scan_buf[150];
-            sprintf(scan_buf, "[IP替换扫描] 位置%zu: [%02x %02x %02x %02x] = 0x%08x (大端匹配:%s DNF匹配:%s)",
+            sprintf(scan_buf, "扫描位置%zu: [%02x %02x %02x %02x] = 0x%08x (大端匹配:%s DNF匹配:%s)",
                     i, payload[i], payload[i+1], payload[i+2], payload[i+3], ip_value,
                     (ip_value == old_ip_be ? "YES" : "no"),
                     (ip_value == old_ip_reversed ? "YES" : "no"));
-            Logger::debug(string(scan_buf));
+            Logger::debug(log_prefix + string(scan_buf));
         }
 
         // 检查大端序(网络字节序)匹配
         if (ip_value == old_ip_be) {
             *ip_ptr = new_ip_be;
             replace_count++;
-            Logger::info("[IP替换] 位置" + to_string(i) + " 大端序: " +
+            Logger::info(log_prefix + "位置" + to_string(i) + " 大端序: " +
                          old_ip + " -> " + new_ip);
             i += 3;
         }
@@ -460,17 +477,17 @@ int replace_ip_in_payload(uint8_t* payload, size_t payload_len,
         else if (ip_value == old_ip_reversed) {
             *ip_ptr = new_ip_reversed;
             replace_count++;
-            Logger::info("[IP替换] 位置" + to_string(i) + " DNF逐字节反向: " +
+            Logger::info(log_prefix + "位置" + to_string(i) + " DNF逐字节反向: " +
                          old_ip + " -> " + new_ip);
             i += 3;
         }
     }
 
     if (replace_count > 0) {
-        Logger::info("[IP替换] ✓ 完成: " + old_ip + " -> " + new_ip +
+        Logger::info(log_prefix + "✓ 完成: " + old_ip + " -> " + new_ip +
                     " (替换" + to_string(replace_count) + "处)");
     } else {
-        Logger::info("[IP替换] ✗ 未找到IP " + old_ip + " (payload=" +
+        Logger::info(log_prefix + "✗ 未找到IP " + old_ip + " (payload=" +
                     to_string(payload_len) + "字节)");
     }
 
@@ -527,6 +544,7 @@ private:
     string game_server_ip;
     int game_port;
     atomic<bool> running;
+    string session_uuid;  // 客户端会话UUID，用于唯一标识客户端
 
     // 线程 - 使用智能指针自动管理
     shared_ptr<thread> client_to_game_thread;
@@ -557,10 +575,18 @@ private:
         auto it = client_ip_map_ptr->find(tcp_source_ip);
         if (it != client_ip_map_ptr->end()) {
             client_real_ip = it->second;  // 缓存结果
-            Logger::debug("[连接" + to_string(conn_id) + "] 动态获取客户端真实IP: " + client_real_ip);
+            Logger::debug("[连接" + to_string(conn_id) + "|" + session_uuid + "] 动态获取客户端真实IP: " + client_real_ip);
             return client_real_ip;
         }
         return "";
+    }
+
+    // 格式化连接标识符（包含conn_id和session_uuid）
+    string conn_id_str() const {
+        if (session_uuid.empty()) {
+            return "[连接" + to_string(conn_id) + "]";
+        }
+        return "[连接" + to_string(conn_id) + "|" + session_uuid + "]";
     }
 
 public:
@@ -568,31 +594,32 @@ public:
                      const string& client_ip = "", const string& proxy_ip = "",
                      const string& tcp_src_ip = "",
                      map<string, string>* ip_map = nullptr,
-                     mutex* ip_mutex = nullptr)
+                     mutex* ip_mutex = nullptr,
+                     const string& sess_uuid = "")
         : conn_id(cid), client_fd(cfd), game_fd(-1),
           game_server_ip(game_ip), game_port(gport),
-          running(false), client_to_game_thread(nullptr),
+          running(false), session_uuid(sess_uuid), client_to_game_thread(nullptr),
           game_to_client_thread(nullptr),
           client_real_ip(client_ip), proxy_local_ip(proxy_ip),
           tcp_source_ip(tcp_src_ip), client_ip_map_ptr(ip_map),
           ip_map_mutex_ptr(ip_mutex) {
-        Logger::debug("[连接" + to_string(conn_id) + "] TunnelConnection对象已创建");
+        Logger::debug("[连接" + to_string(conn_id) + "|" + session_uuid + "] TunnelConnection对象已创建");
     }
 
     ~TunnelConnection() {
-        Logger::debug("[连接" + to_string(conn_id) + "] 开始销毁TunnelConnection对象");
+        Logger::debug(conn_id_str() + " 开始销毁TunnelConnection对象");
         stop();
 
         // **关键修复v3.5.3**: 先shutdown所有sockets(TCP+UDP),让所有阻塞的recv()调用返回
-        Logger::debug("[连接" + to_string(conn_id) + "] shutdown所有sockets以唤醒阻塞线程");
+        Logger::debug(conn_id_str() + " shutdown所有sockets以唤醒阻塞线程");
 
         // 1. shutdown TCP sockets (游戏和客户端)
         if (game_fd >= 0) {
-            Logger::debug("[连接" + to_string(conn_id) + "] shutdown游戏服务器socket");
+            Logger::debug(conn_id_str() + " shutdown游戏服务器socket");
             shutdown(game_fd, SHUT_RDWR);  // 唤醒阻塞在game_fd上的recv()
         }
         if (client_fd >= 0) {
-            Logger::debug("[连接" + to_string(conn_id) + "] shutdown客户端socket");
+            Logger::debug(conn_id_str() + " shutdown客户端socket");
             shutdown(client_fd, SHUT_RDWR);  // 唤醒阻塞在client_fd上的recv()
         }
 
@@ -601,7 +628,7 @@ public:
             lock_guard<mutex> lock(udp_mutex);
             for (auto& pair : udp_sockets) {
                 if (pair.second >= 0) {
-                    Logger::debug("[连接" + to_string(conn_id) + "|UDP:" + to_string(pair.first) + "] shutdown UDP socket");
+                    Logger::debug(conn_id_str() + "|UDP:" + to_string(pair.first) + " shutdown UDP socket");
                     shutdown(pair.second, SHUT_RDWR);  // 唤醒阻塞的recvfrom()
                 }
             }
@@ -610,38 +637,38 @@ public:
         // 3. **v3.8.0**: 不等待线程，直接detach
         // 因为线程只持有原始指针，不会触发析构，可以安全detach
         // running=false + shutdown确保线程会很快退出
-        Logger::debug("[连接" + to_string(conn_id) + "] detach所有线程...");
+        Logger::debug(conn_id_str() + " detach所有线程...");
 
         if (client_to_game_thread && client_to_game_thread->joinable()) {
             client_to_game_thread->detach();
-            Logger::debug("[连接" + to_string(conn_id) + "] 已detach客户端→游戏线程");
+            Logger::debug(conn_id_str() + " 已detach客户端→游戏线程");
         }
 
         if (game_to_client_thread && game_to_client_thread->joinable()) {
             game_to_client_thread->detach();
-            Logger::debug("[连接" + to_string(conn_id) + "] 已detach游戏→客户端线程");
+            Logger::debug(conn_id_str() + " 已detach游戏→客户端线程");
         }
 
         for (auto& pair : udp_threads) {
             if (pair.second && pair.second->joinable()) {
                 pair.second->detach();
-                Logger::debug("[连接" + to_string(conn_id) + "|UDP:" + to_string(pair.first) + "] 已detach UDP线程");
+                Logger::debug(conn_id_str() + "|UDP:" + to_string(pair.first) + " 已detach UDP线程");
             }
         }
 
         // **v3.8.0关键**: 等待一段时间确保线程完全退出后再关闭socket
         // 这样避免僵尸线程访问已关闭的fd
-        Logger::debug("[连接" + to_string(conn_id) + "] 等待200ms确保detached线程退出...");
+        Logger::debug(conn_id_str() + " 等待200ms确保detached线程退出...");
         this_thread::sleep_for(chrono::milliseconds(200));
 
         // 4. 所有线程已退出,现在close所有socket文件描述符
-        Logger::debug("[连接" + to_string(conn_id) + "] 关闭所有socket文件描述符");
+        Logger::debug(conn_id_str() + " 关闭所有socket文件描述符");
 
         {
             lock_guard<mutex> lock(udp_mutex);
             for (auto& pair : udp_sockets) {
                 if (pair.second >= 0) {
-                    Logger::debug("[连接" + to_string(conn_id) + "|UDP:" + to_string(pair.first) + "] close UDP socket fd=" + to_string(pair.second));
+                    Logger::debug(conn_id_str() + "|UDP:" + to_string(pair.first) + " close UDP socket fd=" + to_string(pair.second));
                     close(pair.second);
                     pair.second = -1;
                 }
@@ -649,22 +676,22 @@ public:
         }
 
         if (game_fd >= 0) {
-            Logger::debug("[连接" + to_string(conn_id) + "] close游戏服务器socket fd=" + to_string(game_fd));
+            Logger::debug(conn_id_str() + " close游戏服务器socket fd=" + to_string(game_fd));
             close(game_fd);
             game_fd = -1;
         }
         if (client_fd >= 0) {
-            Logger::debug("[连接" + to_string(conn_id) + "] close客户端socket fd=" + to_string(client_fd));
+            Logger::debug(conn_id_str() + " close客户端socket fd=" + to_string(client_fd));
             close(client_fd);
             client_fd = -1;
         }
 
-        Logger::debug("[连接" + to_string(conn_id) + "] TunnelConnection对象已销毁");
+        Logger::debug(conn_id_str() + " TunnelConnection对象已销毁");
     }
 
     bool start() {
         try {
-            Logger::debug("[连接" + to_string(conn_id) + "] 开始启动连接");
+            Logger::debug(conn_id_str() + " 开始启动连接");
 
             // 使用 getaddrinfo() 解析游戏服务器地址（支持域名/IPv4/IPv6）
             struct addrinfo hints{}, *result = nullptr, *rp = nullptr;
@@ -676,12 +703,12 @@ public:
             string port_str = to_string(game_port);
             int ret = getaddrinfo(game_server_ip.c_str(), port_str.c_str(), &hints, &result);
             if (ret != 0) {
-                Logger::error("[连接" + to_string(conn_id) + "] DNS解析失败: " +
+                Logger::error(conn_id_str() + " DNS解析失败: " +
                              game_server_ip + " (错误: " + gai_strerror(ret) + ")");
                 return false;
             }
 
-            Logger::debug("[连接" + to_string(conn_id) + "] DNS解析成功: " + game_server_ip);
+            Logger::debug(conn_id_str() + " DNS解析成功: " + game_server_ip);
 
             // 尝试连接所有解析结果
             int flag = 1;  // TCP_NODELAY标志
@@ -691,7 +718,7 @@ public:
                     continue;
                 }
 
-                Logger::debug("[连接" + to_string(conn_id) + "] 游戏服务器socket已创建 fd=" +
+                Logger::debug(conn_id_str() + " 游戏服务器socket已创建 fd=" +
                              to_string(game_fd) + " (协议: " +
                              (rp->ai_family == AF_INET ? "IPv4" : "IPv6") + ")");
 
@@ -703,19 +730,19 @@ public:
                 setsockopt(game_fd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
                 setsockopt(game_fd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
 
-                Logger::debug("[连接" + to_string(conn_id) + "] 已设置TCP_NODELAY + 256KB缓冲区");
+                Logger::debug(conn_id_str() + " 已设置TCP_NODELAY + 256KB缓冲区");
 
-                Logger::debug("[连接" + to_string(conn_id) + "] 正在连接游戏服务器 " +
+                Logger::debug(conn_id_str() + " 正在连接游戏服务器 " +
                              game_server_ip + ":" + to_string(game_port));
 
                 if (connect(game_fd, rp->ai_addr, rp->ai_addrlen) == 0) {
                     // 连接成功
-                    Logger::debug("[连接" + to_string(conn_id) + "] 成功连接到游戏服务器");
+                    Logger::debug(conn_id_str() + " 成功连接到游戏服务器");
 
                     // v5.3: 启用TCP Keepalive，防止游戏服务器因空闲超时断开连接
                     int keepalive = 1;
                     if (setsockopt(game_fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) < 0) {
-                        Logger::warning("[连接" + to_string(conn_id) + "] 设置SO_KEEPALIVE失败: " +
+                        Logger::warning(conn_id_str() + " 设置SO_KEEPALIVE失败: " +
                                       string(strerror(errno)));
                     }
 
@@ -728,7 +755,7 @@ public:
                     setsockopt(game_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepinterval, sizeof(keepinterval));
                     setsockopt(game_fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcount, sizeof(keepcount));
 
-                    Logger::info("[连接" + to_string(conn_id) + "] ✓ TCP Keepalive已启用 " +
+                    Logger::info(conn_id_str() + " ✓ TCP Keepalive已启用 " +
                                "(idle=" + to_string(keepidle) + "s, " +
                                "interval=" + to_string(keepinterval) + "s, " +
                                "count=" + to_string(keepcount) + ")");
@@ -737,7 +764,7 @@ public:
                 }
 
                 // 连接失败，关闭socket并尝试下一个地址
-                Logger::debug("[连接" + to_string(conn_id) + "] 连接尝试失败 (errno=" +
+                Logger::debug(conn_id_str() + " 连接尝试失败 (errno=" +
                              to_string(errno) + ": " + strerror(errno) + ")，尝试下一个地址");
                 close(game_fd);
                 game_fd = -1;
@@ -746,7 +773,7 @@ public:
             freeaddrinfo(result);
 
             if (game_fd < 0 || rp == nullptr) {
-                Logger::error("[连接" + to_string(conn_id) + "] 连接游戏服务器失败: " +
+                Logger::error(conn_id_str() + " 连接游戏服务器失败: " +
                              game_server_ip + ":" + to_string(game_port) + " (所有地址均失败)");
                 return false;
             }
@@ -757,7 +784,7 @@ public:
             setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
             setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
 
-            Logger::info("[连接" + to_string(conn_id) + "] 已连接到游戏服务器 " +
+            Logger::info(conn_id_str() + " 已连接到游戏服务器 " +
                         game_server_ip + ":" + to_string(game_port) + " (TCP_NODELAY)");
 
             running = true;
@@ -765,22 +792,22 @@ public:
             // 启动双向转发线程（与Python版本完全一致）
             // **v3.8.0终极方案**: 使用原始指针，避免shared_ptr的生命周期问题
             // 线程不持有对象所有权，只是借用指针
-            Logger::debug("[连接" + to_string(conn_id) + "] 启动客户端→游戏转发线程");
+            Logger::debug(conn_id_str() + " 启动客户端→游戏转发线程");
             TunnelConnection* raw_ptr = this;
             client_to_game_thread = make_shared<thread>([raw_ptr]() {
                 raw_ptr->forward_client_to_game();
             });
 
-            Logger::debug("[连接" + to_string(conn_id) + "] 启动游戏→客户端转发线程");
+            Logger::debug(conn_id_str() + " 启动游戏→客户端转发线程");
             game_to_client_thread = make_shared<thread>([raw_ptr]() {
                 raw_ptr->forward_game_to_client();
             });
 
-            Logger::debug("[连接" + to_string(conn_id) + "] 连接启动完成，双向转发已开始");
+            Logger::debug(conn_id_str() + " 连接启动完成，双向转发已开始");
             return true;
 
         } catch (exception& e) {
-            Logger::error("[连接" + to_string(conn_id) + "] 启动失败: " + string(e.what()));
+            Logger::error(conn_id_str() + " 启动失败: " + string(e.what()));
             return false;
         }
     }
@@ -798,7 +825,7 @@ private:
     bool sendall(int fd, const uint8_t* data, int len) {
         // v5.1: 检查fd有效性，防止向已关闭的socket发送数据导致崩溃
         if (fd < 0) {
-            Logger::error("[连接" + to_string(conn_id) + "] sendall失败: fd=" + to_string(fd) + " 无效");
+            Logger::error(conn_id_str() + " sendall失败: fd=" + to_string(fd) + " 无效");
             return false;
         }
 
@@ -818,7 +845,7 @@ private:
         vector<uint8_t> buffer;
         uint8_t recv_buf[65536];  // v12.2.0: 增大到64KB，配合流式转发
 
-        Logger::debug("[连接" + to_string(conn_id) + "] 客户端→游戏转发线程已启动");
+        Logger::debug(conn_id_str() + " 客户端→游戏转发线程已启动");
 
         try {
             while (running) {
@@ -826,17 +853,17 @@ private:
                 int n = recv(client_fd, recv_buf, sizeof(recv_buf), 0);
                 if (n <= 0) {
                     if (n == 0) {
-                        Logger::info("[连接" + to_string(conn_id) + "] 客户端正常断开 (recv返回0)");
+                        Logger::info(conn_id_str() + " 客户端正常断开 (recv返回0)");
                     } else {
                         int err = errno;
-                        Logger::info("[连接" + to_string(conn_id) + "] 客户端连接错误 (recv返回" + to_string(n) +
+                        Logger::info(conn_id_str() + " 客户端连接错误 (recv返回" + to_string(n) +
                                    ", errno=" + to_string(err) + ": " + strerror(err) + ")");
                     }
                     running = false;
                     break;
                 }
 
-                Logger::debug("[连接" + to_string(conn_id) + "] 从客户端收到隧道数据 " + to_string(n) + "字节");
+                Logger::debug(conn_id_str() + " 从客户端收到隧道数据 " + to_string(n) + "字节");
 
                 // 添加到缓冲区
                 buffer.insert(buffer.end(), recv_buf, recv_buf + n);
@@ -847,7 +874,7 @@ private:
                     uint32_t msg_conn_id = ntohl(*(uint32_t*)&buffer[1]);
 
                     if (msg_conn_id != (uint32_t)conn_id) {
-                        Logger::warning("[连接" + to_string(conn_id) + "] 收到错误的连接ID: " +
+                        Logger::warning(conn_id_str() + " 收到错误的连接ID: " +
                                       to_string(msg_conn_id));
                         running = false;
                         break;
@@ -871,10 +898,12 @@ private:
                                 const_cast<uint8_t*>(payload.data()),
                                 payload.size(),
                                 real_ip,
-                                proxy_local_ip
+                                proxy_local_ip,
+                                conn_id,
+                                session_uuid
                             );
                             if (replaced > 0) {
-                                Logger::debug("[连接" + to_string(conn_id) + "] TCP已替换IP: " +
+                                Logger::debug(conn_id_str() + " TCP已替换IP: " +
                                             real_ip + " -> " + proxy_local_ip +
                                             " (替换" + to_string(replaced) + "处)");
                             }
@@ -882,7 +911,7 @@ private:
 
                         // v5.1: 转发前检查连接状态和socket有效性
                         if (!running || game_fd < 0) {
-                            Logger::info("[连接" + to_string(conn_id) + "] 连接已关闭 (running=" +
+                            Logger::info(conn_id_str() + " 连接已关闭 (running=" +
                                        string(running ? "true" : "false") + ", game_fd=" +
                                        to_string(game_fd) + ")，停止转发");
                             running = false;
@@ -892,12 +921,12 @@ private:
                         // 转发到游戏服务器 - sendall
                         if (!sendall(game_fd, payload.data(), payload.size())) {
                             int err = errno;
-                            Logger::error("[连接" + to_string(conn_id) + "] 发送到游戏服务器失败 (errno=" +
+                            Logger::error(conn_id_str() + " 发送到游戏服务器失败 (errno=" +
                                         to_string(err) + ": " + strerror(err) + ")");
 
                             // 如果是EPIPE(32)或连接被重置，说明游戏socket已关闭
                             if (err == EPIPE || err == ECONNRESET || err == ENOTCONN) {
-                                Logger::info("[连接" + to_string(conn_id) + "] 游戏socket已关闭，停止转发");
+                                Logger::info(conn_id_str() + " 游戏socket已关闭，停止转发");
                                 running = false;
                             }
                             break;
@@ -911,13 +940,13 @@ private:
                             hex_preview += buf;
                         }
 
-                        Logger::debug("[连接" + to_string(conn_id) + "] 客户端→游戏: " +
+                        Logger::debug(conn_id_str() + " 客户端→游戏: " +
                                     to_string(payload.size()) + "字节 载荷:" + hex_preview);
                     }
                     else if (msg_type == 0x02) {  // v12.3.9: 心跳消息
                         if (buffer.size() < 7) break;
 
-                        Logger::debug("[连接" + to_string(conn_id) + "] 💓 收到心跳包");
+                        Logger::debug(conn_id_str() + " 💓 收到心跳包");
 
                         // 回复心跳包(保持连接双向活跃)
                         uint8_t heartbeat_reply[7];
@@ -944,7 +973,7 @@ private:
                         forward_udp_to_game(src_port, dst_port, payload);
                     }
                     else {
-                        Logger::warning("[连接" + to_string(conn_id) + "] 未知消息类型: " +
+                        Logger::warning(conn_id_str() + " 未知消息类型: " +
                                       to_string((int)msg_type));
                         buffer.erase(buffer.begin(), buffer.begin() + 5);
                     }
@@ -952,7 +981,7 @@ private:
             }
         } catch (exception& e) {
             if (running) {
-                Logger::error("[连接" + to_string(conn_id) + "] 客户端→游戏转发失败: " +
+                Logger::error(conn_id_str() + " 客户端→游戏转发失败: " +
                             string(e.what()));
             }
             running = false;
@@ -964,7 +993,7 @@ private:
         uint8_t buffer[65536];  // v12.2.0: 增大到64KB，配合流式转发
         const int MAX_RECV_SIZE = 65535;  // v12.3.6: 限制recv大小，防止uint16_t溢出
 
-        Logger::debug("[连接" + to_string(conn_id) + "] 游戏→客户端转发线程已启动");
+        Logger::debug(conn_id_str() + " 游戏→客户端转发线程已启动");
 
         int last_recv_size = 0;
         auto last_recv_time = chrono::system_clock::now();
@@ -981,16 +1010,16 @@ private:
                     auto time_since_last = chrono::duration_cast<chrono::milliseconds>(now - last_recv_time).count();
 
                     if (n == 0) {
-                        Logger::info("[连接" + to_string(conn_id) + "] [!!!关键!!!] 游戏服务器发送FIN (recv返回0)");
-                        Logger::info("[连接" + to_string(conn_id) + "] 最后一次接收: " + to_string(last_recv_size) +
+                        Logger::info(conn_id_str() + " [!!!关键!!!] 游戏服务器发送FIN (recv返回0)");
+                        Logger::info(conn_id_str() + " 最后一次接收: " + to_string(last_recv_size) +
                                    "字节，距今 " + to_string(time_since_last) + "ms");
-                        Logger::info("[连接" + to_string(conn_id) + "] 执行半关闭：游戏→客户端方向关闭，客户端→游戏方向保持");
+                        Logger::info(conn_id_str() + " 执行半关闭：游戏→客户端方向关闭，客户端→游戏方向保持");
                     } else {
                         int err = errno;
-                        Logger::error("[连接" + to_string(conn_id) + "] [!!!关键!!!] 游戏服务器连接错误");
-                        Logger::error("[连接" + to_string(conn_id) + "] recv返回: " + to_string(n) +
+                        Logger::error(conn_id_str() + " [!!!关键!!!] 游戏服务器连接错误");
+                        Logger::error(conn_id_str() + " recv返回: " + to_string(n) +
                                     ", errno=" + to_string(err) + ": " + strerror(err));
-                        Logger::error("[连接" + to_string(conn_id) + "] 最后一次接收: " + to_string(last_recv_size) +
+                        Logger::error(conn_id_str() + " 最后一次接收: " + to_string(last_recv_size) +
                                     "字节，距今 " + to_string(time_since_last) + "ms");
                     }
 
@@ -998,12 +1027,12 @@ private:
                     // 之前的半关闭方案(SHUT_RD)会导致client_to_game继续向已关闭的socket发送数据
                     // 从而在析构时触发sendall(-1)崩溃
                     shutdown(game_fd, SHUT_RDWR);
-                    Logger::debug("[连接" + to_string(conn_id) + "] shutdown游戏socket (SHUT_RDWR)");
+                    Logger::debug(conn_id_str() + " shutdown游戏socket (SHUT_RDWR)");
 
                     close(game_fd);
                     int closed_fd = game_fd;
                     game_fd = -1;  // 设置为-1，让client_to_game线程的检查能够发现
-                    Logger::info("[连接" + to_string(conn_id) + "] 已关闭游戏socket fd=" + to_string(closed_fd) +
+                    Logger::info(conn_id_str() + " 已关闭游戏socket fd=" + to_string(closed_fd) +
                                "，client_to_game线程将在下次发送时检测到并停止");
 
                     break;  // 退出game_to_client线程
@@ -1017,7 +1046,7 @@ private:
                 // 协议data_len字段是uint16_t(2字节)，最大值65535
                 // 但buffer大小是65536，recv可能返回65536导致溢出为0！
                 if (n > 65535) {
-                    Logger::warning("[连接" + to_string(conn_id) + "] ⚠ recv返回" + to_string(n) +
+                    Logger::warning(conn_id_str() + " ⚠ recv返回" + to_string(n) +
                                   "字节，超过uint16_t最大值65535，需要分包发送");
                     // 先发送65535字节
                     int first_part = 65535;
@@ -1032,11 +1061,11 @@ private:
                     memcpy(response1 + 7, buffer, first_part);
 
                     if (!sendall(client_fd, response1, 7 + first_part)) {
-                        Logger::error("[连接" + to_string(conn_id) + "] 发送第一部分失败");
+                        Logger::error(conn_id_str() + " 发送第一部分失败");
                         running = false;
                         break;
                     }
-                    Logger::debug("[连接" + to_string(conn_id) + "] 已发送第一部分: 65535字节");
+                    Logger::debug(conn_id_str() + " 已发送第一部分: 65535字节");
 
                     // 发送第二部分
                     uint8_t response2[second_part + 7];
@@ -1047,16 +1076,16 @@ private:
                     memcpy(response2 + 7, buffer + first_part, second_part);
 
                     if (!sendall(client_fd, response2, 7 + second_part)) {
-                        Logger::error("[连接" + to_string(conn_id) + "] 发送第二部分失败");
+                        Logger::error(conn_id_str() + " 发送第二部分失败");
                         running = false;
                         break;
                     }
-                    Logger::debug("[连接" + to_string(conn_id) + "] 已发送第二部分: " + to_string(second_part) + "字节");
+                    Logger::debug(conn_id_str() + " 已发送第二部分: " + to_string(second_part) + "字节");
 
                     continue;  // 跳过后面的正常发送流程
                 }
 
-                Logger::debug("[连接" + to_string(conn_id) + "] [CHECKPOINT-1] 准备打印hex preview, n=" + to_string(n));
+                Logger::debug(conn_id_str() + " [CHECKPOINT-1] 准备打印hex preview, n=" + to_string(n));
 
                 // 打印载荷预览（前16字节）
                 string hex_preview = "";
@@ -1066,9 +1095,9 @@ private:
                     hex_preview += buf;
                 }
 
-                Logger::debug("[连接" + to_string(conn_id) + "] [CHECKPOINT-2] hex preview生成完毕");
+                Logger::debug(conn_id_str() + " [CHECKPOINT-2] hex preview生成完毕");
 
-                Logger::debug("[连接" + to_string(conn_id) + "] 从游戏收到 " + to_string(n) +
+                Logger::debug(conn_id_str() + " 从游戏收到 " + to_string(n) +
                             "字节 载荷:" + hex_preview);
 
                 // v5.0: TCP payload IP替换（代理IP → 客户端IP）
@@ -1080,23 +1109,25 @@ private:
                         buffer,
                         n,
                         proxy_local_ip,
-                        real_ip
+                        real_ip,
+                        conn_id,
+                        session_uuid
                     );
                     if (replaced > 0) {
-                        Logger::debug("[连接" + to_string(conn_id) + "] TCP已替换IP: " +
+                        Logger::debug(conn_id_str() + " TCP已替换IP: " +
                                     proxy_local_ip + " -> " + real_ip +
                                     " (替换" + to_string(replaced) + "处)");
                     }
                 }
 
-                Logger::debug("[连接" + to_string(conn_id) + "] [CHECKPOINT-3] 准备封装协议, n=" + to_string(n) +
+                Logger::debug(conn_id_str() + " [CHECKPOINT-3] 准备封装协议, n=" + to_string(n) +
                             ", client_fd=" + to_string(client_fd) + ", running=" + (running ? "true" : "false"));
 
                 // **v3.5.5: 关键修复 - 在发送前检查running状态**
                 // 如果client_to_game线程已经设置running=false,说明客户端已断开
                 // 此时client_fd可能已被析构函数关闭,不能再调用sendall()
                 if (!running) {
-                    Logger::info("[连接" + to_string(conn_id) + "] [!!!修复v3.5.5!!!] 检测到running=false,客户端已断开,跳过sendall()避免崩溃");
+                    Logger::info(conn_id_str() + " [!!!修复v3.5.5!!!] 检测到running=false,客户端已断开,跳过sendall()避免崩溃");
                     break;
                 }
 
@@ -1117,32 +1148,32 @@ private:
                 // **v12.3.6: 添加诊断日志，检测异常的n值**
                 // 注意：n=0的情况已经在前面的 if (n <= 0) 中处理了，这里不会到达
                 if (n > 60000 && n <= 65535) {
-                    Logger::debug("[连接" + to_string(conn_id) + "] 大数据包: " + to_string(n) + "字节");
+                    Logger::debug(conn_id_str() + " 大数据包: " + to_string(n) + "字节");
                 }
 
-                Logger::debug("[连接" + to_string(conn_id) + "] [CHECKPOINT-4] 协议封装完成,准备调用sendall(), 总大小=" +
+                Logger::debug(conn_id_str() + " [CHECKPOINT-4] 协议封装完成,准备调用sendall(), 总大小=" +
                             to_string(7 + n));
 
                 // sendall - 确保完全发送
                 if (!sendall(client_fd, response, 7 + n)) {
                     int err = errno;
-                    Logger::error("[连接" + to_string(conn_id) + "] 发送到客户端失败 (errno=" +
+                    Logger::error(conn_id_str() + " 发送到客户端失败 (errno=" +
                                 to_string(err) + ": " + strerror(err) + ")");
                     running = false;
                     break;
                 }
 
-                Logger::debug("[连接" + to_string(conn_id) + "] [CHECKPOINT-5] sendall()成功返回");
+                Logger::debug(conn_id_str() + " [CHECKPOINT-5] sendall()成功返回");
 
-                Logger::debug("[连接" + to_string(conn_id) + "] 游戏→客户端: 已转发 " +
+                Logger::debug(conn_id_str() + " 游戏→客户端: 已转发 " +
                             to_string(n) + "字节");
             }
 
-            Logger::debug("[连接" + to_string(conn_id) + "] 游戏→客户端转发线程正常退出");
+            Logger::debug(conn_id_str() + " 游戏→客户端转发线程正常退出");
 
         } catch (exception& e) {
             if (running) {
-                Logger::error("[连接" + to_string(conn_id) + "] 游戏→客户端转发异常: " +
+                Logger::error(conn_id_str() + " 游戏→客户端转发异常: " +
                             string(e.what()));
             }
             running = false;
@@ -1165,8 +1196,8 @@ private:
                 string port_str = to_string(dst_port);
                 int ret = getaddrinfo(game_server_ip.c_str(), port_str.c_str(), &hints, &result);
                 if (ret != 0 || result == nullptr) {
-                    Logger::error("[连接" + to_string(conn_id) + "|UDP:" + to_string(dst_port) +
-                                "] DNS解析失败: " + game_server_ip);
+                    Logger::error(conn_id_str() + "|UDP:" + to_string(dst_port) +
+                                " DNS解析失败: " + game_server_ip);
                     return;
                 }
 
@@ -1174,14 +1205,14 @@ private:
                 freeaddrinfo(result);
 
                 if (udp_fd < 0) {
-                    Logger::error("[连接" + to_string(conn_id) + "|UDP:" + to_string(dst_port) +
-                                "] 创建UDP socket失败");
+                    Logger::error(conn_id_str() + "|UDP:" + to_string(dst_port) +
+                                " 创建UDP socket失败");
                     return;
                 }
                 udp_sockets[dst_port] = udp_fd;
 
-                Logger::info("[连接" + to_string(conn_id) + "|UDP:" + to_string(dst_port) +
-                           "] 创建UDP socket");
+                Logger::info(conn_id_str() + "|UDP:" + to_string(dst_port) +
+                           " 创建UDP socket");
 
                 // 启动UDP接收线程 - **关键修复**: 必须捕获shared_from_this()防止Use-After-Free
                 // UDP线程也需要持有shared_ptr引用,否则对象可能在线程运行时被销毁
@@ -1203,20 +1234,20 @@ private:
             string port_str = to_string(dst_port);
             int ret = getaddrinfo(game_server_ip.c_str(), port_str.c_str(), &hints, &result);
             if (ret != 0 || result == nullptr) {
-                Logger::error("[连接" + to_string(conn_id) + "|UDP:" + to_string(dst_port) +
-                            "] DNS解析失败");
+                Logger::error(conn_id_str() + "|UDP:" + to_string(dst_port) +
+                            " DNS解析失败");
                 return;
             }
 
             sendto(udp_fd, data.data(), data.size(), 0, result->ai_addr, result->ai_addrlen);
             freeaddrinfo(result);
 
-            Logger::debug("[连接" + to_string(conn_id) + "|UDP:" + to_string(dst_port) +
-                        "] 客户端→游戏: " + to_string(data.size()) + "字节");
+            Logger::debug(conn_id_str() + "|UDP:" + to_string(dst_port) +
+                        " 客户端→游戏: " + to_string(data.size()) + "字节");
 
         } catch (exception& e) {
-            Logger::error("[连接" + to_string(conn_id) + "|UDP:" + to_string(dst_port) +
-                        "] 转发失败: " + string(e.what()));
+            Logger::error(conn_id_str() + "|UDP:" + to_string(dst_port) +
+                        " 转发失败: " + string(e.what()));
         }
     }
 
@@ -1251,16 +1282,16 @@ private:
 
                 // sendall
                 if (!sendall(client_fd, response, 11 + n)) {
-                    Logger::error("[连接" + to_string(conn_id) + "|UDP:" + to_string(dst_port) +
-                                "] 发送失败");
+                    Logger::error(conn_id_str() + "|UDP:" + to_string(dst_port) +
+                                " 发送失败");
                     break;
                 }
 
-                Logger::debug("[连接" + to_string(conn_id) + "|UDP:" + to_string(dst_port) +
-                            "] 游戏→客户端: " + to_string(n) + "字节");
+                Logger::debug(conn_id_str() + "|UDP:" + to_string(dst_port) +
+                            " 游戏→客户端: " + to_string(n) + "字节");
             }
         } catch (exception& e) {
-            Logger::error("[连接" + to_string(conn_id) + "|UDP] 接收线程异常: " +
+            Logger::error(conn_id_str() + "|UDP 接收线程异常: " +
                         string(e.what()));
         }
     }
@@ -1413,30 +1444,45 @@ private:
             // v4.5.0: 用于存储从UDP握手payload中解析的客户端IP
             string client_ipv4 = "";
 
-            // 接收握手：conn_id(4) + dst_port(2)
-            uint8_t handshake[6];
-            int n = recv(client_fd, handshake, 6, MSG_WAITALL);
+            // 接收握手：conn_id(4) + dst_port(2) + session_uuid_len(1) + session_uuid(N)
+            uint8_t handshake[7];
+            int n = recv(client_fd, handshake, 7, MSG_WAITALL);
 
-            if (n != 6) {
-                Logger::error("客户端 " + client_str + " 握手失败");
+            if (n != 7) {
+                Logger::error("客户端 " + client_str + " 握手失败 (recv=" + to_string(n) + ", 期望7字节)");
                 close(client_fd);
                 return;
             }
 
             // ===== 调试日志:打印原始握手数据 =====
             char hex_buf[100];
-            sprintf(hex_buf, "%02x %02x %02x %02x %02x %02x",
+            sprintf(hex_buf, "%02x %02x %02x %02x %02x %02x %02x",
                     handshake[0], handshake[1], handshake[2],
-                    handshake[3], handshake[4], handshake[5]);
+                    handshake[3], handshake[4], handshake[5], handshake[6]);
             Logger::debug("[握手] 收到握手数据(hex): " + string(hex_buf));
 
             uint32_t conn_id = ntohl(*(uint32_t*)handshake);
             uint16_t dst_port = ntohs(*(uint16_t*)(handshake + 4));
+            uint8_t session_uuid_len = handshake[6];
+
+            // 接收session UUID
+            string session_uuid = "";
+            if (session_uuid_len > 0 && session_uuid_len < 255) {
+                vector<char> uuid_buf(session_uuid_len + 1, 0);
+                int uuid_recv = recv(client_fd, uuid_buf.data(), session_uuid_len, MSG_WAITALL);
+                if (uuid_recv == (int)session_uuid_len) {
+                    session_uuid = string(uuid_buf.data(), session_uuid_len);
+                } else {
+                    Logger::warning("[握手] 接收会话UUID失败 (期望" + to_string(session_uuid_len) +
+                                  "字节, 收到" + to_string(uuid_recv) + "字节)");
+                }
+            }
 
             char conn_id_hex[20];
             sprintf(conn_id_hex, "0x%08x", conn_id);
             Logger::debug("[握手] 解析结果: conn_id=" + to_string(conn_id) +
-                        " (" + string(conn_id_hex) + "), dst_port=" + to_string(dst_port));
+                        " (" + string(conn_id_hex) + "), dst_port=" + to_string(dst_port) +
+                        ", session_uuid=" + session_uuid);
 
             // ===== 关键修改：识别UDP tunnel连接 =====
             const uint32_t UDP_MAGIC = 0xFFFFFFFF;
@@ -1446,15 +1492,15 @@ private:
                         ", 相等?" + (conn_id == UDP_MAGIC ? "YES" : "NO"));
 
             if (conn_id == UDP_MAGIC) {
-                Logger::info("[UDP Tunnel] ✓ 识别为UDP Tunnel连接!");
-                Logger::info("[UDP Tunnel] 收到UDP握手请求(第一部分): 客户端=" + client_str +
+                Logger::info("[UDP Tunnel|" + session_uuid + "] ✓ 识别为UDP Tunnel连接!");
+                Logger::info("[UDP Tunnel|" + session_uuid + "] 收到UDP握手请求(第一部分): 客户端=" + client_str +
                            ", 游戏端口=" + to_string(dst_port));
 
                 // ===== 新协议: 接收客户端IPv4地址(4字节) =====
                 uint8_t ipv4_bytes[4];
                 int ip_received = recv(client_fd, ipv4_bytes, 4, MSG_WAITALL);
                 if (ip_received != 4) {
-                    Logger::error("[UDP Tunnel] 握手失败: 未接收到客户端IPv4地址 (received=" +
+                    Logger::error("[UDP Tunnel|" + session_uuid + "] 握手失败: 未接收到客户端IPv4地址 (received=" +
                                 to_string(ip_received) + ")");
                     close(client_fd);
                     return;
@@ -1467,14 +1513,14 @@ private:
                 inet_ntop(AF_INET, &ipv4_addr, ipv4_str, INET_ADDRSTRLEN);
                 client_ipv4 = string(ipv4_str);  // v4.5.0: 赋值给外层变量,不重新声明
 
-                Logger::info("[UDP Tunnel] 收到客户端IPv4地址(payload中): " + client_ipv4);
+                Logger::info("[UDP Tunnel|" + session_uuid + "] 收到客户端IPv4地址(payload中): " + client_ipv4);
 
                 // v5.0: 存储TCP源IP到客户端真实IPv4的映射
                 string tcp_source_ip = extract_tcp_source_ip(client_str);
                 if (!tcp_source_ip.empty() && !client_ipv4.empty()) {
                     lock_guard<mutex> lock(ip_map_mutex);
                     client_ip_map[tcp_source_ip] = client_ipv4;
-                    Logger::info("[UDP Tunnel] v5.0存储IP映射: TCP源IP=" + tcp_source_ip +
+                    Logger::info("[UDP Tunnel|" + session_uuid + "] v5.0存储IP映射: TCP源IP=" + tcp_source_ip +
                                " -> 客户端真实IPv4=" + client_ipv4);
                 }
 
@@ -1484,21 +1530,21 @@ private:
                 *(uint16_t*)(ack + 4) = htons(dst_port);  // 回传端口
 
                 if (send(client_fd, ack, 6, 0) != 6) {
-                    Logger::error("[UDP Tunnel] 发送握手确认失败");
+                    Logger::error("[UDP Tunnel|" + session_uuid + "] 发送握手确认失败");
                     close(client_fd);
                     return;
                 }
 
-                Logger::info("[UDP Tunnel] 握手成功,已发送确认");
-                Logger::info("[UDP Tunnel] 调用 handle_udp_tunnel()");
+                Logger::info("[UDP Tunnel|" + session_uuid + "] 握手成功,已发送确认");
+                Logger::info("[UDP Tunnel|" + session_uuid + "] 调用 handle_udp_tunnel()");
                 // v4.5.0: 传递TCP真实IP(client_str)和payload中的IP(client_ipv4)
-                handle_udp_tunnel(client_fd, client_str, client_ipv4, dst_port);
-                Logger::info("[UDP Tunnel] handle_udp_tunnel()函数已返回");
+                handle_udp_tunnel(client_fd, client_str, client_ipv4, dst_port, session_uuid);
+                Logger::info("[UDP Tunnel|" + session_uuid + "] handle_udp_tunnel()函数已返回");
                 return;
             }
 
             Logger::debug("[握手] ✗ 不是UDP Tunnel,按普通TCP连接处理");
-            Logger::info("[连接" + to_string(conn_id) + "] 握手成功: 目标端口=" +
+            Logger::info("[连接" + to_string(conn_id) + "|" + session_uuid + "] 握手成功: 目标端口=" +
                         to_string(dst_port) + ", 客户端=" + client_str);
 
             // v5.0: 从映射中查询客户端真实IPv4
@@ -1515,7 +1561,7 @@ private:
             // v5.0: 计算代理服务器本地IP(用于连接游戏服务器的本地IP)
             string proxy_local_ip = get_local_ip(config.game_server_ip);
 
-            Logger::debug("[连接" + to_string(conn_id) + "] v5.0 IP替换准备: TCP源IP=" + tcp_source_ip +
+            Logger::debug("[连接" + to_string(conn_id) + "|" + session_uuid + "] v5.0 IP替换准备: TCP源IP=" + tcp_source_ip +
                         ", 客户端真实IPv4=" + client_real_ipv4 + ", 代理IP=" + proxy_local_ip);
 
             // 创建连接对象 - 使用智能指针
@@ -1528,7 +1574,8 @@ private:
                 proxy_local_ip,    // proxy_ip
                 tcp_source_ip,     // tcp_source_ip (用于动态查询)
                 &client_ip_map,    // IP映射指针
-                &ip_map_mutex      // 映射互斥锁指针
+                &ip_map_mutex,     // 映射互斥锁指针
+                session_uuid       // 会话UUID
             );
 
             string conn_key = client_str + ":" + to_string(conn_id);
@@ -1566,7 +1613,8 @@ private:
     // 处理UDP tunnel连接
     // v4.5.0: 添加client_ipv4_from_payload参数,包含客户端payload中声明的IP
     void handle_udp_tunnel(int client_fd, const string& client_str,
-                          const string& client_ipv4_from_payload, uint16_t game_port) {
+                          const string& client_ipv4_from_payload, uint16_t game_port,
+                          const string& session_uuid = "") {
         try {
             // 提取客户端真实IP地址(TCP连接源IP,客户端公网IP)
             string real_client_ip;
@@ -1604,19 +1652,21 @@ private:
             // v4.5.0: 使用传入的payload IP
             string client_ipv4 = client_ipv4_from_payload;
 
-            Logger::info("[UDP Tunnel] 开始处理UDP代理连接");
-            Logger::info("[UDP Tunnel] 客户端字符串: " + client_str);
-            Logger::info("[UDP Tunnel] 客户端公网IP(TCP源): " + real_client_ip);
-            Logger::info("[UDP Tunnel] 客户端私网IP(payload): " + client_ipv4);
+            string uuid_prefix = session_uuid.empty() ? "[UDP Tunnel]" : "[UDP Tunnel|" + session_uuid + "]";
+
+            Logger::info(uuid_prefix + " 开始处理UDP代理连接");
+            Logger::info(uuid_prefix + " 客户端字符串: " + client_str);
+            Logger::info(uuid_prefix + " 客户端公网IP(TCP源): " + real_client_ip);
+            Logger::info(uuid_prefix + " 客户端私网IP(payload): " + client_ipv4);
 
             // ===== v4.5.0关键: 获取代理服务器本地IP =====
             string proxy_local_ip = get_local_ip(config.game_server_ip);
             if (proxy_local_ip.empty()) {
-                Logger::error("[UDP Tunnel] 无法获取代理服务器本地IP,使用默认值");
+                Logger::error(uuid_prefix + " 无法获取代理服务器本地IP,使用默认值");
                 proxy_local_ip = "192.168.2.75";  // 回退默认值
             }
-            Logger::info("[UDP Tunnel] 代理服务器本地IP: " + proxy_local_ip);
-            Logger::info("[UDP Tunnel] v5.0策略: 客户端→服务器(客户端IP→代理IP), 服务器→客户端(代理IP→客户端IP)");
+            Logger::info(uuid_prefix + " 代理服务器本地IP: " + proxy_local_ip);
+            Logger::info(uuid_prefix + " v5.0策略: 客户端→服务器(客户端IP→代理IP), 服务器→客户端(代理IP→客户端IP)");
 
             // **关键修复v3.5**: 使用shared_ptr包装本地变量,防止线程持有悬垂引用
             // v4.7.0重构: 按源端口管理UDP socket - 每个客户端源端口一个socket
@@ -1873,25 +1923,25 @@ private:
             vector<uint8_t> buffer;
             uint8_t recv_buf[4096];
 
-            Logger::info("[UDP Tunnel] 进入UDP转发循环 (client_fd=" + to_string(client_fd) + ")");
+            Logger::info(uuid_prefix + " 进入UDP转发循环 (client_fd=" + to_string(client_fd) + ")");
 
             while (*running) {
-                Logger::debug("[UDP Tunnel] 等待从客户端接收数据...");
+                Logger::debug(uuid_prefix + " 等待从客户端接收数据...");
 
                 int n = recv(client_fd, recv_buf, sizeof(recv_buf), 0);
 
                 if (n <= 0) {
                     int err = errno;
                     if (n == 0) {
-                        Logger::info("[UDP Tunnel] 客户端正常断开 (recv返回0)");
+                        Logger::info(uuid_prefix + " 客户端正常断开 (recv返回0)");
                     } else {
-                        Logger::error("[UDP Tunnel] 客户端连接错误 (recv返回" + to_string(n) +
+                        Logger::error(uuid_prefix + " 客户端连接错误 (recv返回" + to_string(n) +
                                     ", errno=" + to_string(err) + ": " + strerror(err) + ")");
                     }
                     break;
                 }
 
-                Logger::info("[UDP Tunnel] ←[客户端] 收到 " + to_string(n) + "字节");
+                Logger::info(uuid_prefix + " ←[客户端] 收到 " + to_string(n) + "字节");
 
                 // 添加到缓冲区
                 buffer.insert(buffer.end(), recv_buf, recv_buf + n);
@@ -2013,7 +2063,9 @@ private:
                         const_cast<uint8_t*>(payload.data()),
                         payload.size(),
                         private_ip,
-                        proxy_ip_for_lambda  // v5.0: 替换为代理IP而不是TCP源IP
+                        proxy_ip_for_lambda,  // v5.0: 替换为代理IP而不是TCP源IP
+                        0,  // UDP tunnel 没有 conn_id
+                        session_uuid
                     );
 
                     if (replaced_send > 0) {
@@ -2369,7 +2421,7 @@ bool generate_default_config(const string& filename) {
 void signal_handler(int signum) {
     // SIGHUP: 重新加载配置
     if (signum == SIGHUP) {
-        reload_http_api_config();
+        reload_tcp_config();
         return;
     }
 
@@ -2424,11 +2476,11 @@ int main() {
     // 创建log目录（如果不存在）
     mkdir("log", 0755);
 
-    // 生成带时间戳的日志文件名
+    // 生成带时间戳的日志文件名(使用北京时间UTC+8)
     auto now = chrono::system_clock::now();
-    auto time = chrono::system_clock::to_time_t(now);
+    auto beijing_time = chrono::system_clock::to_time_t(now + chrono::hours(8));
     stringstream log_filename;
-    log_filename << "log/server_log_" << put_time(localtime(&time), "%Y%m%d_%H%M%S") << ".txt";
+    log_filename << "log/server_log_" << put_time(gmtime(&beijing_time), "%Y%m%d_%H%M%S") << ".txt";
 
     // 初始化日志系统
     Logger::init(log_filename.str());
@@ -2532,19 +2584,19 @@ int main() {
     // 启动HTTP API服务器 (用于多服务器客户端)
     pthread_t api_thread = 0;
     if (global_config.api_config.enabled) {
-        Logger::info("正在启动HTTP API服务器...");
+        Logger::info("正在启动TCP配置服务器...");
         Logger::info("API配置: 端口=" + to_string(global_config.api_config.port) +
                     ", 隧道服务器IP=" + global_config.api_config.tunnel_server_ip);
 
-        api_thread = start_http_api_server(config_file.c_str(),
-                                           global_config.api_config.tunnel_server_ip.c_str(),
-                                           global_config.api_config.port);
+        api_thread = start_tcp_config_server(config_file.c_str(),
+                                             global_config.api_config.tunnel_server_ip.c_str(),
+                                             global_config.api_config.port);
         if (api_thread == 0) {
-            Logger::error("HTTP API服务器启动失败");
+            Logger::error("TCP配置服务器启动失败");
         } else {
-            Logger::info("HTTP API服务器已启动在端口 " + to_string(global_config.api_config.port));
-            cout << "HTTP API: http://" << global_config.api_config.tunnel_server_ip
-                 << ":" << global_config.api_config.port << "/api/servers" << endl;
+            Logger::info("TCP配置服务器已启动在端口 " + to_string(global_config.api_config.port));
+            cout << "TCP配置服务器: " << global_config.api_config.tunnel_server_ip
+                 << ":" << global_config.api_config.port << " (协议: GET_SERVERS)" << endl;
         }
     } else {
         Logger::info("HTTP API服务器已禁用 (在config.json中设置api_config.enabled=true启用)");
@@ -2564,12 +2616,12 @@ int main() {
         }
     }
 
-    // 停止HTTP API服务器
+    // 停止TCP配置服务器
     if (api_thread != 0) {
-        Logger::info("正在停止HTTP API服务器...");
-        stop_http_api_server();
+        Logger::info("正在停止TCP配置服务器...");
+        stop_tcp_config_server();
         pthread_join(api_thread, NULL);
-        Logger::info("HTTP API服务器已停止");
+        Logger::info("TCP配置服务器已停止");
     }
 
     // 智能指针自动清理，无需手动delete

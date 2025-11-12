@@ -21,3 +21,6 @@ log/
 # 忽略系统文件
 Thumbs.db
 .DS_Store
+客户端源码/embedded_windivert.h
+客户端源码/embedded_client_multiserver.h
+客户端源码/app.res
