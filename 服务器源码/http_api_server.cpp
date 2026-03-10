@@ -229,7 +229,10 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
         string game_ip_str = extract_json_string(obj, "game_server_ip");
         printf("  game_ip: %s (长度: %zu)\n", game_ip_str.c_str(), game_ip_str.length());
 
-        string tunnel_ip_str(tunnel_server_ip);
+        string tunnel_ip_str = extract_json_string(obj, "tunnel_server_ip");
+        if (tunnel_ip_str.empty()) {
+            tunnel_ip_str.assign(tunnel_server_ip);
+        }
         printf("  tunnel_ip: %s (长度: %zu)\n", tunnel_ip_str.c_str(), tunnel_ip_str.length());
 
         int port = extract_json_int(obj, "listen_port");
