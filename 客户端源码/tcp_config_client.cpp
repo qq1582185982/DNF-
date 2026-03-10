@@ -43,12 +43,12 @@ bool TcpConfigClient::TcpGetData(const std::string& host,
                                  std::string& response,
                                  std::wstring& error_msg) {
     SOCKET sock = INVALID_SOCKET;
-    struct addrinfo hints, *result = NULL;
+    struct addrinfo hints, *result = NULL, *rp = NULL;
 
     try {
         // 1. 解析域名/IP
         ZeroMemory(&hints, sizeof(hints));
-        hints.ai_family = AF_INET;
+        hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
         hints.ai_protocol = IPPROTO_TCP;
 
@@ -59,28 +59,39 @@ bool TcpConfigClient::TcpGetData(const std::string& host,
             return false;
         }
 
-        // 2. 创建Socket
-        sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-        if (sock == INVALID_SOCKET) {
-            error_msg = L"创建Socket失败";
-            freeaddrinfo(result);
-            return false;
-        }
-
-        // 设置超时 (15秒)
+        // 2. 创建Socket并逐个尝试所有解析结果，兼容IPv4/IPv6
         DWORD timeout = 15000;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
+        int last_error = 0;
+        bool connected = false;
 
-        // 3. 连接到服务器
-        if (connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
-            error_msg = L"无法连接到服务器: " + StringToWString(host) + L":" + std::to_wstring(port);
+        for (rp = result; rp != NULL; rp = rp->ai_next) {
+            sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            if (sock == INVALID_SOCKET) {
+                last_error = WSAGetLastError();
+                continue;
+            }
+
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
+
+            if (connect(sock, rp->ai_addr, (int)rp->ai_addrlen) == 0) {
+                connected = true;
+                break;
+            }
+
+            last_error = WSAGetLastError();
             closesocket(sock);
-            freeaddrinfo(result);
-            return false;
+            sock = INVALID_SOCKET;
         }
 
         freeaddrinfo(result);
+        result = NULL;
+
+        if (!connected || sock == INVALID_SOCKET) {
+            error_msg = L"无法连接到服务器: " + StringToWString(host) + L":" +
+                        std::to_wstring(port) + L" (WSA错误=" + std::to_wstring(last_error) + L")";
+            return false;
+        }
 
         // 4. 发送请求
         int sent = send(sock, request.c_str(), (int)request.length(), 0);

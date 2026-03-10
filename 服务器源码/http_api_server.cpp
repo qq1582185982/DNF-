@@ -367,10 +367,8 @@ void handle_http_request(int client_fd) {
 
     close(client_fd);
 }
-
-// HTTP服务器线程
 void* http_server_thread(void* arg) {
-    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int listen_fd = socket(AF_INET6, SOCK_STREAM, 0);
     if (listen_fd < 0) {
         perror("socket failed");
         return NULL;
@@ -380,11 +378,15 @@ void* http_server_thread(void* arg) {
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    struct sockaddr_in addr;
+    // 启用双栈模式，兼容IPv4和IPv6客户端
+    int v6only = 0;
+    setsockopt(listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+
+    struct sockaddr_in6 addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(g_api_port);
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr = in6addr_any;
+    addr.sin6_port = htons(g_api_port);
 
     if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("bind failed");
@@ -402,7 +404,7 @@ void* http_server_thread(void* arg) {
     printf("API端点: http://<server-ip>:%d/api/servers\n", g_api_port);
 
     while (g_running) {
-        struct sockaddr_in client_addr;
+        struct sockaddr_storage client_addr;
         socklen_t addr_len = sizeof(client_addr);
 
         int client_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &addr_len);
@@ -412,7 +414,7 @@ void* http_server_thread(void* arg) {
             break;
         }
 
-        // 直接处理请求 (简单实现,不使用线程池)
+        // 直接处理请求（简单实现，不使用线程池）
         handle_http_request(client_fd);
     }
 

@@ -412,9 +412,8 @@ void handle_tcp_request(int client_fd) {
     close(client_fd);
 }
 
-// TCP服务器线程
 void* tcp_server_thread(void* arg) {
-    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int listen_fd = socket(AF_INET6, SOCK_STREAM, 0);
     if (listen_fd < 0) {
         perror("socket failed");
         return NULL;
@@ -424,11 +423,15 @@ void* tcp_server_thread(void* arg) {
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    struct sockaddr_in addr;
+    // 启用双栈模式，兼容IPv4和IPv6客户端
+    int v6only = 0;
+    setsockopt(listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+
+    struct sockaddr_in6 addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(g_api_port);
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr = in6addr_any;
+    addr.sin6_port = htons(g_api_port);
 
     if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("bind failed");
@@ -448,7 +451,7 @@ void* tcp_server_thread(void* arg) {
     printf("  - GET_VERSION: 获取版本信息(MD5 + 下载地址)\n");
 
     while (g_running) {
-        struct sockaddr_in client_addr;
+        struct sockaddr_storage client_addr;
         socklen_t addr_len = sizeof(client_addr);
 
         int client_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &addr_len);
@@ -458,11 +461,21 @@ void* tcp_server_thread(void* arg) {
             break;
         }
 
-        printf("[TCP] 新连接来自 %s:%d\n",
-               inet_ntoa(client_addr.sin_addr),
-               ntohs(client_addr.sin_port));
+        char client_ip[INET6_ADDRSTRLEN] = "unknown";
+        int client_port = 0;
+        if (client_addr.ss_family == AF_INET) {
+            struct sockaddr_in* addr_in = (struct sockaddr_in*)&client_addr;
+            inet_ntop(AF_INET, &addr_in->sin_addr, client_ip, sizeof(client_ip));
+            client_port = ntohs(addr_in->sin_port);
+        } else if (client_addr.ss_family == AF_INET6) {
+            struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)&client_addr;
+            inet_ntop(AF_INET6, &addr_in6->sin6_addr, client_ip, sizeof(client_ip));
+            client_port = ntohs(addr_in6->sin6_port);
+        }
 
-        // 直接处理请求 (简单实现,不使用线程池)
+        printf("[TCP] 新连接来自 %s:%d\n", client_ip, client_port);
+
+        // 直接处理请求（简单实现，不使用线程池）
         handle_tcp_request(client_fd);
     }
 
