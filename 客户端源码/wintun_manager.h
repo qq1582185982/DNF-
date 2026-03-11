@@ -1,0 +1,80 @@
+#pragma once
+
+#include "ip_lease_protocol.h"
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+#include <string>
+#include <vector>
+
+enum class ClientDataPlaneMode {
+    LegacyTap = 0,
+    ExperimentalWintun = 1
+};
+
+struct TunnelLeaseRuntimeConfig {
+    std::string game_server_ip;
+    std::string virtual_ip;
+    std::string subnet_mask;
+    std::string gateway_ip;
+    uint16_t mtu;
+    std::vector<ip_tunnel::RouteEntry> routes;
+
+    TunnelLeaseRuntimeConfig()
+        : mtu(ip_tunnel::kDefaultMtu) {}
+};
+
+class WintunManager {
+public:
+    WintunManager();
+    ~WintunManager();
+
+    static ClientDataPlaneMode ResolveRequestedMode();
+    static bool IsExperimentalModeEnabled();
+
+    bool Setup(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg);
+    void Cleanup();
+    bool IsActive() const { return active_; }
+
+private:
+    struct _WINTUN_ADAPTER;
+    struct _TUN_SESSION;
+
+    typedef _WINTUN_ADAPTER* WINTUN_ADAPTER_HANDLE;
+    typedef _TUN_SESSION* WINTUN_SESSION_HANDLE;
+
+    typedef WINTUN_ADAPTER_HANDLE (WINAPI *CreateAdapterFn)(LPCWSTR, LPCWSTR, const GUID*);
+    typedef WINTUN_ADAPTER_HANDLE (WINAPI *OpenAdapterFn)(LPCWSTR);
+    typedef void (WINAPI *CloseAdapterFn)(WINTUN_ADAPTER_HANDLE);
+    typedef DWORD (WINAPI *GetRunningDriverVersionFn)(void);
+    typedef WINTUN_SESSION_HANDLE (WINAPI *StartSessionFn)(WINTUN_ADAPTER_HANDLE, DWORD);
+    typedef void (WINAPI *EndSessionFn)(WINTUN_SESSION_HANDLE);
+
+    static std::string ReadEnvUtf8(const char* name);
+    static std::string ToLowerCopy(std::string value);
+    static std::wstring Utf8ToWide(const std::string& value);
+    static bool HasBasicRuntimeConfig(const TunnelLeaseRuntimeConfig& config);
+
+    bool LoadRuntime(std::wstring* error_msg);
+    bool EnsureAdapter(std::wstring* error_msg);
+    bool StartSession(std::wstring* error_msg);
+    bool ConfigureInterface(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg);
+    bool ConfigureAddress(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg);
+    bool ConfigureMtu(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg);
+    bool ConfigureRoutes(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg);
+    void ResetRuntimeState();
+
+    bool active_;
+    HMODULE module_;
+    WINTUN_ADAPTER_HANDLE adapter_;
+    WINTUN_SESSION_HANDLE session_;
+    CreateAdapterFn create_adapter_;
+    OpenAdapterFn open_adapter_;
+    CloseAdapterFn close_adapter_;
+    GetRunningDriverVersionFn get_running_driver_version_;
+    StartSessionFn start_session_;
+    EndSessionFn end_session_;
+};

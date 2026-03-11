@@ -96,6 +96,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <memory>
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
@@ -103,6 +104,8 @@
 // TCP配置客户端和服务器选择模块
 #include "tcp_config_client.h"
 #include "ip_lease_client.h"
+#include "wintun_manager.h"
+#include "packet_tunnel_client.h"
 #include "server_selector_gui.h"
 #include "config_manager.h"
 #include "auto_updater.h"
@@ -4197,10 +4200,58 @@ int main(int argc, char* argv[]) {
     }
     cout << endl;
 
+    TunnelLeaseRuntimeConfig lease_runtime;
+    lease_runtime.game_server_ip = GAME_SERVER_IP;
+    lease_runtime.virtual_ip = granted_lease.virtual_ip;
+    lease_runtime.subnet_mask = granted_lease.subnet_mask;
+    lease_runtime.gateway_ip = granted_lease.gateway_ip;
+    lease_runtime.mtu = granted_lease.mtu;
+    lease_runtime.routes = granted_lease.routes;
+
     if (g_shutdown_requested) {
         Logger::info("[退出] 启动阶段收到退出请求，取消继续启动");
         Logger::close();
         return 0;
+    }
+
+    std::unique_ptr<WintunManager> wintun_manager;
+    std::unique_ptr<PacketTunnelClient> packet_tunnel_client;
+    ClientDataPlaneMode data_plane_mode = WintunManager::ResolveRequestedMode();
+    if (data_plane_mode == ClientDataPlaneMode::ExperimentalWintun) {
+        cout << "[实验模式] 请求启用Wintun数据面..." << endl;
+        Logger::info("[数据面] 检测到实验模式: Wintun");
+
+        wintun_manager.reset(new WintunManager());
+        wstring wintun_error;
+        if (!wintun_manager->Setup(lease_runtime, &wintun_error)) {
+            string wintun_error_utf8 = wstring_to_utf8(wintun_error);
+            Logger::warning("[数据面] Wintun初始化失败，回退到TAP旧链路: " + wintun_error_utf8);
+            cout << "  ⚠ Wintun实验数据面暂不可用，继续使用TAP旧链路" << endl;
+            wintun_manager.reset();
+        } else {
+            Logger::info("[数据面] Wintun运行时已就绪，尝试建立IP Tunnel专用会话");
+            cout << "  ✓ Wintun运行时已就绪" << endl;
+
+            packet_tunnel_client.reset(new PacketTunnelClient(
+                TUNNEL_SERVER_IP,
+                TUNNEL_PORT,
+                g_session_uuid,
+                granted_lease.virtual_ip,
+                granted_lease.mtu));
+
+            wstring packet_tunnel_error;
+            if (!packet_tunnel_client->Start(&packet_tunnel_error)) {
+                string packet_tunnel_error_utf8 = wstring_to_utf8(packet_tunnel_error);
+                Logger::warning("[数据面] IP Tunnel专用会话建立失败，当前仅保留Wintun运行时: " +
+                                packet_tunnel_error_utf8);
+                cout << "  ⚠ IP Tunnel专用会话未建立，当前仍使用TAP旧链路" << endl;
+                packet_tunnel_client.reset();
+            } else {
+                Logger::info("[数据面] IP Tunnel专用会话已建立，当前版本尚未切换收发线程");
+                cout << "  ✓ IP Tunnel专用会话已建立（当前仍使用TAP旧链路）" << endl;
+            }
+        }
+        cout << endl;
     }
 
     // ========== 步骤4: 计算辅助IP ========== 

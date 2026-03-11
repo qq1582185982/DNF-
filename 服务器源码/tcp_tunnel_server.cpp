@@ -235,6 +235,7 @@
 #include <execinfo.h>
 #include <pthread.h>
 #include "tcp_config_server.h"
+#include "packet_tunnel_protocol.h"
 
 using namespace std;
 
@@ -250,6 +251,9 @@ struct ServerConfig {
     int listen_port = 33223;
     string game_server_ip = "192.168.2.110";
     int max_connections = 100;
+    string virtual_subnet = "";
+    string virtual_gateway = "";
+    int lease_seconds = 120;
 };
 
 // 全局配置
@@ -265,6 +269,19 @@ struct GlobalConfig {
     string log_level = "INFO";
     ApiConfig api_config;
 };
+
+static string build_default_virtual_subnet(int tunnel_port) {
+    unsigned int octet2 = (unsigned int)((tunnel_port >> 8) & 0xFF);
+    unsigned int octet3 = (unsigned int)(tunnel_port & 0xFF);
+
+    if (octet2 == 0) {
+        octet2 = 1;
+    }
+
+    stringstream subnet;
+    subnet << "10." << octet2 << "." << octet3 << ".0/24";
+    return subnet.str();
+}
 
 // ==================== 日志工具 ====================
 class Logger {
@@ -1488,6 +1505,8 @@ public:
         running = true;
         Logger::info("[" + server_name + "] 服务器启动成功，监听端口: " + to_string(config.listen_port) + " (IPv4/IPv6双栈)");
         Logger::info("[" + server_name + "] 游戏服务器: " + config.game_server_ip);
+        Logger::info("[" + server_name + "] 虚拟网段: " + config.virtual_subnet +
+                     (config.virtual_gateway.empty() ? "" : " 网关=" + config.virtual_gateway));
 
         accept_loop();
         return true;
@@ -1595,8 +1614,15 @@ private:
                         " (" + string(conn_id_hex) + "), dst_port=" + to_string(dst_port) +
                         ", session_uuid=" + session_uuid);
 
-            // ===== 关键修改：识别UDP tunnel连接 =====
+            // ===== 新数据面: 识别IP Tunnel专用连接 =====
+            const uint32_t PACKET_TUNNEL_MAGIC = packet_tunnel::kHandshakeConnId;
             const uint32_t UDP_MAGIC = 0xFFFFFFFF;
+
+            if (conn_id == PACKET_TUNNEL_MAGIC) {
+                Logger::info("[IP Tunnel|" + session_uuid + "] 已识别为IP Tunnel专用连接: 客户端=" + client_str);
+                handle_packet_tunnel(client_fd, client_str, session_uuid);
+                return;
+            }
 
             Logger::debug("[握手] 判断UDP Tunnel: conn_id=" + to_string(conn_id) +
                         ", UDP_MAGIC=" + to_string(UDP_MAGIC) +
@@ -1728,6 +1754,124 @@ private:
             Logger::error("处理客户端 " + client_str + " 时出错: " + string(e.what()));
             close(client_fd);
         }
+    }
+
+    void handle_packet_tunnel(int client_fd, const string& client_str, const string& session_uuid) {
+        auto recv_all_exact = [](int fd, uint8_t* buffer, size_t length) -> bool {
+            size_t received = 0;
+            while (received < length) {
+                int n = recv(fd, buffer + received, length - received, MSG_WAITALL);
+                if (n <= 0) {
+                    return false;
+                }
+                received += (size_t)n;
+            }
+            return true;
+        };
+
+        auto send_all_exact = [](int fd, const uint8_t* buffer, size_t length) -> bool {
+            size_t sent = 0;
+            while (sent < length) {
+                int n = send(fd, (const char*)buffer + sent, length - sent, 0);
+                if (n <= 0) {
+                    return false;
+                }
+                sent += (size_t)n;
+            }
+            return true;
+        };
+
+        try {
+            uint8_t tail[packet_tunnel::kHandshakeTailSize] = {};
+            if (!recv_all_exact(client_fd, tail, sizeof(tail))) {
+                Logger::error("[IP Tunnel|" + session_uuid + "] 接收握手尾部失败");
+                close(client_fd);
+                return;
+            }
+
+            uint8_t version = tail[0];
+            uint8_t flags = tail[1];
+            uint16_t mtu = ntohs(*(uint16_t*)(tail + 2));
+            uint32_t virtual_ip_be = 0;
+            memcpy(&virtual_ip_be, tail + 4, sizeof(virtual_ip_be));
+
+            char virtual_ip_str[INET_ADDRSTRLEN] = {};
+            in_addr virtual_ip_addr{};
+            virtual_ip_addr.s_addr = virtual_ip_be;
+            inet_ntop(AF_INET, &virtual_ip_addr, virtual_ip_str, sizeof(virtual_ip_str));
+
+            Logger::info("[IP Tunnel|" + session_uuid + "] 握手参数: version=" + to_string((int)version) +
+                         ", mtu=" + to_string(mtu) + ", virtual_ip=" + string(virtual_ip_str) +
+                         ", flags=" + to_string((int)flags));
+
+            uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
+            ack[0] = packet_tunnel::kProtocolVersion;
+            ack[1] = (version == packet_tunnel::kProtocolVersion)
+                ? packet_tunnel::kStatusOk
+                : packet_tunnel::kStatusUnsupportedVersion;
+            *(uint16_t*)(ack + 2) = htons(mtu);
+            memcpy(ack + 4, &virtual_ip_be, sizeof(virtual_ip_be));
+
+            if (!send_all_exact(client_fd, ack, sizeof(ack))) {
+                Logger::error("[IP Tunnel|" + session_uuid + "] 发送握手确认失败");
+                close(client_fd);
+                return;
+            }
+
+            if (ack[1] != packet_tunnel::kStatusOk) {
+                Logger::warning("[IP Tunnel|" + session_uuid + "] 协议版本不支持，连接已拒绝");
+                close(client_fd);
+                return;
+            }
+
+            Logger::info("[IP Tunnel|" + session_uuid + "] 专用会话已建立: 客户端=" + client_str +
+                         ", virtual_ip=" + string(virtual_ip_str));
+
+            while (running) {
+                uint8_t header[packet_tunnel::kFrameHeaderSize] = {};
+                int n = recv(client_fd, header, sizeof(header), MSG_WAITALL);
+                if (n == 0) {
+                    Logger::info("[IP Tunnel|" + session_uuid + "] 客户端已正常断开");
+                    break;
+                }
+                if (n != (int)sizeof(header)) {
+                    Logger::warning("[IP Tunnel|" + session_uuid + "] 读取帧头失败");
+                    break;
+                }
+
+                uint8_t frame_type = header[0];
+                uint16_t payload_len = ntohs(*(uint16_t*)(header + 1));
+
+                vector<uint8_t> payload(payload_len);
+                if (payload_len > 0 && !recv_all_exact(client_fd, payload.data(), payload.size())) {
+                    Logger::warning("[IP Tunnel|" + session_uuid + "] 读取帧负载失败");
+                    break;
+                }
+
+                if (frame_type == packet_tunnel::kFrameHeartbeat && payload_len == 0) {
+                    uint8_t heartbeat_ack[packet_tunnel::kFrameHeaderSize] = {};
+                    heartbeat_ack[0] = packet_tunnel::kFrameHeartbeatAck;
+                    *(uint16_t*)(heartbeat_ack + 1) = htons(0);
+                    if (!send_all_exact(client_fd, heartbeat_ack, sizeof(heartbeat_ack))) {
+                        Logger::warning("[IP Tunnel|" + session_uuid + "] 发送心跳确认失败");
+                        break;
+                    }
+                    continue;
+                }
+
+                if (frame_type == packet_tunnel::kFrameIpv4Packet) {
+                    Logger::debug("[IP Tunnel|" + session_uuid + "] 收到IPv4包占位帧, 长度=" + to_string(payload_len));
+                    continue;
+                }
+
+                Logger::warning("[IP Tunnel|" + session_uuid + "] 未知帧类型: " + to_string((int)frame_type) +
+                                ", len=" + to_string(payload_len));
+            }
+        } catch (exception& e) {
+            Logger::error("[IP Tunnel|" + session_uuid + "] 异常: " + string(e.what()));
+        }
+
+        close(client_fd);
     }
 
     // 处理UDP tunnel连接
@@ -2401,6 +2545,28 @@ GlobalConfig load_config(const string& filename) {
                         if (num > 0) current_server.max_connections = num;
                     }
                 }
+                else if (line.find("\"virtual_subnet\"") != string::npos) {
+                    size_t start = line.find("\"", line.find(":")) + 1;
+                    size_t end = line.find("\"", start);
+                    if (start != string::npos && end != string::npos) {
+                        current_server.virtual_subnet = line.substr(start, end - start);
+                    }
+                }
+                else if (line.find("\"virtual_gateway\"") != string::npos) {
+                    size_t start = line.find("\"", line.find(":")) + 1;
+                    size_t end = line.find("\"", start);
+                    if (start != string::npos && end != string::npos) {
+                        current_server.virtual_gateway = line.substr(start, end - start);
+                    }
+                }
+                else if (line.find("\"lease_seconds\"") != string::npos) {
+                    size_t pos = line.find(":");
+                    if (pos != string::npos) {
+                        string value = line.substr(pos + 1);
+                        int num = extract_number(value);
+                        if (num > 0) current_server.lease_seconds = num;
+                    }
+                }
             }
         }
 
@@ -2457,6 +2623,12 @@ GlobalConfig load_config(const string& filename) {
         Logger::warning("配置文件中未找到服务器配置，使用默认配置");
         ServerConfig default_server;
         global_config.servers.push_back(default_server);
+    }
+
+    for (size_t i = 0; i < global_config.servers.size(); ++i) {
+        if (global_config.servers[i].virtual_subnet.empty()) {
+            global_config.servers[i].virtual_subnet = build_default_virtual_subnet(global_config.servers[i].listen_port);
+        }
     }
 
     return global_config;
@@ -2849,7 +3021,8 @@ int main() {
         const ServerConfig& srv = global_config.servers[i];
         Logger::info("[" + srv.name + "] 端口:" + to_string(srv.listen_port) +
                     " → " + srv.game_server_ip +
-                    " (最大连接:" + to_string(srv.max_connections) + ")");
+                    " (最大连接:" + to_string(srv.max_connections) +
+                    ", 虚拟网段:" + srv.virtual_subnet + ")");
     }
     cout << endl;
 

@@ -197,7 +197,7 @@ string json_escape(const string& input) {
     return escaped;
 }
 
-string build_default_virtual_subnet(int tunnel_port) {
+static string build_default_virtual_subnet(int tunnel_port) {
     unsigned int octet2 = (unsigned int)((tunnel_port >> 8) & 0xFF);
     unsigned int octet3 = (unsigned int)(tunnel_port & 0xFF);
 
