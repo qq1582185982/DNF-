@@ -73,7 +73,8 @@ ServerSelectorGUI::ServerSelectorGUI()
       current_page(0), total_pages(1),
       showing_log(false), is_connected(false),
       dialog_should_close(false), child_running(false), child_stdout_read(NULL), child_stdout_write(NULL),
-      child_job_object(NULL), hBackgroundBitmap(NULL), bg_width(0), bg_height(0) {
+      child_job_object(NULL), child_stop_event(NULL),
+      hBackgroundBitmap(NULL), bg_width(0), bg_height(0) {
     ZeroMemory(&child_process, sizeof(child_process));
 }
 
@@ -775,6 +776,22 @@ bool ServerSelectorGUI::StartChildProcess(const ServerInfo& server) {
         return false;
     }
 
+    char stop_event_name[128];
+    sprintf(stop_event_name, "Local\\DNFProxyStop_%lu_%lu", GetCurrentProcessId(), GetTickCount());
+    child_stop_event = CreateEventA(NULL, TRUE, FALSE, stop_event_name);
+    if (!child_stop_event) {
+        CloseHandle(child_stdout_read);
+        CloseHandle(child_stdout_write);
+        child_stdout_read = NULL;
+        child_stdout_write = NULL;
+        if (child_job_object) {
+            CloseHandle(child_job_object);
+            child_job_object = NULL;
+        }
+        return false;
+    }
+    child_stop_event_name = stop_event_name;
+
     // 确保读取句柄不被继承
     SetHandleInformation(child_stdout_read, HANDLE_FLAG_INHERIT, 0);
 
@@ -796,12 +813,13 @@ bool ServerSelectorGUI::StartChildProcess(const ServerInfo& server) {
     // 构建命令行
     // 格式: "程序路径" --worker <server_id> <game_server_ip> <tunnel_server_ip> <tunnel_port>
     char cmdline[2048];
-    sprintf(cmdline, "\"%s\" --worker %d %s %s %d",
+    sprintf(cmdline, "\"%s\" --worker %d %s %s %d --stop-event %s",
             exe_path,
             server.id,
             server.game_server_ip.c_str(),
             server.tunnel_server_ip.c_str(),
-            server.tunnel_port);
+            server.tunnel_port,
+            child_stop_event_name.c_str());
 
     // 添加调试日志
     AppendLog(L"启动命令: ");
@@ -836,6 +854,9 @@ bool ServerSelectorGUI::StartChildProcess(const ServerInfo& server) {
         CloseHandle(child_stdout_write);
         child_stdout_read = NULL;
         child_stdout_write = NULL;
+        CloseHandle(child_stop_event);
+        child_stop_event = NULL;
+        child_stop_event_name.clear();
         if (child_job_object) {
             CloseHandle(child_job_object);
             child_job_object = NULL;
@@ -868,22 +889,31 @@ void ServerSelectorGUI::StopChildProcess() {
         return;
     }
 
-    child_running = false;
-
-    // 方法1：关闭Job对象（这会自动终止所有关联的进程）
-    if (child_job_object) {
-        CloseHandle(child_job_object);
-        child_job_object = NULL;
-        // 等待一下让进程终止
-        Sleep(500);
+    // 方法1：优雅停止，通知worker自行退出并释放租约
+    if (child_stop_event) {
+        AppendLog(L"发送停止信号，等待隧道进程退出...\r\n");
+        SetEvent(child_stop_event);
     }
 
-    // 方法2：如果Job对象失败，使用TerminateProcess
+    DWORD wait_result = WAIT_TIMEOUT;
     if (child_process.hProcess) {
-        // 检查进程是否还在运行
-        DWORD exit_code;
+        wait_result = WaitForSingleObject(child_process.hProcess, 5000);
+    }
+
+    // 方法2：优雅退出超时，回退到Job对象强制结束
+    if (wait_result == WAIT_TIMEOUT && child_job_object) {
+        AppendLog(L"隧道进程未在超时内退出，回退到强制终止...\r\n");
+        CloseHandle(child_job_object);
+        child_job_object = NULL;
+        if (child_process.hProcess) {
+            wait_result = WaitForSingleObject(child_process.hProcess, 2000);
+        }
+    }
+
+    // 方法3：如果还活着，最终使用TerminateProcess
+    if (child_process.hProcess) {
+        DWORD exit_code = 0;
         if (GetExitCodeProcess(child_process.hProcess, &exit_code) && exit_code == STILL_ACTIVE) {
-            // 进程还在运行，终止它
             TerminateProcess(child_process.hProcess, 0);
             WaitForSingleObject(child_process.hProcess, 2000);
         }
@@ -893,11 +923,24 @@ void ServerSelectorGUI::StopChildProcess() {
         ZeroMemory(&child_process, sizeof(child_process));
     }
 
+    if (child_job_object) {
+        CloseHandle(child_job_object);
+        child_job_object = NULL;
+    }
+
+    if (child_stop_event) {
+        CloseHandle(child_stop_event);
+        child_stop_event = NULL;
+    }
+    child_stop_event_name.clear();
+
     // 关闭管道
     if (child_stdout_read) {
         CloseHandle(child_stdout_read);
         child_stdout_read = NULL;
     }
+
+    child_running = false;
 }
 
 // 读取子进程输出

@@ -67,6 +67,8 @@ private:
     HANDLE child_stdout_read;  // 子进程stdout读取句柄
     HANDLE child_stdout_write;  // 子进程stdout写入句柄
     HANDLE child_job_object;  // Job对象，用于管理进程树
+    HANDLE child_stop_event;  // 优雅停止子进程事件
+    std::string child_stop_event_name;  // 命名停止事件
     bool child_running;  // 子进程是否在运行
 
     // 背景图片

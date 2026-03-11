@@ -102,6 +102,7 @@
 
 // TCP配置客户端和服务器选择模块
 #include "tcp_config_client.h"
+#include "ip_lease_client.h"
 #include "server_selector_gui.h"
 #include "config_manager.h"
 #include "auto_updater.h"
@@ -135,6 +136,16 @@
 #include "tap_adapter.h"
 
 using namespace std;
+
+class TCPProxyClient;
+class LeaseSessionGuard;
+
+static TCPProxyClient* g_active_client = nullptr;
+static LeaseSessionGuard* g_active_lease_session = nullptr;
+static atomic<bool> g_shutdown_requested(false);
+static atomic<bool> g_shutdown_completed(false);
+BOOL WINAPI ClientConsoleCtrlHandler(DWORD ctrl_type);
+void RequestGracefulShutdown(const string& reason);
 
 // ==================== 虚拟网卡自动配置 ====================
 // 用于解决跨子网UDP源IP验证问题
@@ -938,6 +949,30 @@ static bool send_all_socket(SOCKET sock, const vector<uint8_t>& data, int& last_
 // 全局会话UUID，用于在服务器日志中唯一标识此客户端
 string g_session_uuid;
 
+string wstring_to_utf8(const wstring& wstr) {
+    if (wstr.empty()) {
+        return string();
+    }
+
+    int len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, NULL, 0, NULL, NULL);
+    if (len <= 1) {
+        return string();
+    }
+
+    string result(len - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &result[0], len, NULL, NULL);
+    return result;
+}
+
+string get_local_client_id() {
+    char computer_name[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+    DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
+    if (GetComputerNameA(computer_name, &size) && size > 0) {
+        return string(computer_name, size);
+    }
+    return "unknown-client";
+}
+
 // 生成简单的UUID (格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
 string generate_session_uuid() {
     // 使用时间戳和随机数生成UUID
@@ -958,6 +993,152 @@ string generate_session_uuid() {
 
     return string(uuid);
 }
+
+class LeaseSessionGuard {
+public:
+    LeaseSessionGuard()
+        : api_port_(0), active_(false) {}
+
+    ~LeaseSessionGuard() {
+        Release();
+    }
+
+    bool Acquire(const string& api_url,
+                 int api_port,
+                 const string& server_key,
+                 const string& session_uuid,
+                 const string& client_id,
+                 wstring& error_msg) {
+        IPLeaseClient client;
+        ip_tunnel::LeaseRequest request;
+        request.server_key = server_key;
+        request.session_uuid = session_uuid;
+        request.client_id = client_id;
+
+        ip_tunnel::LeaseGrant lease;
+        if (!client.RequestLease(api_url, api_port, request, &lease, &error_msg)) {
+            return false;
+        }
+
+        {
+            lock_guard<mutex> lock(lock_);
+            api_url_ = api_url;
+            api_port_ = api_port;
+            server_key_ = server_key;
+            session_uuid_ = session_uuid;
+            client_id_ = client_id;
+            lease_ = lease;
+        }
+
+        active_ = true;
+        renew_thread_ = thread(&LeaseSessionGuard::RenewLoop, this);
+
+        Logger::info("[租约] 已申请虚拟IP: " + lease.virtual_ip +
+                     " 网关=" + lease.gateway_ip +
+                     " 租期=" + to_string(lease.lease_seconds) + "秒");
+        return true;
+    }
+
+    void Release() {
+        bool was_active = active_.exchange(false);
+
+        if (renew_thread_.joinable()) {
+            renew_thread_.join();
+        }
+
+        if (!was_active) {
+            return;
+        }
+
+        string api_url;
+        int api_port = 0;
+        string server_key;
+        string session_uuid;
+        string virtual_ip;
+
+        {
+            lock_guard<mutex> lock(lock_);
+            api_url = api_url_;
+            api_port = api_port_;
+            server_key = server_key_;
+            session_uuid = session_uuid_;
+            virtual_ip = lease_.virtual_ip;
+        }
+
+        IPLeaseClient client;
+        wstring error_msg;
+        if (client.ReleaseLease(api_url, api_port, server_key, session_uuid, &error_msg)) {
+            Logger::info("[租约] 已释放虚拟IP租约: " + virtual_ip);
+        } else {
+            Logger::warning("[租约] 释放失败: " + wstring_to_utf8(error_msg));
+        }
+    }
+
+    ip_tunnel::LeaseGrant GetLease() const {
+        lock_guard<mutex> lock(lock_);
+        return lease_;
+    }
+
+private:
+    void RenewLoop() {
+        DWORD wait_ms = 30000;
+
+        while (active_) {
+            {
+                lock_guard<mutex> lock(lock_);
+                wait_ms = std::max<DWORD>(10000, lease_.lease_seconds * 500);
+            }
+
+            DWORD remaining = wait_ms;
+            while (active_ && remaining > 0) {
+                DWORD slice = std::min<DWORD>(remaining, 1000);
+                Sleep(slice);
+                remaining -= slice;
+            }
+
+            if (!active_) {
+                break;
+            }
+
+            string api_url;
+            int api_port = 0;
+            string server_key;
+            string session_uuid;
+
+            {
+                lock_guard<mutex> lock(lock_);
+                api_url = api_url_;
+                api_port = api_port_;
+                server_key = server_key_;
+                session_uuid = session_uuid_;
+            }
+
+            IPLeaseClient client;
+            ip_tunnel::LeaseGrant renewed;
+            wstring error_msg;
+            if (client.RenewLease(api_url, api_port, server_key, session_uuid, &renewed, &error_msg)) {
+                {
+                    lock_guard<mutex> lock(lock_);
+                    lease_ = renewed;
+                }
+                Logger::debug("[租约] 续租成功: " + renewed.virtual_ip +
+                              " 租期=" + to_string(renewed.lease_seconds) + "秒");
+            } else {
+                Logger::warning("[租约] 续租失败: " + wstring_to_utf8(error_msg));
+            }
+        }
+    }
+
+    mutable mutex lock_;
+    string api_url_;
+    int api_port_;
+    string server_key_;
+    string session_uuid_;
+    string client_id_;
+    ip_tunnel::LeaseGrant lease_;
+    atomic<bool> active_;
+    thread renew_thread_;
+};
 
 // ==================== 启动握手测试 ====================
 // 在程序启动时主动连接隧道服务器进行握手测试
@@ -2912,7 +3093,9 @@ public:
     }
 
     void stop() {
-        running = false;
+        if (!running.exchange(false)) {
+            return;
+        }
 
         // 清理TCP连接
         {
@@ -2987,6 +3170,10 @@ private:
                 DWORD err = GetLastError();
                 if (err == ERROR_NO_DATA) {
                     continue;
+                }
+                if (!running || err == ERROR_OPERATION_ABORTED) {
+                    Logger::info("WinDivert接收已结束，正在退出");
+                    break;
                 }
                 Logger::error("接收包失败: " + to_string(err) +
                             " (最后成功:" + to_string(now - last_packet_time) + "ms前)");
@@ -3705,9 +3892,43 @@ private:
     }
 };
 
+void RequestGracefulShutdown(const string& reason) {
+    bool expected = false;
+    if (!g_shutdown_requested.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
+    Logger::info("[退出] " + reason);
+
+    if (g_active_client != nullptr) {
+        g_active_client->stop();
+    }
+    if (g_active_lease_session != nullptr) {
+        g_active_lease_session->Release();
+    }
+
+    g_shutdown_completed = true;
+}
+
+BOOL WINAPI ClientConsoleCtrlHandler(DWORD ctrl_type) {
+    switch (ctrl_type) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+        RequestGracefulShutdown("收到控制台退出信号，正在停止客户端");
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
 // ==================== 主函数 ====================
 int main(int argc, char* argv[]) {
     SetConsoleOutputCP(CP_UTF8);
+    g_shutdown_requested = false;
+    g_shutdown_completed = false;
 
     // 检查是否以worker模式启动（作为子进程）
     bool worker_mode = false;
@@ -3715,6 +3936,7 @@ int main(int argc, char* argv[]) {
     string worker_game_ip;
     string worker_tunnel_ip;
     int worker_tunnel_port = 0;
+    string worker_stop_event_name;
 
     if (argc >= 6 && strcmp(argv[1], "--worker") == 0) {
         worker_mode = true;
@@ -3722,6 +3944,13 @@ int main(int argc, char* argv[]) {
         worker_game_ip = argv[3];
         worker_tunnel_ip = argv[4];
         worker_tunnel_port = atoi(argv[5]);
+
+        for (int i = 6; i < argc; ++i) {
+            if (strcmp(argv[i], "--stop-event") == 0 && i + 1 < argc) {
+                worker_stop_event_name = argv[i + 1];
+                ++i;
+            }
+        }
     }
 
     // 隐藏控制台窗口
@@ -3746,6 +3975,21 @@ int main(int argc, char* argv[]) {
     // 生成会话UUID
     g_session_uuid = generate_session_uuid();
     Logger::info("[会话] 生成会话UUID: " + g_session_uuid);
+
+    if (worker_mode && !worker_stop_event_name.empty()) {
+        HANDLE stop_event = OpenEventA(SYNCHRONIZE, FALSE, worker_stop_event_name.c_str());
+        if (stop_event != NULL) {
+            Logger::info("[退出] 已连接停止事件: " + worker_stop_event_name);
+            std::thread([stop_event]() {
+                WaitForSingleObject(stop_event, INFINITE);
+                CloseHandle(stop_event);
+                RequestGracefulShutdown("收到GUI停止信号，准备优雅退出");
+            }).detach();
+        } else {
+            Logger::warning("[退出] 无法打开停止事件: " + worker_stop_event_name +
+                            " (错误=" + to_string(GetLastError()) + ")");
+        }
+    }
 
     // 检查管理员权限
     BOOL is_admin = FALSE;
@@ -3881,6 +4125,7 @@ int main(int argc, char* argv[]) {
     string GAME_SERVER_IP;
     string TUNNEL_SERVER_IP;
     int TUNNEL_PORT;
+    int SELECTED_SERVER_ID = 0;
 
     if (worker_mode) {
         // Worker模式：使用命令行参数
@@ -3893,6 +4138,7 @@ int main(int argc, char* argv[]) {
         GAME_SERVER_IP = worker_game_ip;
         TUNNEL_SERVER_IP = worker_tunnel_ip;
         TUNNEL_PORT = worker_tunnel_port;
+        SELECTED_SERVER_ID = worker_server_id;
     } else {
         // GUI模式：显示服务器选择窗口，GUI将永远运行直到用户关闭
         cout << "[步骤3/6] 启动GUI..." << endl;
@@ -3920,7 +4166,44 @@ int main(int argc, char* argv[]) {
     // ========== Worker模式继续执行 ==========
     // 注意：以下代码只在Worker模式下执行
 
-    // ========== 步骤4: 计算辅助IP ==========
+    LeaseSessionGuard lease_session;
+    wstring lease_error_msg;
+    string lease_server_key = to_string(SELECTED_SERVER_ID);
+    string lease_client_id = get_local_client_id();
+
+    cout << "[租约] 申请虚拟IP租约..." << endl;
+    if (!lease_session.Acquire(CONFIG_API_URL, CONFIG_API_PORT,
+                               lease_server_key, g_session_uuid, lease_client_id,
+                               lease_error_msg)) {
+        string lease_error = wstring_to_utf8(lease_error_msg);
+        if (lease_error.empty()) {
+            lease_error = "未知错误";
+        }
+
+        cout << "错误: 虚拟IP租约申请失败" << endl;
+        cout << "  原因: " << lease_error << endl;
+        Logger::error("[租约] 申请失败: " + lease_error);
+        Logger::close();
+        MessageBoxW(NULL, (L"虚拟IP租约申请失败\n\n原因: " + lease_error_msg).c_str(), L"网络错误", MB_OK | MB_ICONERROR);
+        return 1;
+    }
+
+    ip_tunnel::LeaseGrant granted_lease = lease_session.GetLease();
+    cout << "✓ 租约申请成功" << endl;
+    cout << "  虚拟IP: " << granted_lease.virtual_ip << endl;
+    cout << "  网关: " << granted_lease.gateway_ip << endl;
+    if (!granted_lease.routes.empty()) {
+        cout << "  路由: " << granted_lease.routes[0].cidr << endl;
+    }
+    cout << endl;
+
+    if (g_shutdown_requested) {
+        Logger::info("[退出] 启动阶段收到退出请求，取消继续启动");
+        Logger::close();
+        return 0;
+    }
+
+    // ========== 步骤4: 计算辅助IP ========== 
     cout << "[步骤4/6] 计算虚拟网卡IP分配方案..." << endl;
     string SECONDARY_IP = calculate_secondary_ip(GAME_SERVER_IP);
     if (SECONDARY_IP.empty()) {
@@ -3952,6 +4235,12 @@ int main(int argc, char* argv[]) {
     g_loopback_adapter_ifidx = tap.get_ifidx();
     Logger::info("✓ TAP虚拟网卡配置完成，IfIdx=" + to_string(g_loopback_adapter_ifidx));
 
+    if (g_shutdown_requested) {
+        Logger::info("[退出] TAP配置后收到退出请求，取消继续启动");
+        Logger::close();
+        return 0;
+    }
+
     // ========== 步骤6: 部署WinDivert ==========
     cout << "[步骤6/6] 部署WinDivert组件..." << endl;
     string dll_path, sys_path;
@@ -3975,14 +4264,25 @@ int main(int argc, char* argv[]) {
     Logger::debug("✓ WinDivert 组件加载成功");
     cout << endl;
 
+    if (g_shutdown_requested) {
+        Logger::info("[退出] 组件部署后收到退出请求，取消继续启动");
+        Logger::close();
+        return 0;
+    }
+
     cout << "============================================================" << endl;
     cout << "所有组件准备完毕，启动代理客户端..." << endl;
     cout << "============================================================" << endl;
     cout << endl;
 
     TCPProxyClient client(GAME_SERVER_IP, TUNNEL_SERVER_IP, TUNNEL_PORT, SECONDARY_IP);
+    g_active_client = &client;
+    g_active_lease_session = &lease_session;
+    SetConsoleCtrlHandler(ClientConsoleCtrlHandler, TRUE);
 
     if (!client.start()) {
+        g_active_client = nullptr;
+        g_active_lease_session = nullptr;
         Logger::error("客户端启动失败");
         Logger::close();
         MessageBoxW(NULL, L"客户端启动失败", L"启动错误", MB_OK | MB_ICONERROR);
@@ -4012,6 +4312,17 @@ int main(int argc, char* argv[]) {
     cout << "按Ctrl+C退出..." << endl;
     client.wait();
 
+    if (g_shutdown_requested) {
+        for (int i = 0; i < 60 && !g_shutdown_completed; ++i) {
+            Sleep(100);
+        }
+    }
+
+    SetConsoleCtrlHandler(ClientConsoleCtrlHandler, FALSE);
+    g_active_client = nullptr;
+    g_active_lease_session = nullptr;
+    g_shutdown_requested = false;
+    g_shutdown_completed = false;
     Logger::close();
     return 0;
 }
