@@ -227,7 +227,7 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
         printf("  name: %s (长度: %zu)\n", name_str.c_str(), name_str.length());
 
         string game_ip_str = extract_json_string(obj, "game_server_ip");
-        printf("  game_ip: %s (长度: %zu)\n", game_ip_str.c_str(), game_ip_str.length());
+        printf("  server_target_ip: %s (长度: %zu)\n", game_ip_str.c_str(), game_ip_str.length());
 
         string tunnel_ip_str = extract_json_string(obj, "tunnel_server_ip");
         if (tunnel_ip_str.empty()) {
@@ -298,7 +298,7 @@ string generate_server_list_json() {
             json << "{"
                  << "\"id\":" << s.id << ","
                  << "\"name\":\"" << s.name << "\","
-                 << "\"game_server_ip\":\"" << s.game_server_ip << "\","
+                 << "\"server_virtual_ip\":\"" << s.game_server_ip << "\","
                  << "\"tunnel_server_ip\":\"" << s.tunnel_server_ip << "\","
                  << "\"tunnel_port\":" << s.tunnel_port << ","
                  << "\"download_url\":\"" << s.download_url << "\""
@@ -503,7 +503,7 @@ bool reload_http_api_config() {
         printf("------------------------------------\n");
         for (const auto& s : g_servers) {
             printf("  [%d] %s\n", s.id, s.name.c_str());
-            printf("      游戏服务器: %s\n", s.game_server_ip.c_str());
+            printf("      服务端虚拟IP: %s\n", s.game_server_ip.c_str());
             printf("      隧道端口: %d\n", s.tunnel_port);
         }
         printf("------------------------------------\n\n");

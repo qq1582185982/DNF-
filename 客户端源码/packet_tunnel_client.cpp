@@ -15,6 +15,7 @@ namespace {
 
 const DWORD kHeartbeatIntervalMs = 15000;
 const DWORD kWintunReadWaitMs = 500;
+const int kSocketBufferBytes = 256 * 1024;
 
 std::wstring BuildSocketError(const wchar_t* prefix, int error_code) {
     std::wstringstream stream;
@@ -119,6 +120,8 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
         int keepalive = 1;
         setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&keepalive, sizeof(keepalive));
+        setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&kSocketBufferBytes, sizeof(kSocketBufferBytes));
+        setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&kSocketBufferBytes, sizeof(kSocketBufferBytes));
 
         tcp_keepalive ka_settings = {};
         ka_settings.onoff = 1;
@@ -263,6 +266,14 @@ void PacketTunnelClient::WintunReadLoop() {
         uint8_t version = (packet[0] >> 4) & 0x0F;
         if (version != 4) {
             continue;
+        }
+
+        if (packet.size() >= 20) {
+            const uint8_t dst_octet0 = packet[16];
+            if ((dst_octet0 >= 224 && dst_octet0 <= 239) ||
+                (packet[16] == 255 && packet[17] == 255 && packet[18] == 255 && packet[19] == 255)) {
+                continue;
+            }
         }
 
         if (!SendFrame(packet_tunnel::kFrameIpv4Packet, packet.data(), packet.size(), NULL)) {

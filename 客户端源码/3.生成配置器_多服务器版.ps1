@@ -88,7 +88,7 @@ if (Test-Path "DNFConfigInjector_MultiServer.exe") {
     Write-Host ""
 
     Write-Host "Config format embedded in exe:" -ForegroundColor Yellow
-    Write-Host '  {"config_api_url":"config.server.com","config_api_port":8080}' -ForegroundColor DarkGray
+    Write-Host '  {"config_api_url":"config.server.com","config_api_port":8080,"data_plane_mode":"wintun"}' -ForegroundColor DarkGray
     Write-Host ""
 
 } else {

@@ -233,14 +233,14 @@ ClientDataPlaneMode WintunManager::ResolveRequestedMode(const std::string& prefe
         return ClientDataPlaneMode::ExperimentalWintun;
     }
     if (config_value == "tap" || config_value == "legacy" || config_value == "legacytap") {
-        return ClientDataPlaneMode::LegacyTap;
+        return ClientDataPlaneMode::ExperimentalWintun;
     }
 
     const std::string env_value = ToLowerCopy(ReadEnvUtf8("DNF_PROXY_DATA_PLANE"));
     if (env_value == "wintun") {
         return ClientDataPlaneMode::ExperimentalWintun;
     }
-    return ClientDataPlaneMode::LegacyTap;
+    return ClientDataPlaneMode::ExperimentalWintun;
 }
 
 bool WintunManager::IsExperimentalModeEnabled() {

@@ -17,7 +17,6 @@
 struct ServerInfo {
     int id;
     std::wstring name;
-    std::string game_server_ip;
     std::string server_virtual_ip;
     std::string tunnel_server_ip;
     int tunnel_port;

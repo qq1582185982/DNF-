@@ -552,7 +552,7 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
         if (game_ip_str.empty()) {
             game_ip_str = server_virtual_ip_str;
         }
-        printf("  game_ip: %s (长度: %zu)\n", game_ip_str.c_str(), game_ip_str.length());
+        printf("  server_target_ip: %s (长度: %zu)\n", game_ip_str.c_str(), game_ip_str.length());
 
         int lease_seconds = extract_json_int(obj, "lease_seconds");
         if (lease_seconds <= 0) {
@@ -627,7 +627,6 @@ string generate_server_list_json() {
             json << "{"
                  << "\"id\":" << s.id << ","
                  << "\"name\":\"" << json_escape(s.name) << "\","
-                 << "\"game_server_ip\":\"" << json_escape(s.game_server_ip) << "\","
                  << "\"server_virtual_ip\":\"" << json_escape(s.server_virtual_ip) << "\","
                  << "\"tunnel_server_ip\":\"" << json_escape(s.tunnel_server_ip) << "\","
                  << "\"tunnel_port\":" << s.tunnel_port << ","
@@ -676,13 +675,11 @@ void handle_tcp_request(int client_fd) {
     }
     // 处理 GET_VERSION 请求
     else if (request == "GET_VERSION") {
+        string json_response = generate_version_json();
+        send(client_fd, json_response.c_str(), json_response.length(), 0);
         if (g_latest_md5.empty() || g_download_url.empty()) {
-            const char* error_msg = "{\"error\":\"Version not configured\"}";
-            send(client_fd, error_msg, strlen(error_msg), 0);
-            printf("[TCP] 版本配置未设置\n");
+            printf("[TCP] 版本配置未设置，已发送空版本信息 (%zu 字节)\n", json_response.length());
         } else {
-            string json_response = generate_version_json();
-            send(client_fd, json_response.c_str(), json_response.length(), 0);
             printf("[TCP] 已发送版本信息 (%zu 字节): MD5=%s\n",
                    json_response.length(), g_latest_md5.c_str());
         }
@@ -928,7 +925,7 @@ bool reload_tcp_config() {
         printf("------------------------------------\n");
         for (const auto& s : g_servers) {
             printf("  [%d] %s\n", s.id, s.name.c_str());
-            printf("      游戏服务器: %s\n", s.game_server_ip.c_str());
+            printf("      服务端虚拟IP: %s\n", s.server_virtual_ip.c_str());
             printf("      隧道端口: %d\n", s.tunnel_port);
         }
         printf("------------------------------------\n\n");

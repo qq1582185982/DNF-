@@ -94,7 +94,7 @@ Write-Host " ✓ Complete compilation successful!" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Generated files:" -ForegroundColor Cyan
-Write-Host "  1. DNF_Proxy_Client_MultiServer_v12.4.0.exe - Multi-server client (with embedded WinDivert)" -ForegroundColor White
+Write-Host "  1. DNF_Proxy_Client_MultiServer_v12.4.0.exe - Multi-server client (Wintun + IP Tunnel)" -ForegroundColor White
 Write-Host "  2. embedded_client_multiserver.h            - Client binary encoding" -ForegroundColor White
 Write-Host "  3. DNFConfigInjector_MultiServer.exe        - Config injector for multi-server" -ForegroundColor White
 Write-Host ""
@@ -102,7 +102,7 @@ Write-Host "New features in v12.4.0:" -ForegroundColor Cyan
 Write-Host "  ✓ HTTP API integration - Fetch server list dynamically" -ForegroundColor Green
 Write-Host "  ✓ GUI server selector - Windows-style dialog with server list" -ForegroundColor Green
 Write-Host "  ✓ Remember last choice - Saved to %APPDATA%\DNFProxy\" -ForegroundColor Green
-Write-Host "  ✓ WinDivert embedded - Single-file distribution" -ForegroundColor Green
+Write-Host "  ✓ Wintun + IP Tunnel virtual LAN path" -ForegroundColor Green
 Write-Host ""
 Write-Host "Config format for multi-server version:" -ForegroundColor Cyan
 Write-Host '  {"config_api_url":"config.server.com","config_api_port":8080,"version_name":"龙鸣86"}' -ForegroundColor DarkGray

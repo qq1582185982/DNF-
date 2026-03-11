@@ -811,12 +811,12 @@ bool ServerSelectorGUI::StartChildProcess(const ServerInfo& server) {
     GetModuleFileNameA(NULL, exe_path, MAX_PATH);
 
     // 构建命令行
-    // 格式: "程序路径" --worker <server_id> <game_server_ip> <tunnel_server_ip> <tunnel_port>
+    // 格式: "程序路径" --worker <server_id> <server_virtual_ip> <tunnel_server_ip> <tunnel_port>
     char cmdline[2048];
     sprintf(cmdline, "\"%s\" --worker %d %s %s %d --stop-event %s",
             exe_path,
             server.id,
-            server.game_server_ip.c_str(),
+            server.server_virtual_ip.c_str(),
             server.tunnel_server_ip.c_str(),
             server.tunnel_port,
             child_stop_event_name.c_str());

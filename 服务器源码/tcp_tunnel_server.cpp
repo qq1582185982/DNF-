@@ -1819,10 +1819,10 @@ public:
                 packet_tunnel_tun_loop();
             });
         } else {
-            Logger::warning("[" + server_name + "] IP Tunnel TUN init failed, fallback to legacy path: " + tun_error);
+            Logger::warning("[" + server_name + "] IP Tunnel TUN init failed: " + tun_error);
         }
         Logger::info("[" + server_name + "] 服务器启动成功，监听端口: " + to_string(config.listen_port) + " (IPv4/IPv6双栈)");
-        Logger::info("[" + server_name + "] 游戏服务器: " + config.game_server_ip);
+        Logger::info("[" + server_name + "] 服务端虚拟IP: " + config.server_virtual_ip);
         Logger::info("[" + server_name + "] 虚拟网段: " + tun_config.subnet_cidr +
                      (tun_config.gateway_ip.empty() ? "" : " 网关=" + tun_config.gateway_ip) +
                      (tun_config.server_virtual_ip.empty() ? "" : " 服务端虚拟IP=" + tun_config.server_virtual_ip));
@@ -1955,139 +1955,18 @@ private:
 
             // ===== 新数据面: 识别IP Tunnel专用连接 =====
             const uint32_t PACKET_TUNNEL_MAGIC = packet_tunnel::kHandshakeConnId;
-            const uint32_t UDP_MAGIC = 0xFFFFFFFF;
-
             if (conn_id == PACKET_TUNNEL_MAGIC) {
                 Logger::info("[IP Tunnel|" + session_uuid + "] 已识别为IP Tunnel专用连接: 客户端=" + client_str);
                 handle_packet_tunnel(client_fd, client_str, session_uuid);
                 return;
             }
 
-            Logger::debug("[握手] 判断UDP Tunnel: conn_id=" + to_string(conn_id) +
-                        ", UDP_MAGIC=" + to_string(UDP_MAGIC) +
-                        ", 相等?" + (conn_id == UDP_MAGIC ? "YES" : "NO"));
-
-            if (conn_id == UDP_MAGIC) {
-                Logger::info("[UDP Tunnel|" + session_uuid + "] ✓ 识别为UDP Tunnel连接!");
-                Logger::info("[UDP Tunnel|" + session_uuid + "] 收到UDP握手请求(第一部分): 客户端=" + client_str +
-                           ", 游戏端口=" + to_string(dst_port));
-
-                // ===== 新协议: 接收客户端IPv4地址(4字节) =====
-                uint8_t ipv4_bytes[4];
-                int ip_received = recv(client_fd, ipv4_bytes, 4, MSG_WAITALL);
-                if (ip_received != 4) {
-                    Logger::error("[UDP Tunnel|" + session_uuid + "] 握手失败: 未接收到客户端IPv4地址 (received=" +
-                                to_string(ip_received) + ")");
-                    close(client_fd);
-                    return;
-                }
-
-                // 将IPv4字节转换为字符串
-                char ipv4_str[INET_ADDRSTRLEN];
-                struct in_addr ipv4_addr;
-                memcpy(&ipv4_addr, ipv4_bytes, 4);
-                inet_ntop(AF_INET, &ipv4_addr, ipv4_str, INET_ADDRSTRLEN);
-                client_ipv4 = string(ipv4_str);  // v4.5.0: 赋值给外层变量,不重新声明
-
-                Logger::info("[UDP Tunnel|" + session_uuid + "] 收到客户端IPv4地址(payload中): " + client_ipv4);
-
-                // v5.0: 存储TCP源IP到客户端真实IPv4的映射
-                string tcp_source_ip = extract_tcp_source_ip(client_str);
-                if (!tcp_source_ip.empty() && !client_ipv4.empty()) {
-                    lock_guard<mutex> lock(ip_map_mutex);
-                    client_ip_map[tcp_source_ip] = client_ipv4;
-                    Logger::info("[UDP Tunnel|" + session_uuid + "] v5.0存储IP映射: TCP源IP=" + tcp_source_ip +
-                               " -> 客户端真实IPv4=" + client_ipv4);
-                }
-
-                // 发送UDP握手确认响应(与TCP握手相同的6字节格式)
-                uint8_t ack[6];
-                *(uint32_t*)ack = htonl(0xFFFFFFFF);  // conn_id=0xFFFFFFFF表示握手确认
-                *(uint16_t*)(ack + 4) = htons(dst_port);  // 回传端口
-
-                if (send(client_fd, ack, 6, 0) != 6) {
-                    Logger::error("[UDP Tunnel|" + session_uuid + "] 发送握手确认失败");
-                    close(client_fd);
-                    return;
-                }
-
-                Logger::info("[UDP Tunnel|" + session_uuid + "] 握手成功,已发送确认");
-                Logger::info("[UDP Tunnel|" + session_uuid + "] 调用 handle_udp_tunnel()");
-                // v4.5.0: 传递TCP真实IP(client_str)和payload中的IP(client_ipv4)
-                handle_udp_tunnel(client_fd, client_str, client_ipv4, dst_port, session_uuid);
-                Logger::info("[UDP Tunnel|" + session_uuid + "] handle_udp_tunnel()函数已返回");
-                return;
-            }
-
-            Logger::debug("[握手] ✗ 不是UDP Tunnel,按普通TCP连接处理");
-            Logger::info("[连接" + to_string(conn_id) + "|" + session_uuid + "] 握手成功: 目标端口=" +
-                        to_string(dst_port) + ", 客户端=" + client_str);
-
-            // v5.0: 从映射中查询客户端真实IPv4
-            string tcp_source_ip = extract_tcp_source_ip(client_str);
-            string client_real_ipv4 = "";
-            {
-                lock_guard<mutex> lock(ip_map_mutex);
-                auto it = client_ip_map.find(tcp_source_ip);
-                if (it != client_ip_map.end()) {
-                    client_real_ipv4 = it->second;
-                }
-            }
-
-            // v5.0: 计算代理服务器本地IP(用于连接游戏服务器的本地IP)
-            string proxy_local_ip = get_local_ip(config.game_server_ip);
-
-            Logger::debug("[连接" + to_string(conn_id) + "|" + session_uuid + "] v5.0 IP替换准备: TCP源IP=" + tcp_source_ip +
-                        ", 客户端真实IPv4=" + client_real_ipv4 + ", 代理IP=" + proxy_local_ip);
-
-            // 创建连接对象 - 使用智能指针
-            // v5.0: 传递IP参数以支持TCP payload IP替换
-            // client_real_ipv4可能为空（TCP连接在UDP tunnel之前建立）
-            // 传递tcp_source_ip和映射指针，支持动态查询
-            auto conn = make_shared<TunnelConnection>(
-                conn_id, client_fd, config.game_server_ip, dst_port,
-                client_real_ipv4,  // client_real_ip (可能为空)
-                proxy_local_ip,    // proxy_ip
-                tcp_source_ip,     // tcp_source_ip (用于动态查询)
-                &client_ip_map,    // IP映射指针
-                &ip_map_mutex,     // 映射互斥锁指针
-                session_uuid       // 会话UUID
-            );
-
-            string conn_key = client_str + ":" + to_string(conn_id);
-            {
-                lock_guard<mutex> lock(conn_mutex);
-                connections[conn_key] = conn;
-            }
-
-            // 启动连接（启动双向转发线程）
-            if (!conn->start()) {
-                lock_guard<mutex> lock(conn_mutex);
-                connections.erase(conn_key);
-                // 智能指针自动释放，无需delete
-                return;
-            }
-
-            // v12.3.15修复: 移除300秒硬超时，改用无限期等待 + TCP keepalive/心跳机制检测真正断线
-            // 原bug: 无论玩家是否活跃，300秒后强制关闭，导致正常游戏被断开连接
-            // 新策略:
-            //   1. 不设硬性时间限制，依靠协议自然结束
-            //   2. TCP keepalive会自动检测网络断开
-            //   3. 游戏/客户端主动关闭会触发FIN，自然结束连接
-            //   4. 僵尸连接由操作系统TCP层的keepalive机制处理
-            while (conn->is_running()) {
-                this_thread::sleep_for(chrono::seconds(1));
-            }
-
-            Logger::info("[连接" + to_string(conn_id) + "|" + session_uuid + "] 连接已结束，开始清理资源");
-
-            // 清理 - 关键修复: 在mutex保护下擦除，智能指针自动管理内存
-            {
-                lock_guard<mutex> lock(conn_mutex);
-                connections.erase(conn_key);
-            }
-            Logger::info("[连接" + to_string(conn_id) + "|" + session_uuid + "] 连接已从映射中移除，资源已释放");
-            // 智能指针自动释放，无需delete - 修复了原来第992行的race condition!
+            Logger::warning("[握手] 已拒绝旧版TCP/UDP隧道连接: conn_id=" + to_string(conn_id) +
+                            ", dst_port=" + to_string(dst_port) +
+                            ", session_uuid=" + session_uuid +
+                            ", client=" + client_str);
+            close(client_fd);
+            return;
 
         } catch (exception& e) {
             Logger::error("处理客户端 " + client_str + " 时出错: " + string(e.what()));
@@ -2112,6 +1991,13 @@ private:
         uint32_t virtual_ip_be = 0;
 
         try {
+            int flag = 1;
+            int buffer_bytes = 256 * 1024;
+            setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+            setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+            setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &buffer_bytes, sizeof(buffer_bytes));
+            setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &buffer_bytes, sizeof(buffer_bytes));
+
             uint8_t tail[packet_tunnel::kHandshakeTailSize] = {};
             if (!recv_all_exact(client_fd, tail, sizeof(tail))) {
                 Logger::error("[IP Tunnel|" + session_uuid + "] 接收握手尾部失败");
@@ -3096,8 +2982,14 @@ bool generate_default_config(const string& filename) {
     file << "//                    范围: 1-65535，建议使用 30000-40000\n";
     file << "//                    不同服务器必须使用不同端口\n";
     file << "//\n";
-    file << "// game_server_ip   - 游戏服务器的内网IP地址\n";
-    file << "//                    这是隧道服务器要转发到的目标服务器\n";
+    file << "// virtual_subnet   - 虚拟局域网网段\n";
+    file << "//                    例如: 10.0.11.0/24\n";
+    file << "//\n";
+    file << "// virtual_gateway  - 虚拟局域网网关地址\n";
+    file << "//                    例如: 10.0.11.1\n";
+    file << "//\n";
+    file << "// server_virtual_ip - 服务端在虚拟局域网内的地址\n";
+    file << "//                    例如: 10.0.11.2\n";
     file << "//\n";
     file << "// max_connections  - 最大并发连接数\n";
     file << "//                    根据服务器性能调整，建议 50-500\n";
@@ -3119,7 +3011,9 @@ bool generate_default_config(const string& filename) {
     file << "//     {\n";
     file << "//       \"name\": \"游戏服1\",\n";
     file << "//       \"listen_port\": 33223,\n";
-    file << "//       \"game_server_ip\": \"192.168.2.110\",\n";
+    file << "//       \"virtual_subnet\": \"10.0.11.0/24\",\n";
+    file << "//       \"virtual_gateway\": \"10.0.11.1\",\n";
+    file << "//       \"server_virtual_ip\": \"10.0.11.2\",\n";
     file << "//       \"max_connections\": 100,\n";
     file << "//       \"download_url\": \"http://192.168.2.22:5244/d/DOF/客户端.7z\"\n";
     file << "//     }\n";
@@ -3133,21 +3027,27 @@ bool generate_default_config(const string& filename) {
     file << "//     {\n";
     file << "//       \"name\": \"游戏服1\",\n";
     file << "//       \"listen_port\": 33223,\n";
-    file << "//       \"game_server_ip\": \"192.168.2.110\",\n";
+    file << "//       \"virtual_subnet\": \"10.0.11.0/24\",\n";
+    file << "//       \"virtual_gateway\": \"10.0.11.1\",\n";
+    file << "//       \"server_virtual_ip\": \"10.0.11.2\",\n";
     file << "//       \"max_connections\": 100,\n";
     file << "//       \"download_url\": \"http://192.168.2.22:5244/d/DOF/服务器1/客户端.7z\"\n";
     file << "//     },\n";
     file << "//     {\n";
     file << "//       \"name\": \"游戏服2\",\n";
     file << "//       \"listen_port\": 33224,\n";
-    file << "//       \"game_server_ip\": \"192.168.2.100\",\n";
+    file << "//       \"virtual_subnet\": \"10.0.12.0/24\",\n";
+    file << "//       \"virtual_gateway\": \"10.0.12.1\",\n";
+    file << "//       \"server_virtual_ip\": \"10.0.12.2\",\n";
     file << "//       \"max_connections\": 100,\n";
     file << "//       \"download_url\": \"http://192.168.2.22:5244/d/DOF/服务器2/客户端.7z\"\n";
     file << "//     },\n";
     file << "//     {\n";
     file << "//       \"name\": \"游戏服3\",\n";
     file << "//       \"listen_port\": 33225,\n";
-    file << "//       \"game_server_ip\": \"192.168.2.11\",\n";
+    file << "//       \"virtual_subnet\": \"10.0.13.0/24\",\n";
+    file << "//       \"virtual_gateway\": \"10.0.13.1\",\n";
+    file << "//       \"server_virtual_ip\": \"10.0.13.2\",\n";
     file << "//       \"max_connections\": 100,\n";
     file << "//       \"download_url\": \"http://192.168.2.22:5244/d/DOF/服务器3/客户端.7z\"\n";
     file << "//     }\n";
@@ -3171,7 +3071,9 @@ bool generate_default_config(const string& filename) {
     file << "    {\n";
     file << "      \"name\": \"游戏服1\",\n";
     file << "      \"listen_port\": 33223,\n";
-    file << "      \"game_server_ip\": \"192.168.2.110\",\n";
+    file << "      \"virtual_subnet\": \"10.0.11.0/24\",\n";
+    file << "      \"virtual_gateway\": \"10.0.11.1\",\n";
+    file << "      \"server_virtual_ip\": \"10.0.11.2\",\n";
     file << "      \"max_connections\": 100,\n";
     file << "      \"download_url\": \"http://example.com/download/client.7z\"\n";
     file << "    }\n";
@@ -3238,7 +3140,7 @@ void reload_tunnel_servers() {
         if (current_map.find(port) == current_map.end()) {
             // 新增服务器
             Logger::info("[热重载] 新增服务器: [" + new_cfg.name + "] 端口:" +
-                        to_string(port) + " → " + new_cfg.game_server_ip);
+                        to_string(port) + " → " + new_cfg.server_virtual_ip);
 
             auto server = make_shared<TunnelServer>(new_cfg);
             auto t = make_shared<thread>([server]() {
@@ -3255,12 +3157,12 @@ void reload_tunnel_servers() {
         } else {
             // 检查是否修改
             RunningServer* current = current_map[port];
-            if (current->config.game_server_ip != new_cfg.game_server_ip ||
+            if (current->config.server_virtual_ip != new_cfg.server_virtual_ip ||
                 current->config.name != new_cfg.name) {
 
                 Logger::info("[热重载] 检测到配置修改: [" + new_cfg.name + "] 端口:" + to_string(port));
-                Logger::info("  旧游戏服务器: " + current->config.game_server_ip);
-                Logger::info("  新游戏服务器: " + new_cfg.game_server_ip);
+                Logger::info("  旧服务端虚拟IP: " + current->config.server_virtual_ip);
+                Logger::info("  新服务端虚拟IP: " + new_cfg.server_virtual_ip);
                 Logger::info("  注意: 已有连接仍使用旧配置，新连接将使用新配置");
                 Logger::info("  建议: 如需完全切换，请使用 systemctl restart");
 
@@ -3421,10 +3323,12 @@ int main() {
             cout << "请按照以下步骤配置服务器:" << endl;
             cout << "----------------------------------------" << endl;
             cout << "1. 编辑 " << config_file << " 文件" << endl;
-            cout << "2. 在 servers 数组中配置游戏服务器:" << endl;
+            cout << "2. 在 servers 数组中配置虚拟局域网服务端:" << endl;
             cout << "   - name: 服务器名称（用于日志标识）" << endl;
             cout << "   - listen_port: 监听端口（不同服务器用不同端口）" << endl;
-            cout << "   - game_server_ip: 游戏服务器IP地址" << endl;
+            cout << "   - virtual_subnet: 虚拟网段，例如 10.0.11.0/24" << endl;
+            cout << "   - virtual_gateway: 虚拟网关，例如 10.0.11.1" << endl;
+            cout << "   - server_virtual_ip: 服务端虚拟IP，例如 10.0.11.2" << endl;
             cout << "   - max_connections: 最大连接数" << endl;
             cout << "3. 可以配置多个服务器，一个程序管理所有" << endl;
             cout << "4. 保存文件后重新运行本程序" << endl;
@@ -3463,7 +3367,7 @@ int main() {
     for (size_t i = 0; i < global_config.servers.size(); i++) {
         const ServerConfig& srv = global_config.servers[i];
         Logger::info("[" + srv.name + "] 端口:" + to_string(srv.listen_port) +
-                    " → " + srv.game_server_ip +
+                    " → " + srv.server_virtual_ip +
                     " (最大连接:" + to_string(srv.max_connections) +
                     ", 虚拟网段:" + srv.virtual_subnet + ")");
     }

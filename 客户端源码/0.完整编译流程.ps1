@@ -43,11 +43,11 @@ Write-Host " OK Complete compilation successful!" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Generated files:" -ForegroundColor Cyan
-Write-Host "  1. tcp_proxy_client_base.exe    - Base client (with embedded WinDivert)" -ForegroundColor White
+Write-Host "  1. tcp_proxy_client_base.exe    - Base client (Wintun + IP Tunnel)" -ForegroundColor White
 Write-Host "  2. embedded_client.h            - Client binary encoding" -ForegroundColor White
 Write-Host "  3. DNF配置注入工具.exe          - Config injector" -ForegroundColor White
 Write-Host ""
 Write-Host "Usage:" -ForegroundColor Cyan
 Write-Host "  Run 'DNF配置注入工具.exe' to generate configured client" -ForegroundColor White
-Write-Host "  Generated client includes full WinDivert support, single-file distribution" -ForegroundColor White
+Write-Host "  Generated client uses the Wintun + IP Tunnel virtual LAN path" -ForegroundColor White
 Write-Host ""

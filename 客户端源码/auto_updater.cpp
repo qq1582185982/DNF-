@@ -408,6 +408,11 @@ bool AutoUpdater::GetLatestMD5(const std::string& api_url, int api_port,
     }
     info.download_url = response.substr(url_quote1 + 1, url_quote2 - url_quote1 - 1);
 
+    if (info.latest_md5.empty() || info.download_url.empty()) {
+        error_msg = L"服务器未配置版本信息";
+        return false;
+    }
+
     return true;
 }
 
