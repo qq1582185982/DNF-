@@ -6,8 +6,19 @@ Write-Host "Multi-Server Version with GUI Selector" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Step 1: Check Visual Studio
-Write-Host "[1/3] Checking Visual Studio environment..." -ForegroundColor Yellow
+# Step 1: Generate embedded Wintun runtime
+Write-Host "[1/4] Preparing embedded Wintun runtime..." -ForegroundColor Yellow
+python generate_embedded_wintun.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "Failed to prepare embedded Wintun runtime!" -ForegroundColor Red
+    exit 1
+}
+Write-Host "✓ Embedded Wintun runtime prepared" -ForegroundColor Green
+Write-Host ""
+
+# Step 2: Check Visual Studio
+Write-Host "[2/4] Checking Visual Studio environment..." -ForegroundColor Yellow
 
 $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
 
@@ -22,8 +33,8 @@ if (-not (Test-Path $vsPath)) {
 Write-Host "✓ Visual Studio 2022 found" -ForegroundColor Green
 Write-Host ""
 
-# Step 2: Compile resources
-Write-Host "[2/3] Compiling resources..." -ForegroundColor Yellow
+# Step 3: Compile resources
+Write-Host "[3/4] Compiling resources..." -ForegroundColor Yellow
 Write-Host "  - Background image: background.jpg" -ForegroundColor Gray
 Write-Host ""
 
@@ -41,8 +52,8 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "✓ Resources compiled" -ForegroundColor Green
 Write-Host ""
 
-# Step 3: Compile multi-server version
-Write-Host "[3/3] Compiling multi-server version..." -ForegroundColor Yellow
+# Step 4: Compile multi-server version
+Write-Host "[4/4] Compiling multi-server version..." -ForegroundColor Yellow
 Write-Host "  - Main: tcp_proxy_client_no_config.cpp" -ForegroundColor Gray
 Write-Host "  - TCP Config: tcp_config_client.cpp" -ForegroundColor Gray
 Write-Host "  - IP Lease: ip_lease_client.cpp" -ForegroundColor Gray

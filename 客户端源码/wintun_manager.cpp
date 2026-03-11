@@ -1,5 +1,6 @@
 #include "wintun_manager.h"
 
+#include "embedded_wintun.h"
 #include "wintun.h"
 
 #include <algorithm>
@@ -17,6 +18,45 @@ namespace {
 const WCHAR kAdapterName[] = L"DNFProxyWintun";
 const WCHAR kTunnelType[] = L"DNFProxy";
 const DWORD kRingCapacity = 0x400000;
+const WCHAR kTempSubdir[] = L"DNFProxy\\Wintun";
+
+std::wstring GetWintunTempDir() {
+    WCHAR temp_path[MAX_PATH] = {};
+    DWORD len = GetTempPathW(MAX_PATH, temp_path);
+    if (len == 0 || len >= MAX_PATH) {
+        return L"";
+    }
+
+    std::wstring dir = temp_path;
+    if (!dir.empty() && dir.back() != L'\\') {
+        dir.push_back(L'\\');
+    }
+    dir += kTempSubdir;
+    CreateDirectoryW((std::wstring(temp_path) + L"DNFProxy").c_str(), NULL);
+    CreateDirectoryW(dir.c_str(), NULL);
+    return dir;
+}
+
+bool EnsureEmbeddedFile(const std::wstring& path, const uint8_t* data, size_t size) {
+    WIN32_FILE_ATTRIBUTE_DATA file_info = {};
+    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &file_info)) {
+        ULONGLONG file_size = (static_cast<ULONGLONG>(file_info.nFileSizeHigh) << 32) | file_info.nFileSizeLow;
+        if (file_size == size) {
+            return true;
+        }
+    }
+
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    DWORD written = 0;
+    BOOL ok = WriteFile(file, data, static_cast<DWORD>(size), &written, NULL);
+    CloseHandle(file);
+    return ok && written == size;
+}
 
 bool ParseIpv4Cidr(const std::string& cidr, std::string* network, std::string* mask) {
     size_t slash = cidr.find('/');
@@ -142,6 +182,17 @@ std::wstring CommandError(const wchar_t* action, const std::string& command, int
 }
 
 HMODULE LoadWintunModuleFromDisk() {
+    std::wstring temp_dir = GetWintunTempDir();
+    if (!temp_dir.empty()) {
+        std::wstring dll_path = temp_dir + L"\\wintun.dll";
+        if (EnsureEmbeddedFile(dll_path, EMBEDDED_WINTUN_DLL, EMBEDDED_WINTUN_DLL_SIZE)) {
+            HMODULE module = LoadLibraryW(dll_path.c_str());
+            if (module != NULL) {
+                return module;
+            }
+        }
+    }
+
     WCHAR exe_path[MAX_PATH] = {};
     if (GetModuleFileNameW(NULL, exe_path, MAX_PATH) == 0) {
         return LoadLibraryW(L"wintun.dll");

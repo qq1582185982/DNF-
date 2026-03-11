@@ -5,8 +5,18 @@ Write-Host "Compiling DNF Proxy Client (Base Version)" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Step 1: Compile client
-Write-Host "[1/1] Compiling client..." -ForegroundColor Yellow
+# Step 1: Generate embedded Wintun runtime
+Write-Host "[1/2] Preparing embedded Wintun runtime..." -ForegroundColor Yellow
+python generate_embedded_wintun.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "Failed to prepare embedded Wintun runtime!" -ForegroundColor Red
+    exit 1
+}
+Write-Host ""
+
+# Step 2: Compile client
+Write-Host "[2/2] Compiling client..." -ForegroundColor Yellow
 
 $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
 
