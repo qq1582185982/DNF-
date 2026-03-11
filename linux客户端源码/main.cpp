@@ -6,11 +6,15 @@
 #include "linux_tun_manager.h"
 
 #include <signal.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include <atomic>
+#include <cctype>
+#include <fstream>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <thread>
 
 namespace {
@@ -24,12 +28,165 @@ struct Options {
     std::string if_name;
     std::string session_uuid;
     std::string tunnel_host;
+    std::string config_path;
     int tunnel_port;
 
     Options()
         : api_port(0),
           tunnel_port(0) {}
 };
+
+std::string Trim(const std::string& value) {
+    size_t start = 0;
+    while (start < value.size() && isspace((unsigned char)value[start])) {
+        ++start;
+    }
+
+    size_t end = value.size();
+    while (end > start && isspace((unsigned char)value[end - 1])) {
+        --end;
+    }
+
+    return value.substr(start, end - start);
+}
+
+std::string StripQuotes(const std::string& value) {
+    if (value.size() >= 2) {
+        char first = value.front();
+        char last = value.back();
+        if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+            return value.substr(1, value.size() - 2);
+        }
+    }
+    return value;
+}
+
+std::vector<std::string> GetDefaultConfigPaths() {
+    std::vector<std::string> paths;
+    paths.push_back("./dnf-linux-client.conf");
+    paths.push_back("./client.conf");
+    paths.push_back("/etc/dnf-linux-client.conf");
+    paths.push_back("/etc/dnf-linux-client/client.conf");
+    return paths;
+}
+
+std::string DetectConfigPath(const std::string& requested_path) {
+    if (!requested_path.empty()) {
+        std::ifstream requested(requested_path.c_str());
+        if (requested.good()) {
+            return requested_path;
+        }
+        return std::string();
+    }
+
+    std::vector<std::string> paths = GetDefaultConfigPaths();
+    for (size_t i = 0; i < paths.size(); ++i) {
+        std::ifstream file(paths[i].c_str());
+        if (file.good()) {
+            return paths[i];
+        }
+    }
+
+    return std::string();
+}
+
+bool LoadConfigFile(const std::string& path, Options* options, std::string* error) {
+    if (options == NULL) {
+        if (error != NULL) {
+            *error = "options is null";
+        }
+        return false;
+    }
+
+    std::ifstream file(path.c_str());
+    if (!file.is_open()) {
+        if (error != NULL) {
+            *error = "open config failed: " + path;
+        }
+        return false;
+    }
+
+    std::string line;
+    int line_number = 0;
+    while (std::getline(file, line)) {
+        ++line_number;
+
+        size_t comment_pos = line.find('#');
+        if (comment_pos != std::string::npos) {
+            line = line.substr(0, comment_pos);
+        }
+        comment_pos = line.find(';');
+        if (comment_pos != std::string::npos) {
+            line = line.substr(0, comment_pos);
+        }
+
+        line = Trim(line);
+        if (line.empty()) {
+            continue;
+        }
+
+        size_t equal_pos = line.find('=');
+        if (equal_pos == std::string::npos) {
+            if (error != NULL) {
+                *error = "invalid config line " + std::to_string(line_number) + ": " + line;
+            }
+            return false;
+        }
+
+        std::string key = Trim(line.substr(0, equal_pos));
+        std::string value = StripQuotes(Trim(line.substr(equal_pos + 1)));
+
+        if (key == "api_url") {
+            options->api_url = value;
+        } else if (key == "api_port") {
+            options->api_port = atoi(value.c_str());
+        } else if (key == "server_key") {
+            options->server_key = value;
+        } else if (key == "client_id") {
+            options->client_id = value;
+        } else if (key == "preferred_ip") {
+            options->preferred_ip = value;
+        } else if (key == "if_name") {
+            options->if_name = value;
+        } else if (key == "session_uuid") {
+            options->session_uuid = value;
+        } else if (key == "tunnel_host") {
+            options->tunnel_host = value;
+        } else if (key == "tunnel_port") {
+            options->tunnel_port = atoi(value.c_str());
+        } else if (key == "config_path") {
+            options->config_path = value;
+        } else {
+            if (error != NULL) {
+                *error = "unknown config key at line " + std::to_string(line_number) + ": " + key;
+            }
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void ApplyDefaultValues(Options* options) {
+    if (options == NULL) {
+        return;
+    }
+
+    if (options->if_name.empty()) {
+        options->if_name = "dnfcli0";
+    }
+    if (options->session_uuid.empty()) {
+        options->session_uuid = GenerateSessionUuid();
+    }
+    if (options->client_id.empty()) {
+        char hostname[256] = {};
+        if (gethostname(hostname, sizeof(hostname) - 1) == 0 && hostname[0] != '\0') {
+            options->client_id = hostname;
+        } else {
+            options->client_id = "linux-node";
+        }
+    }
+}
 
 void SignalHandler(int) {
     g_linux_client_stop = true;
@@ -38,8 +195,18 @@ void SignalHandler(int) {
 void PrintUsage() {
     std::cout
         << "Usage:\n"
-        << "  ./dnf-linux-client --api-url HOST --api-port PORT --server-key KEY --client-id ID [options]\n\n"
+        << "  ./dnf-linux-client [--config FILE] [options]\n\n"
+        << "Config search order:\n"
+        << "  ./dnf-linux-client.conf\n"
+        << "  ./client.conf\n"
+        << "  /etc/dnf-linux-client.conf\n"
+        << "  /etc/dnf-linux-client/client.conf\n\n"
+        << "Required when no config file is present:\n"
+        << "  --api-url HOST --api-port PORT\n"
+        << "  --server-key KEY   (optional if GET_SERVERS returns exactly 1 server)\n"
+        << "  --client-id ID     (optional, defaults to hostname)\n\n"
         << "Options:\n"
+        << "  --config FILE          Load key=value config file\n"
         << "  --preferred-ip IP      Request a preferred virtual IP\n"
         << "  --if-name NAME         TUN interface name, default dnfcli0\n"
         << "  --session-uuid UUID    Reuse a fixed session UUID\n"
@@ -52,6 +219,27 @@ bool ParseArgs(int argc, char** argv, Options* options) {
         return false;
     }
 
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if ((arg == "--config" || arg == "-c") && i + 1 < argc) {
+            options->config_path = argv[++i];
+            break;
+        }
+    }
+
+    std::string detected_config = DetectConfigPath(options->config_path);
+    if (!detected_config.empty()) {
+        std::string config_error;
+        if (!LoadConfigFile(detected_config, options, &config_error)) {
+            LogError("load config failed: " + config_error);
+            return false;
+        }
+        options->config_path = detected_config;
+    } else if (!options->config_path.empty()) {
+        LogError("config file not found: " + options->config_path);
+        return false;
+    }
+
     std::map<std::string, std::string*> string_flags;
     string_flags["--api-url"] = &options->api_url;
     string_flags["--server-key"] = &options->server_key;
@@ -60,6 +248,8 @@ bool ParseArgs(int argc, char** argv, Options* options) {
     string_flags["--if-name"] = &options->if_name;
     string_flags["--session-uuid"] = &options->session_uuid;
     string_flags["--tunnel-host"] = &options->tunnel_host;
+    string_flags["--config"] = &options->config_path;
+    string_flags["-c"] = &options->config_path;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -80,6 +270,14 @@ bool ParseArgs(int argc, char** argv, Options* options) {
             continue;
         }
 
+        if (arg == "--config" || arg == "-c") {
+            if (i + 1 >= argc) {
+                return false;
+            }
+            ++i;
+            continue;
+        }
+
         std::map<std::string, std::string*>::iterator it = string_flags.find(arg);
         if (it == string_flags.end() || i + 1 >= argc) {
             return false;
@@ -87,16 +285,10 @@ bool ParseArgs(int argc, char** argv, Options* options) {
         *(it->second) = argv[++i];
     }
 
-    if (options->api_url.empty() || options->api_port <= 0 ||
-        options->server_key.empty() || options->client_id.empty()) {
-        return false;
-    }
+    ApplyDefaultValues(options);
 
-    if (options->if_name.empty()) {
-        options->if_name = "dnfcli0";
-    }
-    if (options->session_uuid.empty()) {
-        options->session_uuid = GenerateSessionUuid();
+    if (options->api_url.empty() || options->api_port <= 0) {
+        return false;
     }
 
     return true;
@@ -135,6 +327,10 @@ int main(int argc, char** argv) {
 
     LogInfo("Linux tunnel client starting");
     LogInfo("session_uuid=" + options.session_uuid);
+    if (!options.config_path.empty()) {
+        LogInfo("config=" + options.config_path);
+    }
+    LogInfo("client_id=" + options.client_id);
 
     LinuxConfigClient config_client;
     std::vector<LinuxServerInfo> servers;
@@ -145,6 +341,16 @@ int main(int argc, char** argv) {
     }
 
     LinuxServerInfo server_info;
+    if (options.server_key.empty()) {
+        if (servers.size() == 1) {
+            options.server_key = std::to_string(servers[0].id);
+            LogInfo("server_key auto selected: " + options.server_key + " (" + servers[0].name + ")");
+        } else {
+            LogError("server_key is required when GET_SERVERS returns multiple servers");
+            return 1;
+        }
+    }
+
     if (!FindServerInfo(servers, options.server_key, &server_info)) {
         LogError("server_key not found: " + options.server_key);
         return 1;

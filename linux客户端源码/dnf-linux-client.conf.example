@@ -1,0 +1,20 @@
+# DNF Linux 隧道客户端
+# 配置文件使用 key=value 格式。以 # 或 ; 开头的行会被忽略。
+
+api_url=61.sviplk.com
+api_port=35333
+
+# 当服务器列表里只有 1 个服务器时，这一项可以不写。
+server_key=1
+
+# 可选。不写时默认使用当前主机名。
+client_id=vm-95
+
+# 可选。不写时默认使用 dnfcli0。
+if_name=dnfcli95
+
+# 以下配置都是可选项。
+# preferred_ip=10.0.11.50
+# tunnel_host=61.sviplk.com
+# tunnel_port=33335
+# session_uuid=你的固定会话UUID

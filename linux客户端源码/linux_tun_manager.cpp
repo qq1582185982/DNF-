@@ -168,6 +168,27 @@ bool LinuxTunManager::ConfigureInterface(const LinuxTunConfig& config, std::stri
         return false;
     }
 
+    cmd.str("");
+    cmd.clear();
+    cmd << "sysctl -w net.ipv4.conf." << if_name_ << ".send_redirects=0 >/dev/null";
+    if (!RunCommand(cmd.str(), error)) {
+        return false;
+    }
+
+    cmd.str("");
+    cmd.clear();
+    cmd << "sysctl -w net.ipv4.conf." << if_name_ << ".accept_redirects=0 >/dev/null";
+    if (!RunCommand(cmd.str(), error)) {
+        return false;
+    }
+
+    cmd.str("");
+    cmd.clear();
+    cmd << "sysctl -w net.ipv4.conf." << if_name_ << ".secure_redirects=0 >/dev/null";
+    if (!RunCommand(cmd.str(), error)) {
+        return false;
+    }
+
     for (size_t i = 0; i < config.routes.size(); ++i) {
         cmd.str("");
         cmd.clear();

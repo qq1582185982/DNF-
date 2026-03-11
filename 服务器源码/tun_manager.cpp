@@ -159,6 +159,26 @@ bool TunManager::ConfigureInterface(const TunRuntimeConfig& config, std::string*
         return false;
     }
 
+    std::ostringstream sysctl_cmd;
+    sysctl_cmd << "sysctl -w net.ipv4.conf." << if_name_ << ".send_redirects=0 >/dev/null";
+    if (!RunCommand(sysctl_cmd.str(), error)) {
+        return false;
+    }
+
+    sysctl_cmd.str("");
+    sysctl_cmd.clear();
+    sysctl_cmd << "sysctl -w net.ipv4.conf." << if_name_ << ".accept_redirects=0 >/dev/null";
+    if (!RunCommand(sysctl_cmd.str(), error)) {
+        return false;
+    }
+
+    sysctl_cmd.str("");
+    sysctl_cmd.clear();
+    sysctl_cmd << "sysctl -w net.ipv4.conf." << if_name_ << ".secure_redirects=0 >/dev/null";
+    if (!RunCommand(sysctl_cmd.str(), error)) {
+        return false;
+    }
+
     return true;
 }
 
