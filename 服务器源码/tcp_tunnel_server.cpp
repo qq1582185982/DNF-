@@ -431,6 +431,27 @@ static uint8_t ipv4_protocol(const vector<uint8_t>& packet) {
     return packet[9];
 }
 
+static bool ipv4_udp_ports(const vector<uint8_t>& packet, uint16_t* out_src_port, uint16_t* out_dst_port) {
+    if (out_src_port == nullptr || out_dst_port == nullptr) {
+        return false;
+    }
+    if (packet.size() < 20) {
+        return false;
+    }
+    if (((packet[0] >> 4) & 0x0F) != 4 || packet[9] != IPPROTO_UDP) {
+        return false;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet.size() < ip_header_len + 8) {
+        return false;
+    }
+
+    *out_src_port = ntohs(*(const uint16_t*)(&packet[ip_header_len]));
+    *out_dst_port = ntohs(*(const uint16_t*)(&packet[ip_header_len + 2]));
+    return true;
+}
+
 // ==================== 日志工具 ====================
 class Logger {
 private:
@@ -1716,11 +1737,21 @@ private:
             }
 
             const uint8_t protocol = ipv4_protocol(packet);
-            if (protocol == IPPROTO_ICMP || src_ip_be == game_server_ip_be || src_ip_be == server_virtual_ip_be ||
+            if (protocol == IPPROTO_ICMP || protocol == IPPROTO_UDP ||
+                src_ip_be == game_server_ip_be || src_ip_be == server_virtual_ip_be ||
                 src_ip_be == gateway_ip_be) {
+                string extra;
+                if (protocol == IPPROTO_UDP) {
+                    uint16_t src_port = 0;
+                    uint16_t dst_port = 0;
+                    if (ipv4_udp_ports(packet, &src_port, &dst_port)) {
+                        extra = " udp=" + to_string(src_port) + "->" + to_string(dst_port);
+                    }
+                }
                 Logger::debug("[IP Tunnel|" + session->session_uuid + "] TUN->client src=" +
                               ipv4_be_to_string(src_ip_be) + " dst=" + ipv4_be_to_string(dst_ip_be) +
-                              " proto=" + to_string((int)protocol) + " len=" + to_string(packet.size()));
+                              " proto=" + to_string((int)protocol) + extra +
+                              " len=" + to_string(packet.size()));
             }
 
             if (!send_packet_tunnel_frame(session, packet_tunnel::kFrameIpv4Packet, packet.data(), packet.size())) {
@@ -2146,10 +2177,20 @@ private:
                     }
 
                     const uint8_t protocol = ipv4_protocol(payload);
-                    if (protocol == IPPROTO_ICMP || dst_ip_be == server_virtual_ip_be || dst_ip_be == gateway_ip_be) {
+                    if (protocol == IPPROTO_ICMP || protocol == IPPROTO_UDP ||
+                        dst_ip_be == server_virtual_ip_be || dst_ip_be == gateway_ip_be) {
+                        string extra;
+                        if (protocol == IPPROTO_UDP) {
+                            uint16_t src_port = 0;
+                            uint16_t dst_port = 0;
+                            if (ipv4_udp_ports(payload, &src_port, &dst_port)) {
+                                extra = " udp=" + to_string(src_port) + "->" + to_string(dst_port);
+                            }
+                        }
                         Logger::debug("[IP Tunnel|" + session_uuid + "] client->TUN src=" +
                                       ipv4_be_to_string(src_ip_be) + " dst=" + ipv4_be_to_string(dst_ip_be) +
-                                      " proto=" + to_string((int)protocol) + " len=" + to_string(payload_len));
+                                      " proto=" + to_string((int)protocol) + extra +
+                                      " len=" + to_string(payload_len));
                     }
 
                     string tun_error;
