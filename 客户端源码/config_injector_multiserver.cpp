@@ -329,6 +329,7 @@ int main() {
     // ==================== 收集配置 ====================
     string api_url;
     int api_port;
+    bool enable_wintun_mode = false;
 
     cout << "请输入API服务器配置信息" << endl;
     cout << "--------------------------------------------" << endl;
@@ -380,12 +381,32 @@ int main() {
         }
     }
 
+    while (true) {
+        cout << "启用Wintun + IP Tunnel实验链路? (Y/N, 默认N): ";
+        string input;
+        getline(cin, input);
+        input = trim(input);
+        transform(input.begin(), input.end(), input.begin(), ::tolower);
+
+        if (input.empty() || input == "n" || input == "no") {
+            enable_wintun_mode = false;
+            break;
+        }
+        if (input == "y" || input == "yes") {
+            enable_wintun_mode = true;
+            break;
+        }
+
+        cout << "✗ 请输入 Y 或 N" << endl;
+    }
+
     cout << endl;
     cout << "============================================" << endl;
     cout << "配置摘要" << endl;
     cout << "============================================" << endl;
     cout << "API服务器域名: " << api_url << endl;
     cout << "API端口:       " << api_port << endl;
+    cout << "数据面模式:   " << (enable_wintun_mode ? "wintun" : "legacy") << endl;
     cout << "============================================" << endl;
     cout << endl;
 
@@ -441,6 +462,9 @@ int main() {
     json << "{";
     json << "\"config_api_url\":\"" << api_url << "\",";
     json << "\"config_api_port\":" << api_port;
+    if (enable_wintun_mode) {
+        json << ",\"data_plane_mode\":\"wintun\"";
+    }
     json << "}";
     json << "[CONFIG_END]";
 

@@ -230,6 +230,7 @@ bool IPLeaseClient::ParseLeaseGrant(const std::string& json,
     lease->virtual_ip = ExtractJsonString(json, "virtual_ip");
     lease->subnet_mask = ExtractJsonString(json, "subnet_mask");
     lease->gateway_ip = ExtractJsonString(json, "gateway_ip");
+    lease->server_virtual_ip = ExtractJsonString(json, "server_virtual_ip");
 
     int mtu = ExtractJsonInt(json, "mtu", (int)ip_tunnel::kDefaultMtu);
     if (mtu > 0) {
@@ -266,7 +267,8 @@ bool IPLeaseClient::ParseLeaseGrant(const std::string& json,
         }
     }
 
-    if (lease->virtual_ip.empty() || lease->subnet_mask.empty() || lease->gateway_ip.empty()) {
+    if (lease->virtual_ip.empty() || lease->subnet_mask.empty() ||
+        lease->gateway_ip.empty() || lease->server_virtual_ip.empty()) {
         if (error_msg) {
             *error_msg = L"租约响应字段不完整";
         }

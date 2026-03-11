@@ -3,8 +3,8 @@
 CXX = g++
 CXXFLAGS = -std=c++11 -O2 -Wall -pthread
 TARGET = dnf-tunnel-server
-SOURCES = tcp_tunnel_server.cpp tcp_config_server.cpp ip_pool_manager.cpp
-HEADERS = tcp_config_server.h ip_pool_manager.h ip_lease_protocol.h packet_tunnel_protocol.h
+SOURCES = tcp_tunnel_server.cpp tcp_config_server.cpp ip_pool_manager.cpp tun_manager.cpp
+HEADERS = tcp_config_server.h ip_pool_manager.h ip_lease_protocol.h packet_tunnel_protocol.h tun_manager.h
 
 # 默认目标：动态编译
 all: $(TARGET)

@@ -76,6 +76,28 @@ bool IPPoolManager::AcquireLease(const ip_tunnel::LeaseRequest& request, LeaseRe
     return TryAcquireNextFreeIP(pool, request, now_ms, out_record, error);
 }
 
+bool IPPoolManager::GetLease(const std::string& server_key, const std::string& session_uuid, LeaseRecord* out_record, std::string* error) {
+    CleanupExpired(NowMs());
+
+    std::map<std::string, PoolState>::iterator it = pools_.find(server_key);
+    if (it == pools_.end()) {
+        if (error) *error = "server pool not found";
+        return false;
+    }
+
+    PoolState* pool = &it->second;
+    std::map<std::string, LeaseState>::iterator lease_it = pool->by_session.find(session_uuid);
+    if (lease_it == pool->by_session.end()) {
+        if (error) *error = "lease not found";
+        return false;
+    }
+
+    if (out_record) {
+        *out_record = lease_it->second.record;
+    }
+    return true;
+}
+
 bool IPPoolManager::RenewLease(const std::string& server_key, const std::string& session_uuid, LeaseRecord* out_record, std::string* error) {
     CleanupExpired(NowMs());
 
@@ -288,9 +310,29 @@ bool IPPoolManager::PreparePool(PoolState* pool, std::string* error) {
         pool->config.gateway_ip = IPv4ToString(pool->gateway_ip);
     }
 
+    if (!pool->config.server_virtual_ip.empty()) {
+        if (!ParseIPv4(pool->config.server_virtual_ip, &pool->server_virtual_ip)) {
+            if (error) *error = "invalid server_virtual_ip";
+            return false;
+        }
+    } else {
+        pool->server_virtual_ip = pool->network_ip + 2;
+        pool->config.server_virtual_ip = IPv4ToString(pool->server_virtual_ip);
+    }
+
+    if (pool->server_virtual_ip <= pool->network_ip || pool->server_virtual_ip >= pool->broadcast_ip) {
+        if (error) *error = "server_virtual_ip is outside pool CIDR";
+        return false;
+    }
+    if (pool->server_virtual_ip == pool->gateway_ip) {
+        if (error) *error = "server_virtual_ip conflicts with gateway_ip";
+        return false;
+    }
+
     pool->reserved_ips.insert(pool->network_ip);
     pool->reserved_ips.insert(pool->broadcast_ip);
     pool->reserved_ips.insert(pool->gateway_ip);
+    pool->reserved_ips.insert(pool->server_virtual_ip);
 
     const uint32_t first_usable = pool->network_ip + std::max<uint32_t>(2, pool->config.first_host_offset);
     for (uint32_t ip = first_usable; ip < pool->broadcast_ip; ++ip) {
@@ -413,6 +455,7 @@ IPPoolManager::LeaseRecord IPPoolManager::BuildLeaseRecord(const PoolState& pool
     record.virtual_ip = IPv4ToString(assigned_ip);
     record.subnet_mask = IPv4ToString(pool.subnet_mask);
     record.gateway_ip = pool.config.gateway_ip;
+    record.server_virtual_ip = pool.config.server_virtual_ip;
     record.lease_seconds = pool.config.lease_seconds;
     record.issued_at_ms = now_ms;
     record.expires_at_ms = now_ms + (uint64_t)pool.config.lease_seconds * 1000ULL;

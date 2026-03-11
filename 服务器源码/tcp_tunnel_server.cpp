@@ -233,9 +233,12 @@
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <execinfo.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <pthread.h>
 #include "tcp_config_server.h"
 #include "packet_tunnel_protocol.h"
+#include "tun_manager.h"
 
 using namespace std;
 
@@ -249,7 +252,8 @@ class Logger;
 struct ServerConfig {
     string name = "默认服务器";
     int listen_port = 33223;
-    string game_server_ip = "192.168.2.110";
+    string game_server_ip = "";
+    string server_virtual_ip = "";
     int max_connections = 100;
     string virtual_subnet = "";
     string virtual_gateway = "";
@@ -281,6 +285,150 @@ static string build_default_virtual_subnet(int tunnel_port) {
     stringstream subnet;
     subnet << "10." << octet2 << "." << octet3 << ".0/24";
     return subnet.str();
+}
+
+static string build_auto_virtual_gateway(const string& subnet_cidr, int tunnel_port) {
+    size_t slash = subnet_cidr.find('/');
+    string base_ip = (slash == string::npos) ? subnet_cidr : subnet_cidr.substr(0, slash);
+    int prefix_bits = 24;
+    if (slash != string::npos) {
+        prefix_bits = atoi(subnet_cidr.c_str() + slash + 1);
+    }
+
+    if (prefix_bits < 0 || prefix_bits > 30) {
+        prefix_bits = 24;
+    }
+
+    in_addr network_addr{};
+    if (inet_pton(AF_INET, base_ip.c_str(), &network_addr) != 1) {
+        return "";
+    }
+
+    uint32_t network_host = ntohl(network_addr.s_addr);
+    uint32_t host_count = 1u << (32 - prefix_bits);
+    if (host_count <= 2) {
+        return "";
+    }
+
+    (void)tunnel_port;
+    uint32_t gateway = network_host + 1;
+    in_addr gateway_addr{};
+    gateway_addr.s_addr = htonl(gateway);
+
+    char gateway_str[INET_ADDRSTRLEN] = {};
+    if (!inet_ntop(AF_INET, &gateway_addr, gateway_str, sizeof(gateway_str))) {
+        return "";
+    }
+    return string(gateway_str);
+}
+
+static string build_default_server_virtual_ip(const string& subnet_cidr) {
+    size_t slash = subnet_cidr.find('/');
+    string base_ip = (slash == string::npos) ? subnet_cidr : subnet_cidr.substr(0, slash);
+    int prefix_bits = 24;
+    if (slash != string::npos) {
+        prefix_bits = atoi(subnet_cidr.c_str() + slash + 1);
+    }
+
+    if (prefix_bits < 0 || prefix_bits > 30) {
+        prefix_bits = 24;
+    }
+
+    in_addr network_addr{};
+    if (inet_pton(AF_INET, base_ip.c_str(), &network_addr) != 1) {
+        return "";
+    }
+
+    uint32_t network_host = ntohl(network_addr.s_addr);
+    uint32_t host_count = 1u << (32 - prefix_bits);
+    if (host_count <= 3) {
+        return "";
+    }
+
+    uint32_t server_ip = network_host + 2;
+    in_addr server_addr{};
+    server_addr.s_addr = htonl(server_ip);
+
+    char server_str[INET_ADDRSTRLEN] = {};
+    if (!inet_ntop(AF_INET, &server_addr, server_str, sizeof(server_str))) {
+        return "";
+    }
+    return string(server_str);
+}
+
+static string build_tun_interface_name(int listen_port) {
+    return "dnf" + to_string(listen_port);
+}
+
+static bool parse_ipv4_be(const string& text, uint32_t* out_ip_be) {
+    if (out_ip_be == nullptr) {
+        return false;
+    }
+
+    in_addr addr{};
+    if (inet_pton(AF_INET, text.c_str(), &addr) != 1) {
+        return false;
+    }
+    *out_ip_be = addr.s_addr;
+    return true;
+}
+
+static uint32_t prefix_to_mask_be(unsigned int prefix_bits) {
+    if (prefix_bits == 0) {
+        return 0;
+    }
+    if (prefix_bits >= 32) {
+        return 0xFFFFFFFFu;
+    }
+    return htonl(0xFFFFFFFFu << (32 - prefix_bits));
+}
+
+static bool parse_cidr_be(const string& cidr, uint32_t* out_network_be, uint32_t* out_mask_be) {
+    size_t slash = cidr.find('/');
+    if (slash == string::npos) {
+        return false;
+    }
+
+    unsigned int prefix_bits = (unsigned int)atoi(cidr.c_str() + slash + 1);
+    if (prefix_bits > 32) {
+        return false;
+    }
+
+    uint32_t ip_be = 0;
+    if (!parse_ipv4_be(cidr.substr(0, slash), &ip_be)) {
+        return false;
+    }
+
+    uint32_t mask_be = prefix_to_mask_be(prefix_bits);
+    if (out_network_be != nullptr) {
+        *out_network_be = ip_be & mask_be;
+    }
+    if (out_mask_be != nullptr) {
+        *out_mask_be = mask_be;
+    }
+    return true;
+}
+
+static bool ipv4_in_subnet_be(uint32_t ip_be, uint32_t network_be, uint32_t mask_be) {
+    return (ip_be & mask_be) == network_be;
+}
+
+static string ipv4_be_to_string(uint32_t ip_be) {
+    in_addr addr{};
+    addr.s_addr = ip_be;
+
+    char ip_str[INET_ADDRSTRLEN] = {};
+    if (!inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str))) {
+        return "";
+    }
+    return string(ip_str);
+}
+
+static uint8_t ipv4_protocol(const vector<uint8_t>& packet) {
+    if (packet.size() < 10) {
+        return 0;
+    }
+    return packet[9];
 }
 
 // ==================== 日志工具 ====================
@@ -1424,6 +1572,28 @@ private:
 // ==================== 隧道服务器 ====================
 class TunnelServer : public enable_shared_from_this<TunnelServer> {
 private:
+    struct PacketTunnelSession {
+        int client_fd;
+        string client_str;
+        string session_uuid;
+        uint32_t virtual_ip_be;
+        uint16_t mtu;
+        atomic<bool> active;
+        mutex send_mutex;
+
+        PacketTunnelSession(int fd,
+                            const string& client,
+                            const string& session,
+                            uint32_t virtual_ip,
+                            uint16_t session_mtu)
+            : client_fd(fd),
+              client_str(client),
+              session_uuid(session),
+              virtual_ip_be(virtual_ip),
+              mtu(session_mtu),
+              active(true) {}
+    };
+
     ServerConfig config;
     string server_name;
     int listen_fd;
@@ -1434,6 +1604,19 @@ private:
     // v5.0: 存储TCP连接源IP到客户端真实IPv4的映射
     map<string, string> client_ip_map;  // TCP源IP(不含端口) -> 客户端真实IPv4
     mutex ip_map_mutex;
+    TunManager tun_manager;
+    shared_ptr<thread> tun_read_thread;
+    map<uint32_t, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions;
+    mutex packet_tunnel_mutex;
+    uint32_t game_server_ip_be;
+    bool has_game_server_ip_be;
+    uint32_t gateway_ip_be;
+    bool has_gateway_ip_be;
+    uint32_t server_virtual_ip_be;
+    bool has_server_virtual_ip_be;
+    uint32_t virtual_network_ip_be;
+    uint32_t virtual_subnet_mask_be;
+    bool has_virtual_subnet_be;
 
     // v5.0: 从client_str中提取TCP源IP（不含端口）
     // 输入: "[::ffff:192.168.2.1]:56601" 或 "[240e:...]:12345"
@@ -1456,9 +1639,115 @@ private:
         return ip_part;  // 返回完整IP（IPv6或其他格式）
     }
 
+    bool send_packet_tunnel_frame(const shared_ptr<PacketTunnelSession>& session,
+                                  uint8_t frame_type,
+                                  const uint8_t* payload,
+                                  size_t payload_len) {
+        if (!session || !session->active) {
+            return false;
+        }
+
+        vector<uint8_t> frame(packet_tunnel::kFrameHeaderSize + payload_len, 0);
+        frame[0] = frame_type;
+        *(uint16_t*)(&frame[1]) = htons((uint16_t)payload_len);
+        if (payload_len > 0 && payload != nullptr) {
+            memcpy(&frame[packet_tunnel::kFrameHeaderSize], payload, payload_len);
+        }
+
+        lock_guard<mutex> lock(session->send_mutex);
+        size_t sent = 0;
+        while (sent < frame.size()) {
+            int n = send(session->client_fd,
+                         (const char*)frame.data() + sent,
+                         frame.size() - sent,
+                         MSG_NOSIGNAL);
+            if (n <= 0) {
+                return false;
+            }
+            sent += (size_t)n;
+        }
+        return true;
+    }
+
+    void packet_tunnel_tun_loop() {
+        while (running && tun_manager.IsActive()) {
+            vector<uint8_t> packet;
+            string error;
+            if (!tun_manager.ReadPacket(&packet, &error)) {
+                if (!running) {
+                    break;
+                }
+                Logger::warning("[" + server_name + "|IP Tunnel] read TUN packet failed: " + error);
+                break;
+            }
+
+            if (packet.size() < 20) {
+                continue;
+            }
+
+            uint8_t version = (packet[0] >> 4) & 0x0F;
+            if (version != 4) {
+                continue;
+            }
+
+            uint32_t dst_ip_be = 0;
+            uint32_t src_ip_be = 0;
+            memcpy(&src_ip_be, &packet[12], sizeof(src_ip_be));
+            memcpy(&dst_ip_be, &packet[16], sizeof(dst_ip_be));
+
+            if (has_virtual_subnet_be && !ipv4_in_subnet_be(dst_ip_be, virtual_network_ip_be, virtual_subnet_mask_be)) {
+                continue;
+            }
+
+            shared_ptr<PacketTunnelSession> session;
+            {
+                lock_guard<mutex> lock(packet_tunnel_mutex);
+                auto it = packet_tunnel_sessions.find(dst_ip_be);
+                if (it != packet_tunnel_sessions.end()) {
+                    session = it->second;
+                }
+            }
+
+            if (!session) {
+                Logger::debug("[" + server_name + "|IP Tunnel] no session for dst virtual IP: " +
+                              ipv4_be_to_string(dst_ip_be) + " src=" + ipv4_be_to_string(src_ip_be) +
+                              " proto=" + to_string((int)ipv4_protocol(packet)));
+                continue;
+            }
+
+            const uint8_t protocol = ipv4_protocol(packet);
+            if (protocol == IPPROTO_ICMP || src_ip_be == game_server_ip_be || src_ip_be == server_virtual_ip_be ||
+                src_ip_be == gateway_ip_be) {
+                Logger::debug("[IP Tunnel|" + session->session_uuid + "] TUN->client src=" +
+                              ipv4_be_to_string(src_ip_be) + " dst=" + ipv4_be_to_string(dst_ip_be) +
+                              " proto=" + to_string((int)protocol) + " len=" + to_string(packet.size()));
+            }
+
+            if (!send_packet_tunnel_frame(session, packet_tunnel::kFrameIpv4Packet, packet.data(), packet.size())) {
+                Logger::warning("[" + server_name + "|IP Tunnel|" + session->session_uuid +
+                                "] send TUN packet to client failed");
+                session->active = false;
+                shutdown(session->client_fd, SHUT_RDWR);
+            }
+        }
+    }
+
 public:
     TunnelServer(const ServerConfig& cfg)
-        : config(cfg), server_name(cfg.name), listen_fd(-1), running(false) {}
+        : config(cfg),
+          server_name(cfg.name),
+          listen_fd(-1),
+          running(false),
+          tun_read_thread(nullptr),
+          game_server_ip_be(0),
+          has_game_server_ip_be(parse_ipv4_be(cfg.game_server_ip, &game_server_ip_be)),
+          gateway_ip_be(0),
+          has_gateway_ip_be(parse_ipv4_be(cfg.virtual_gateway, &gateway_ip_be)),
+          server_virtual_ip_be(0),
+          has_server_virtual_ip_be(parse_ipv4_be(cfg.server_virtual_ip, &server_virtual_ip_be)),
+          virtual_network_ip_be(0),
+          virtual_subnet_mask_be(0),
+          has_virtual_subnet_be(false) {}
 
     ~TunnelServer() {
         stop();
@@ -1503,10 +1792,40 @@ public:
         }
 
         running = true;
+
+        TunRuntimeConfig tun_config;
+        tun_config.if_name = build_tun_interface_name(config.listen_port);
+        tun_config.subnet_cidr = config.virtual_subnet.empty()
+            ? build_default_virtual_subnet(config.listen_port)
+            : config.virtual_subnet;
+        tun_config.gateway_ip = config.virtual_gateway.empty()
+            ? build_auto_virtual_gateway(tun_config.subnet_cidr, config.listen_port)
+            : config.virtual_gateway;
+        tun_config.server_virtual_ip = config.server_virtual_ip.empty()
+            ? build_default_server_virtual_ip(tun_config.subnet_cidr)
+            : config.server_virtual_ip;
+        tun_config.mtu = 1400;
+
+        has_gateway_ip_be = parse_ipv4_be(tun_config.gateway_ip, &gateway_ip_be);
+        has_server_virtual_ip_be = parse_ipv4_be(tun_config.server_virtual_ip, &server_virtual_ip_be);
+        has_virtual_subnet_be = parse_cidr_be(tun_config.subnet_cidr, &virtual_network_ip_be, &virtual_subnet_mask_be);
+
+        string tun_error;
+        if (tun_manager.Setup(tun_config, &tun_error)) {
+            Logger::info("[" + server_name + "] IP Tunnel TUN ready: if=" + tun_manager.GetIfName() +
+                         " subnet=" + tun_config.subnet_cidr + " gateway=" + tun_config.gateway_ip +
+                         " server_ip=" + tun_config.server_virtual_ip);
+            tun_read_thread = make_shared<thread>([this]() {
+                packet_tunnel_tun_loop();
+            });
+        } else {
+            Logger::warning("[" + server_name + "] IP Tunnel TUN init failed, fallback to legacy path: " + tun_error);
+        }
         Logger::info("[" + server_name + "] 服务器启动成功，监听端口: " + to_string(config.listen_port) + " (IPv4/IPv6双栈)");
         Logger::info("[" + server_name + "] 游戏服务器: " + config.game_server_ip);
-        Logger::info("[" + server_name + "] 虚拟网段: " + config.virtual_subnet +
-                     (config.virtual_gateway.empty() ? "" : " 网关=" + config.virtual_gateway));
+        Logger::info("[" + server_name + "] 虚拟网段: " + tun_config.subnet_cidr +
+                     (tun_config.gateway_ip.empty() ? "" : " 网关=" + tun_config.gateway_ip) +
+                     (tun_config.server_virtual_ip.empty() ? "" : " 服务端虚拟IP=" + tun_config.server_virtual_ip));
 
         accept_loop();
         return true;
@@ -1518,6 +1837,26 @@ public:
             close(listen_fd);
             listen_fd = -1;
         }
+
+        vector<int> packet_fds;
+        {
+            lock_guard<mutex> lock(packet_tunnel_mutex);
+            for (auto it = packet_tunnel_sessions.begin(); it != packet_tunnel_sessions.end(); ++it) {
+                it->second->active = false;
+                packet_fds.push_back(it->second->client_fd);
+            }
+            packet_tunnel_sessions.clear();
+        }
+
+        for (size_t i = 0; i < packet_fds.size(); ++i) {
+            shutdown(packet_fds[i], SHUT_RDWR);
+        }
+
+        tun_manager.Cleanup();
+        if (tun_read_thread && tun_read_thread->joinable()) {
+            tun_read_thread->join();
+        }
+        tun_read_thread.reset();
     }
 
     bool is_running() const {
@@ -1769,17 +2108,8 @@ private:
             return true;
         };
 
-        auto send_all_exact = [](int fd, const uint8_t* buffer, size_t length) -> bool {
-            size_t sent = 0;
-            while (sent < length) {
-                int n = send(fd, (const char*)buffer + sent, length - sent, 0);
-                if (n <= 0) {
-                    return false;
-                }
-                sent += (size_t)n;
-            }
-            return true;
-        };
+        shared_ptr<PacketTunnelSession> session;
+        uint32_t virtual_ip_be = 0;
 
         try {
             uint8_t tail[packet_tunnel::kHandshakeTailSize] = {};
@@ -1792,42 +2122,83 @@ private:
             uint8_t version = tail[0];
             uint8_t flags = tail[1];
             uint16_t mtu = ntohs(*(uint16_t*)(tail + 2));
-            uint32_t virtual_ip_be = 0;
             memcpy(&virtual_ip_be, tail + 4, sizeof(virtual_ip_be));
 
-            char virtual_ip_str[INET_ADDRSTRLEN] = {};
-            in_addr virtual_ip_addr{};
-            virtual_ip_addr.s_addr = virtual_ip_be;
-            inet_ntop(AF_INET, &virtual_ip_addr, virtual_ip_str, sizeof(virtual_ip_str));
-
+            string virtual_ip = ipv4_be_to_string(virtual_ip_be);
             Logger::info("[IP Tunnel|" + session_uuid + "] 握手参数: version=" + to_string((int)version) +
-                         ", mtu=" + to_string(mtu) + ", virtual_ip=" + string(virtual_ip_str) +
+                         ", mtu=" + to_string(mtu) + ", virtual_ip=" + virtual_ip +
                          ", flags=" + to_string((int)flags));
+
+            IPPoolManager::LeaseRecord active_lease;
+            string lease_error;
+            bool has_active_lease = false;
+            if (!session_uuid.empty()) {
+                has_active_lease = query_active_tcp_config_lease(to_string(config.listen_port),
+                                                                 session_uuid,
+                                                                 &active_lease,
+                                                                 &lease_error);
+            } else {
+                lease_error = "missing session_uuid";
+            }
 
             uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
             ack[0] = packet_tunnel::kProtocolVersion;
-            ack[1] = (version == packet_tunnel::kProtocolVersion)
-                ? packet_tunnel::kStatusOk
-                : packet_tunnel::kStatusUnsupportedVersion;
+            ack[1] = packet_tunnel::kStatusOk;
+            if (version != packet_tunnel::kProtocolVersion) {
+                ack[1] = packet_tunnel::kStatusUnsupportedVersion;
+            } else if (!tun_manager.IsActive()) {
+                ack[1] = packet_tunnel::kStatusInvalidRequest;
+                lease_error = "tun_manager is not active";
+            } else if (!has_active_lease) {
+                ack[1] = packet_tunnel::kStatusInvalidRequest;
+            } else if (active_lease.virtual_ip != virtual_ip) {
+                ack[1] = packet_tunnel::kStatusInvalidRequest;
+                lease_error = "lease virtual_ip mismatch";
+            }
             *(uint16_t*)(ack + 2) = htons(mtu);
             memcpy(ack + 4, &virtual_ip_be, sizeof(virtual_ip_be));
 
-            if (!send_all_exact(client_fd, ack, sizeof(ack))) {
-                Logger::error("[IP Tunnel|" + session_uuid + "] 发送握手确认失败");
-                close(client_fd);
-                return;
+            size_t ack_sent = 0;
+            while (ack_sent < sizeof(ack)) {
+                int n = send(client_fd, (const char*)ack + ack_sent, sizeof(ack) - ack_sent, MSG_NOSIGNAL);
+                if (n <= 0) {
+                    Logger::error("[IP Tunnel|" + session_uuid + "] 发送握手确认失败");
+                    close(client_fd);
+                    return;
+                }
+                ack_sent += (size_t)n;
             }
 
             if (ack[1] != packet_tunnel::kStatusOk) {
-                Logger::warning("[IP Tunnel|" + session_uuid + "] 协议版本不支持，连接已拒绝");
+                Logger::warning("[IP Tunnel|" + session_uuid + "] 握手被拒绝: status=" +
+                                to_string((int)ack[1]) +
+                                (lease_error.empty() ? "" : ", reason=" + lease_error));
                 close(client_fd);
                 return;
             }
 
-            Logger::info("[IP Tunnel|" + session_uuid + "] 专用会话已建立: 客户端=" + client_str +
-                         ", virtual_ip=" + string(virtual_ip_str));
+            session = make_shared<PacketTunnelSession>(client_fd, client_str, session_uuid, virtual_ip_be, mtu);
 
-            while (running) {
+            shared_ptr<PacketTunnelSession> replaced_session;
+            {
+                lock_guard<mutex> lock(packet_tunnel_mutex);
+                auto it = packet_tunnel_sessions.find(virtual_ip_be);
+                if (it != packet_tunnel_sessions.end()) {
+                    replaced_session = it->second;
+                }
+                packet_tunnel_sessions[virtual_ip_be] = session;
+            }
+
+            if (replaced_session && replaced_session->client_fd != client_fd) {
+                replaced_session->active = false;
+                shutdown(replaced_session->client_fd, SHUT_RDWR);
+                Logger::warning("[IP Tunnel|" + session_uuid + "] 替换旧会话: virtual_ip=" + virtual_ip);
+            }
+
+            Logger::info("[IP Tunnel|" + session_uuid + "] 专用会话已建立: 客户端=" + client_str +
+                         ", virtual_ip=" + virtual_ip);
+
+            while (running && session->active) {
                 uint8_t header[packet_tunnel::kFrameHeaderSize] = {};
                 int n = recv(client_fd, header, sizeof(header), MSG_WAITALL);
                 if (n == 0) {
@@ -1841,7 +2212,6 @@ private:
 
                 uint8_t frame_type = header[0];
                 uint16_t payload_len = ntohs(*(uint16_t*)(header + 1));
-
                 vector<uint8_t> payload(payload_len);
                 if (payload_len > 0 && !recv_all_exact(client_fd, payload.data(), payload.size())) {
                     Logger::warning("[IP Tunnel|" + session_uuid + "] 读取帧负载失败");
@@ -1849,10 +2219,7 @@ private:
                 }
 
                 if (frame_type == packet_tunnel::kFrameHeartbeat && payload_len == 0) {
-                    uint8_t heartbeat_ack[packet_tunnel::kFrameHeaderSize] = {};
-                    heartbeat_ack[0] = packet_tunnel::kFrameHeartbeatAck;
-                    *(uint16_t*)(heartbeat_ack + 1) = htons(0);
-                    if (!send_all_exact(client_fd, heartbeat_ack, sizeof(heartbeat_ack))) {
+                    if (!send_packet_tunnel_frame(session, packet_tunnel::kFrameHeartbeatAck, nullptr, 0)) {
                         Logger::warning("[IP Tunnel|" + session_uuid + "] 发送心跳确认失败");
                         break;
                     }
@@ -1860,7 +2227,52 @@ private:
                 }
 
                 if (frame_type == packet_tunnel::kFrameIpv4Packet) {
-                    Logger::debug("[IP Tunnel|" + session_uuid + "] 收到IPv4包占位帧, 长度=" + to_string(payload_len));
+                    if (payload_len < 20) {
+                        Logger::warning("[IP Tunnel|" + session_uuid + "] IPv4帧过短: len=" + to_string(payload_len));
+                        continue;
+                    }
+
+                    uint8_t ip_version = (payload[0] >> 4) & 0x0F;
+                    if (ip_version != 4) {
+                        Logger::warning("[IP Tunnel|" + session_uuid + "] 非IPv4帧，已忽略: version=" + to_string((int)ip_version));
+                        continue;
+                    }
+
+                    uint32_t src_ip_be = 0;
+                    uint32_t dst_ip_be = 0;
+                    memcpy(&src_ip_be, &payload[12], sizeof(src_ip_be));
+                    memcpy(&dst_ip_be, &payload[16], sizeof(dst_ip_be));
+
+                    if (src_ip_be != virtual_ip_be) {
+                        Logger::warning("[IP Tunnel|" + session_uuid + "] 源IP不匹配: src=" +
+                                        ipv4_be_to_string(src_ip_be) + ", lease=" + virtual_ip);
+                        continue;
+                    }
+
+                    const bool dst_is_game_server = has_game_server_ip_be && dst_ip_be == game_server_ip_be;
+                    const bool dst_is_virtual_peer = has_virtual_subnet_be &&
+                                                     ipv4_in_subnet_be(dst_ip_be, virtual_network_ip_be, virtual_subnet_mask_be);
+
+                    if (!dst_is_game_server && !dst_is_virtual_peer) {
+                        Logger::debug("[IP Tunnel|" + session_uuid + "] ignore non-tunnel route: dst=" +
+                                      ipv4_be_to_string(dst_ip_be));
+                        continue;
+                    }
+
+                    const uint8_t protocol = ipv4_protocol(payload);
+                    if (protocol == IPPROTO_ICMP || dst_ip_be == server_virtual_ip_be || dst_ip_be == gateway_ip_be) {
+                        Logger::debug("[IP Tunnel|" + session_uuid + "] client->TUN src=" +
+                                      ipv4_be_to_string(src_ip_be) + " dst=" + ipv4_be_to_string(dst_ip_be) +
+                                      " proto=" + to_string((int)protocol) + " len=" + to_string(payload_len));
+                    }
+
+                    string tun_error;
+                    if (!tun_manager.WritePacket(payload.data(), payload.size(), &tun_error)) {
+                        Logger::warning("[IP Tunnel|" + session_uuid + "] 写入TUN失败: " + tun_error);
+                        break;
+                    }
+
+                    Logger::debug("[IP Tunnel|" + session_uuid + "] 已写入TUN IPv4包: len=" + to_string(payload_len));
                     continue;
                 }
 
@@ -1871,11 +2283,18 @@ private:
             Logger::error("[IP Tunnel|" + session_uuid + "] 异常: " + string(e.what()));
         }
 
+        if (session) {
+            session->active = false;
+            lock_guard<mutex> lock(packet_tunnel_mutex);
+            auto it = packet_tunnel_sessions.find(virtual_ip_be);
+            if (it != packet_tunnel_sessions.end() && it->second == session) {
+                packet_tunnel_sessions.erase(it);
+            }
+        }
+
         close(client_fd);
     }
 
-    // 处理UDP tunnel连接
-    // v4.5.0: 添加client_ipv4_from_payload参数,包含客户端payload中声明的IP
     void handle_udp_tunnel(int client_fd, const string& client_str,
                           const string& client_ipv4_from_payload, uint16_t game_port,
                           const string& session_uuid = "") {
@@ -2432,8 +2851,8 @@ void configure_default_thread_stack() {
     }
 
     size_t stack_size = DEFAULT_THREAD_STACK_SIZE;
-    if (stack_size < PTHREAD_STACK_MIN) {
-        stack_size = PTHREAD_STACK_MIN;
+    if (stack_size < static_cast<size_t>(PTHREAD_STACK_MIN)) {
+        stack_size = static_cast<size_t>(PTHREAD_STACK_MIN);
     }
 
     long page_size = sysconf(_SC_PAGESIZE);
@@ -2467,6 +2886,11 @@ GlobalConfig load_config(const string& filename) {
         Logger::warning("配置文件不存在: " + filename + "，使用默认配置");
         // 返回包含一个默认服务器的配置
         ServerConfig default_server;
+        default_server.virtual_subnet = build_default_virtual_subnet(default_server.listen_port);
+        default_server.virtual_gateway =
+            build_auto_virtual_gateway(default_server.virtual_subnet, default_server.listen_port);
+        default_server.server_virtual_ip = build_default_server_virtual_ip(default_server.virtual_subnet);
+        default_server.game_server_ip = default_server.server_virtual_ip;
         global_config.servers.push_back(default_server);
         return global_config;
     }
@@ -2535,6 +2959,13 @@ GlobalConfig load_config(const string& filename) {
                     size_t end = line.find("\"", start);
                     if (start != string::npos && end != string::npos) {
                         current_server.game_server_ip = line.substr(start, end - start);
+                    }
+                }
+                else if (line.find("\"server_virtual_ip\"") != string::npos) {
+                    size_t start = line.find("\"", line.find(":")) + 1;
+                    size_t end = line.find("\"", start);
+                    if (start != string::npos && end != string::npos) {
+                        current_server.server_virtual_ip = line.substr(start, end - start);
                     }
                 }
                 else if (line.find("\"max_connections\"") != string::npos) {
@@ -2628,6 +3059,18 @@ GlobalConfig load_config(const string& filename) {
     for (size_t i = 0; i < global_config.servers.size(); ++i) {
         if (global_config.servers[i].virtual_subnet.empty()) {
             global_config.servers[i].virtual_subnet = build_default_virtual_subnet(global_config.servers[i].listen_port);
+        }
+        if (global_config.servers[i].virtual_gateway.empty()) {
+            global_config.servers[i].virtual_gateway =
+                build_auto_virtual_gateway(global_config.servers[i].virtual_subnet,
+                                           global_config.servers[i].listen_port);
+        }
+        if (global_config.servers[i].server_virtual_ip.empty()) {
+            global_config.servers[i].server_virtual_ip =
+                build_default_server_virtual_ip(global_config.servers[i].virtual_subnet);
+        }
+        if (global_config.servers[i].game_server_ip.empty()) {
+            global_config.servers[i].game_server_ip = global_config.servers[i].server_virtual_ip;
         }
     }
 

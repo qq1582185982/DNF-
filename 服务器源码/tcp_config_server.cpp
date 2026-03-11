@@ -24,6 +24,8 @@
 #include <cctype>
 #include <sys/inotify.h>
 #include <sys/select.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 
 #include "ip_pool_manager.h"
 
@@ -37,6 +39,7 @@ struct ServerConfig {
     int id;
     string name;
     string game_server_ip;
+    string server_virtual_ip;
     string tunnel_server_ip;
     int tunnel_port;
     string download_url;  // 客户端下载地址
@@ -44,39 +47,10 @@ struct ServerConfig {
     string virtual_gateway;
     int lease_seconds;
 
-    // 默认构造函数
     ServerConfig()
         : id(0),
           tunnel_port(0),
           lease_seconds((int)ip_tunnel::kDefaultLeaseSeconds) {}
-
-    // 拷贝构造函数
-    ServerConfig(const ServerConfig& other)
-        : id(other.id),
-          name(other.name),
-          game_server_ip(other.game_server_ip),
-          tunnel_server_ip(other.tunnel_server_ip),
-          tunnel_port(other.tunnel_port),
-          download_url(other.download_url),
-          virtual_subnet(other.virtual_subnet),
-          virtual_gateway(other.virtual_gateway),
-          lease_seconds(other.lease_seconds) {}
-
-    // 赋值运算符
-    ServerConfig& operator=(const ServerConfig& other) {
-        if (this != &other) {
-            id = other.id;
-            name = other.name;
-            game_server_ip = other.game_server_ip;
-            tunnel_server_ip = other.tunnel_server_ip;
-            tunnel_port = other.tunnel_port;
-            download_url = other.download_url;
-            virtual_subnet = other.virtual_subnet;
-            virtual_gateway = other.virtual_gateway;
-            lease_seconds = other.lease_seconds;
-        }
-        return *this;
-    }
 };
 
 // 全局变量
@@ -210,6 +184,76 @@ static string build_default_virtual_subnet(int tunnel_port) {
     return subnet.str();
 }
 
+static string build_auto_virtual_gateway(const string& subnet_cidr, int tunnel_port) {
+    size_t slash = subnet_cidr.find('/');
+    string base_ip = (slash == string::npos) ? subnet_cidr : subnet_cidr.substr(0, slash);
+    int prefix_bits = 24;
+    if (slash != string::npos) {
+        prefix_bits = atoi(subnet_cidr.c_str() + slash + 1);
+    }
+
+    if (prefix_bits < 0 || prefix_bits > 30) {
+        prefix_bits = 24;
+    }
+
+    in_addr network_addr{};
+    if (inet_pton(AF_INET, base_ip.c_str(), &network_addr) != 1) {
+        return "";
+    }
+
+    uint32_t network_host = ntohl(network_addr.s_addr);
+    uint32_t host_count = 1u << (32 - prefix_bits);
+    if (host_count <= 2) {
+        return "";
+    }
+
+    (void)tunnel_port;
+    uint32_t gateway_host = network_host + 1;
+
+    in_addr gateway_addr{};
+    gateway_addr.s_addr = htonl(gateway_host);
+
+    char gateway_str[INET_ADDRSTRLEN] = {};
+    if (!inet_ntop(AF_INET, &gateway_addr, gateway_str, sizeof(gateway_str))) {
+        return "";
+    }
+    return string(gateway_str);
+}
+
+static string build_default_server_virtual_ip(const string& subnet_cidr) {
+    size_t slash = subnet_cidr.find('/');
+    string base_ip = (slash == string::npos) ? subnet_cidr : subnet_cidr.substr(0, slash);
+    int prefix_bits = 24;
+    if (slash != string::npos) {
+        prefix_bits = atoi(subnet_cidr.c_str() + slash + 1);
+    }
+
+    if (prefix_bits < 0 || prefix_bits > 30) {
+        prefix_bits = 24;
+    }
+
+    in_addr network_addr{};
+    if (inet_pton(AF_INET, base_ip.c_str(), &network_addr) != 1) {
+        return "";
+    }
+
+    uint32_t network_host = ntohl(network_addr.s_addr);
+    uint32_t host_count = 1u << (32 - prefix_bits);
+    if (host_count <= 3) {
+        return "";
+    }
+
+    uint32_t server_host = network_host + 2;
+    in_addr server_addr{};
+    server_addr.s_addr = htonl(server_host);
+
+    char server_str[INET_ADDRSTRLEN] = {};
+    if (!inet_ntop(AF_INET, &server_addr, server_str, sizeof(server_str))) {
+        return "";
+    }
+    return string(server_str);
+}
+
 string canonical_server_key(const ServerConfig& server) {
     return to_string(server.id);
 }
@@ -266,12 +310,17 @@ string generate_lease_json(const ServerConfig& server,
          << "\"virtual_ip\":\"" << json_escape(lease.virtual_ip) << "\","
          << "\"subnet_mask\":\"" << json_escape(lease.subnet_mask) << "\","
          << "\"gateway_ip\":\"" << json_escape(lease.gateway_ip) << "\","
+         << "\"server_virtual_ip\":\"" << json_escape(lease.server_virtual_ip) << "\","
          << "\"mtu\":" << (int)ip_tunnel::kDefaultMtu << ","
          << "\"lease_seconds\":" << lease.lease_seconds << ","
          << "\"reused_previous_ip\":" << (lease.reused_previous_ip ? "true" : "false") << ","
-         << "\"routes\":[\""
-         << json_escape(server.game_server_ip + "/32")
-         << "\"]}";
+         << "\"routes\":[";
+
+    if (!server.virtual_subnet.empty()) {
+        json << "\"" << json_escape(server.virtual_subnet) << "\"";
+    }
+
+    json << "]}";
     return json.str();
 }
 
@@ -291,6 +340,7 @@ bool rebuild_ip_pools(const vector<ServerConfig>& servers,
         pool_config.server_key = canonical_server_key(server);
         pool_config.cidr = server.virtual_subnet;
         pool_config.gateway_ip = server.virtual_gateway;
+        pool_config.server_virtual_ip = server.server_virtual_ip;
         pool_config.lease_seconds = server.lease_seconds > 0
             ? (uint32_t)server.lease_seconds
             : ip_tunnel::kDefaultLeaseSeconds;
@@ -468,9 +518,6 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
         string name_str = extract_json_string(obj, "name");
         printf("  name: %s (长度: %zu)\n", name_str.c_str(), name_str.length());
 
-        string game_ip_str = extract_json_string(obj, "game_server_ip");
-        printf("  game_ip: %s (长度: %zu)\n", game_ip_str.c_str(), game_ip_str.length());
-
         string tunnel_ip_str = extract_json_string(obj, "tunnel_server_ip");
         if (tunnel_ip_str.empty()) {
             tunnel_ip_str.assign(tunnel_server_ip);
@@ -490,7 +537,22 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
         printf("  virtual_subnet: %s\n", virtual_subnet_str.c_str());
 
         string virtual_gateway_str = extract_json_string(obj, "virtual_gateway");
+        if (virtual_gateway_str.empty()) {
+            virtual_gateway_str = build_auto_virtual_gateway(virtual_subnet_str, port);
+        }
         printf("  virtual_gateway: %s\n", virtual_gateway_str.c_str());
+
+        string server_virtual_ip_str = extract_json_string(obj, "server_virtual_ip");
+        if (server_virtual_ip_str.empty()) {
+            server_virtual_ip_str = build_default_server_virtual_ip(virtual_subnet_str);
+        }
+        printf("  server_virtual_ip: %s\n", server_virtual_ip_str.c_str());
+
+        string game_ip_str = extract_json_string(obj, "game_server_ip");
+        if (game_ip_str.empty()) {
+            game_ip_str = server_virtual_ip_str;
+        }
+        printf("  game_ip: %s (长度: %zu)\n", game_ip_str.c_str(), game_ip_str.length());
 
         int lease_seconds = extract_json_int(obj, "lease_seconds");
         if (lease_seconds <= 0) {
@@ -499,12 +561,13 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
         printf("  lease_seconds: %d\n", lease_seconds);
 
         // 使用emplace_back避免拷贝
-        printf("准备添加到临时列表...\n");
-        try {
-            ServerConfig s;
+        printf("准备添加到临时列表...\n");        try {
+            temp_servers.emplace_back();
+            ServerConfig& s = temp_servers.back();
             s.id = id++;
             s.name.assign(name_str.c_str(), name_str.length());
             s.game_server_ip.assign(game_ip_str.c_str(), game_ip_str.length());
+            s.server_virtual_ip.assign(server_virtual_ip_str.c_str(), server_virtual_ip_str.length());
             s.tunnel_server_ip.assign(tunnel_ip_str.c_str(), tunnel_ip_str.length());
             s.tunnel_port = port;
             s.download_url.assign(download_url_str.c_str(), download_url_str.length());
@@ -512,9 +575,7 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
             s.virtual_gateway.assign(virtual_gateway_str.c_str(), virtual_gateway_str.length());
             s.lease_seconds = lease_seconds;
 
-            printf("ServerConfig构造完成，准备push_back...\n");
-            temp_servers.push_back(s);
-            printf("✓ 服务器 #%d 添加成功\n", s.id);
+            printf("added server #%d\n", s.id);
             server_count++;
         } catch (const bad_alloc& e) {
             fprintf(stderr, "内存分配失败: %s\n", e.what());
@@ -543,7 +604,7 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
     // 一次性更新全局列表（加锁）
     {
         lock_guard<mutex> lock(g_servers_mutex);
-        g_servers = temp_servers;
+        g_servers.swap(temp_servers);
         g_ip_pool_manager = temp_pool_manager;
     }
 
@@ -567,6 +628,7 @@ string generate_server_list_json() {
                  << "\"id\":" << s.id << ","
                  << "\"name\":\"" << json_escape(s.name) << "\","
                  << "\"game_server_ip\":\"" << json_escape(s.game_server_ip) << "\","
+                 << "\"server_virtual_ip\":\"" << json_escape(s.server_virtual_ip) << "\","
                  << "\"tunnel_server_ip\":\"" << json_escape(s.tunnel_server_ip) << "\","
                  << "\"tunnel_port\":" << s.tunnel_port << ","
                  << "\"download_url\":\"" << json_escape(s.download_url) << "\","
@@ -879,6 +941,22 @@ bool reload_tcp_config() {
 }
 
 // 配置文件监控线程
+bool query_active_tcp_config_lease(const std::string& server_key,
+                                   const std::string& session_uuid,
+                                   IPPoolManager::LeaseRecord* out_record,
+                                   std::string* error) {
+    lock_guard<mutex> lock(g_servers_mutex);
+    const ServerConfig* server = find_server_by_key_locked(server_key);
+    if (server == NULL) {
+        if (error) {
+            *error = "server not found";
+        }
+        return false;
+    }
+
+    return g_ip_pool_manager.GetLease(canonical_server_key(*server), session_uuid, out_record, error);
+}
+
 void* config_monitor_thread(void* arg) {
     printf("配置文件自动重载监控已启动\n");
     printf("监控文件: %s\n", g_config_file.c_str());

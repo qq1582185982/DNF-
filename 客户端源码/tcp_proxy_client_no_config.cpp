@@ -142,8 +142,10 @@ using namespace std;
 
 class TCPProxyClient;
 class LeaseSessionGuard;
+class PacketTunnelClient;
 
 static TCPProxyClient* g_active_client = nullptr;
+static PacketTunnelClient* g_active_packet_tunnel = nullptr;
 static LeaseSessionGuard* g_active_lease_session = nullptr;
 static atomic<bool> g_shutdown_requested(false);
 static atomic<bool> g_shutdown_completed(false);
@@ -436,7 +438,7 @@ string get_local_ipv4_address() {
 
 // 读取API配置（用于获取服务器列表）
 // 期望格式: {"config_api_url":"config.server.com","config_api_port":8080,"version_name":"多服务器版v1.0"}
-bool read_api_config_from_self(string& api_url, int& api_port, string& version_name) {
+bool read_api_config_from_self(string& api_url, int& api_port, string& version_name, string& data_plane_mode) {
     // 1. 获取当前exe路径
     char exe_path[MAX_PATH];
     if (GetModuleFileNameA(NULL, exe_path, MAX_PATH) == 0) {
@@ -535,6 +537,22 @@ bool read_api_config_from_self(string& api_url, int& api_port, string& version_n
 
     if (version_name.empty()) {
         version_name = "多服务器版";
+    }
+
+    data_plane_mode.clear();
+    size_t data_plane_pos = json_content.find("\"data_plane_mode\"");
+    if (data_plane_pos != string::npos) {
+        size_t data_plane_colon = json_content.find(":", data_plane_pos);
+        if (data_plane_colon != string::npos) {
+            size_t data_plane_quote1 = json_content.find("\"", data_plane_colon);
+            if (data_plane_quote1 != string::npos) {
+                size_t data_plane_quote2 = json_content.find("\"", data_plane_quote1 + 1);
+                if (data_plane_quote2 != string::npos) {
+                    data_plane_mode = json_content.substr(data_plane_quote1 + 1,
+                                                          data_plane_quote2 - data_plane_quote1 - 1);
+                }
+            }
+        }
     }
 
     return true;
@@ -744,6 +762,26 @@ vector<ServerInfo> parse_server_list(const string& json_str) {
                     }
                 }
             }
+        }
+
+        // 解析server_virtual_ip
+        size_t server_virtual_ip_pos = obj_content.find("\"server_virtual_ip\"");
+        if (server_virtual_ip_pos != string::npos) {
+            size_t server_virtual_ip_colon = obj_content.find(":", server_virtual_ip_pos);
+            if (server_virtual_ip_colon != string::npos) {
+                size_t server_virtual_ip_quote1 = obj_content.find("\"", server_virtual_ip_colon);
+                if (server_virtual_ip_quote1 != string::npos) {
+                    size_t server_virtual_ip_quote2 = obj_content.find("\"", server_virtual_ip_quote1 + 1);
+                    if (server_virtual_ip_quote2 != string::npos) {
+                        info.server_virtual_ip = obj_content.substr(
+                            server_virtual_ip_quote1 + 1,
+                            server_virtual_ip_quote2 - server_virtual_ip_quote1 - 1);
+                    }
+                }
+            }
+        }
+        if (info.server_virtual_ip.empty()) {
+            info.server_virtual_ip = info.game_server_ip;
         }
 
         // 解析tunnel_server_ip
@@ -3906,6 +3944,9 @@ void RequestGracefulShutdown(const string& reason) {
     if (g_active_client != nullptr) {
         g_active_client->stop();
     }
+    if (g_active_packet_tunnel != nullptr) {
+        g_active_packet_tunnel->Stop();
+    }
     if (g_active_lease_session != nullptr) {
         g_active_lease_session->Release();
     }
@@ -4024,8 +4065,9 @@ int main(int argc, char* argv[]) {
     string CONFIG_API_URL;
     int CONFIG_API_PORT;
     string VERSION_NAME;
+    string CONFIG_DATA_PLANE_MODE;
 
-    if (!read_api_config_from_self(CONFIG_API_URL, CONFIG_API_PORT, VERSION_NAME)) {
+    if (!read_api_config_from_self(CONFIG_API_URL, CONFIG_API_PORT, VERSION_NAME, CONFIG_DATA_PLANE_MODE)) {
         cout << "错误: 无法读取API配置" << endl;
         cout << endl;
         cout << "此程序需要配置才能运行。" << endl;
@@ -4195,13 +4237,14 @@ int main(int argc, char* argv[]) {
     cout << "✓ 租约申请成功" << endl;
     cout << "  虚拟IP: " << granted_lease.virtual_ip << endl;
     cout << "  网关: " << granted_lease.gateway_ip << endl;
+    cout << "  服务端虚拟IP: " << granted_lease.server_virtual_ip << endl;
     if (!granted_lease.routes.empty()) {
         cout << "  路由: " << granted_lease.routes[0].cidr << endl;
     }
     cout << endl;
 
     TunnelLeaseRuntimeConfig lease_runtime;
-    lease_runtime.game_server_ip = GAME_SERVER_IP;
+    lease_runtime.server_virtual_ip = granted_lease.server_virtual_ip;
     lease_runtime.virtual_ip = granted_lease.virtual_ip;
     lease_runtime.subnet_mask = granted_lease.subnet_mask;
     lease_runtime.gateway_ip = granted_lease.gateway_ip;
@@ -4216,7 +4259,7 @@ int main(int argc, char* argv[]) {
 
     std::unique_ptr<WintunManager> wintun_manager;
     std::unique_ptr<PacketTunnelClient> packet_tunnel_client;
-    ClientDataPlaneMode data_plane_mode = WintunManager::ResolveRequestedMode();
+    ClientDataPlaneMode data_plane_mode = WintunManager::ResolveRequestedMode(CONFIG_DATA_PLANE_MODE);
     if (data_plane_mode == ClientDataPlaneMode::ExperimentalWintun) {
         cout << "[实验模式] 请求启用Wintun数据面..." << endl;
         Logger::info("[数据面] 检测到实验模式: Wintun");
@@ -4237,7 +4280,8 @@ int main(int argc, char* argv[]) {
                 TUNNEL_PORT,
                 g_session_uuid,
                 granted_lease.virtual_ip,
-                granted_lease.mtu));
+                granted_lease.mtu,
+                wintun_manager.get()));
 
             wstring packet_tunnel_error;
             if (!packet_tunnel_client->Start(&packet_tunnel_error)) {
@@ -4247,11 +4291,55 @@ int main(int argc, char* argv[]) {
                 cout << "  ⚠ IP Tunnel专用会话未建立，当前仍使用TAP旧链路" << endl;
                 packet_tunnel_client.reset();
             } else {
-                Logger::info("[数据面] IP Tunnel专用会话已建立，当前版本尚未切换收发线程");
-                cout << "  ✓ IP Tunnel专用会话已建立（当前仍使用TAP旧链路）" << endl;
+                wstring network_error;
+                if (!wintun_manager->ActivateNetwork(lease_runtime, &network_error)) {
+                    string network_error_utf8 = wstring_to_utf8(network_error);
+                    Logger::warning("[数据面] Wintun网络配置失败，回退到TAP旧链路: " + network_error_utf8);
+                    cout << "  ⚠ Wintun网络配置失败，当前仍使用TAP旧链路" << endl;
+                    packet_tunnel_client->Stop();
+                    packet_tunnel_client.reset();
+                    wintun_manager->Cleanup();
+                    wintun_manager.reset();
+                } else {
+                    Logger::info("[数据面] IP Tunnel专用会话已建立，实验模式切换到Wintun链路");
+                    cout << "  ✓ IP Tunnel专用会话已建立，已切换到Wintun链路" << endl;
+                }
             }
         }
         cout << endl;
+
+        if (wintun_manager && packet_tunnel_client) {
+            cout << "============================================================" << endl;
+            cout << "✓ 系统就绪！当前运行在 Wintun + IP Tunnel 实验链路" << endl;
+            cout << "当前版本 " << VERSION_NAME << endl;
+            cout << "============================================================" << endl;
+            cout << endl;
+            cout << "按Ctrl+C退出..." << endl;
+
+            g_active_packet_tunnel = packet_tunnel_client.get();
+            g_active_lease_session = &lease_session;
+            SetConsoleCtrlHandler(ClientConsoleCtrlHandler, TRUE);
+
+            while (!g_shutdown_requested && packet_tunnel_client->IsConnected()) {
+                Sleep(200);
+            }
+
+            packet_tunnel_client->Stop();
+
+            if (g_shutdown_requested) {
+                for (int i = 0; i < 60 && !g_shutdown_completed; ++i) {
+                    Sleep(100);
+                }
+            }
+
+            SetConsoleCtrlHandler(ClientConsoleCtrlHandler, FALSE);
+            g_active_packet_tunnel = nullptr;
+            g_active_lease_session = nullptr;
+            g_shutdown_requested = false;
+            g_shutdown_completed = false;
+            Logger::close();
+            return 0;
+        }
     }
 
     // ========== 步骤4: 计算辅助IP ========== 
@@ -4371,6 +4459,7 @@ int main(int argc, char* argv[]) {
 
     SetConsoleCtrlHandler(ClientConsoleCtrlHandler, FALSE);
     g_active_client = nullptr;
+    g_active_packet_tunnel = nullptr;
     g_active_lease_session = nullptr;
     g_shutdown_requested = false;
     g_shutdown_completed = false;

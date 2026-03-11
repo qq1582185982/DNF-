@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
+#include <iphlpapi.h>
+#include <netioapi.h>
+#include <ws2tcpip.h>
 #include <sstream>
 #include <vector>
 
@@ -13,6 +17,48 @@ namespace {
 const WCHAR kAdapterName[] = L"DNFProxyWintun";
 const WCHAR kTunnelType[] = L"DNFProxy";
 const DWORD kRingCapacity = 0x400000;
+
+bool ParseIpv4Cidr(const std::string& cidr, std::string* network, std::string* mask) {
+    size_t slash = cidr.find('/');
+    if (slash == std::string::npos) {
+        return false;
+    }
+
+    std::string ip = cidr.substr(0, slash);
+    int prefix_length = atoi(cidr.c_str() + slash + 1);
+    if (prefix_length < 0 || prefix_length > 32) {
+        return false;
+    }
+
+    IN_ADDR addr = {};
+    if (InetPtonA(AF_INET, ip.c_str(), &addr) != 1) {
+        return false;
+    }
+
+    uint32_t ip_host = ntohl(addr.S_un.S_addr);
+    uint32_t mask_host = (prefix_length == 0) ? 0u : (0xFFFFFFFFu << (32 - prefix_length));
+    uint32_t network_host = ip_host & mask_host;
+
+    IN_ADDR network_addr = {};
+    network_addr.S_un.S_addr = htonl(network_host);
+    IN_ADDR mask_addr = {};
+    mask_addr.S_un.S_addr = htonl(mask_host);
+
+    char network_buf[INET_ADDRSTRLEN] = {};
+    char mask_buf[INET_ADDRSTRLEN] = {};
+    if (InetNtopA(AF_INET, &network_addr, network_buf, sizeof(network_buf)) == NULL ||
+        InetNtopA(AF_INET, &mask_addr, mask_buf, sizeof(mask_buf)) == NULL) {
+        return false;
+    }
+
+    if (network != NULL) {
+        *network = network_buf;
+    }
+    if (mask != NULL) {
+        *mask = mask_buf;
+    }
+    return true;
+}
 
 std::wstring BuildWindowsErrorMessage(const std::wstring& prefix, DWORD error) {
     wchar_t* buffer = NULL;
@@ -126,9 +172,16 @@ WintunManager::WintunManager()
       create_adapter_(NULL),
       open_adapter_(NULL),
       close_adapter_(NULL),
+      get_adapter_luid_(NULL),
       get_running_driver_version_(NULL),
       start_session_(NULL),
-      end_session_(NULL) {}
+      end_session_(NULL),
+      get_read_wait_event_(NULL),
+      receive_packet_(NULL),
+      release_receive_packet_(NULL),
+      allocate_send_packet_(NULL),
+      send_packet_(NULL),
+      interface_index_(0) {}
 
 WintunManager::~WintunManager() {
     Cleanup();
@@ -168,13 +221,21 @@ std::wstring WintunManager::Utf8ToWide(const std::string& value) {
 }
 
 bool WintunManager::HasBasicRuntimeConfig(const TunnelLeaseRuntimeConfig& config) {
-    return !config.game_server_ip.empty() &&
+    return !config.server_virtual_ip.empty() &&
            !config.virtual_ip.empty() &&
            !config.subnet_mask.empty() &&
            !config.gateway_ip.empty();
 }
 
-ClientDataPlaneMode WintunManager::ResolveRequestedMode() {
+ClientDataPlaneMode WintunManager::ResolveRequestedMode(const std::string& preferred_mode) {
+    const std::string config_value = ToLowerCopy(preferred_mode);
+    if (config_value == "wintun") {
+        return ClientDataPlaneMode::ExperimentalWintun;
+    }
+    if (config_value == "tap" || config_value == "legacy" || config_value == "legacytap") {
+        return ClientDataPlaneMode::LegacyTap;
+    }
+
     const std::string env_value = ToLowerCopy(ReadEnvUtf8("DNF_PROXY_DATA_PLANE"));
     if (env_value == "wintun") {
         return ClientDataPlaneMode::ExperimentalWintun;
@@ -202,13 +263,21 @@ bool WintunManager::LoadRuntime(std::wstring* error_msg) {
     create_adapter_ = reinterpret_cast<CreateAdapterFn>(GetProcAddress(module_, "WintunCreateAdapter"));
     open_adapter_ = reinterpret_cast<OpenAdapterFn>(GetProcAddress(module_, "WintunOpenAdapter"));
     close_adapter_ = reinterpret_cast<CloseAdapterFn>(GetProcAddress(module_, "WintunCloseAdapter"));
+    get_adapter_luid_ = reinterpret_cast<GetAdapterLuidFn>(GetProcAddress(module_, "WintunGetAdapterLUID"));
     get_running_driver_version_ = reinterpret_cast<GetRunningDriverVersionFn>(
         GetProcAddress(module_, "WintunGetRunningDriverVersion"));
     start_session_ = reinterpret_cast<StartSessionFn>(GetProcAddress(module_, "WintunStartSession"));
     end_session_ = reinterpret_cast<EndSessionFn>(GetProcAddress(module_, "WintunEndSession"));
+    get_read_wait_event_ = reinterpret_cast<GetReadWaitEventFn>(GetProcAddress(module_, "WintunGetReadWaitEvent"));
+    receive_packet_ = reinterpret_cast<ReceivePacketFn>(GetProcAddress(module_, "WintunReceivePacket"));
+    release_receive_packet_ = reinterpret_cast<ReleaseReceivePacketFn>(GetProcAddress(module_, "WintunReleaseReceivePacket"));
+    allocate_send_packet_ = reinterpret_cast<AllocateSendPacketFn>(GetProcAddress(module_, "WintunAllocateSendPacket"));
+    send_packet_ = reinterpret_cast<SendPacketFn>(GetProcAddress(module_, "WintunSendPacket"));
 
-    if (create_adapter_ == NULL || open_adapter_ == NULL || close_adapter_ == NULL ||
-        get_running_driver_version_ == NULL || start_session_ == NULL || end_session_ == NULL) {
+    if (create_adapter_ == NULL || open_adapter_ == NULL || close_adapter_ == NULL || get_adapter_luid_ == NULL ||
+        get_running_driver_version_ == NULL || start_session_ == NULL || end_session_ == NULL ||
+        get_read_wait_event_ == NULL || receive_packet_ == NULL || release_receive_packet_ == NULL ||
+        allocate_send_packet_ == NULL || send_packet_ == NULL) {
         if (error_msg != NULL) {
             *error_msg = L"wintun.dll is missing required exports";
         }
@@ -236,6 +305,15 @@ bool WintunManager::EnsureAdapter(std::wstring* error_msg) {
         return false;
     }
 
+    NET_LUID luid = {};
+    get_adapter_luid_(adapter_, &luid);
+    if (ConvertInterfaceLuidToIndex(&luid, &interface_index_) != NO_ERROR || interface_index_ == 0) {
+        if (error_msg != NULL) {
+            *error_msg = L"Unable to resolve Wintun interface index";
+        }
+        return false;
+    }
+
     return true;
 }
 
@@ -255,10 +333,11 @@ bool WintunManager::StartSession(std::wstring* error_msg) {
 }
 
 bool WintunManager::ConfigureAddress(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg) {
+    ExecuteCommandSilent("netsh interface ipv4 delete route prefix=0.0.0.0/0 interface=\"DNFProxyWintun\" store=active >nul 2>&1");
+
     const std::string base =
         "netsh interface ipv4 set address name=\"DNFProxyWintun\" source=static address=" +
-        config.virtual_ip + " mask=" + config.subnet_mask + " gateway=" + config.gateway_ip +
-        " gwmetric=1 store=active >nul 2>&1";
+        config.virtual_ip + " mask=" + config.subnet_mask + " gateway=none store=active >nul 2>&1";
     int ret = ExecuteCommandSilent(base);
     if (ret == 0) {
         return true;
@@ -266,7 +345,7 @@ bool WintunManager::ConfigureAddress(const TunnelLeaseRuntimeConfig& config, std
 
     const std::string fallback =
         "netsh interface ip set address name=\"DNFProxyWintun\" static " +
-        config.virtual_ip + " " + config.subnet_mask + " " + config.gateway_ip + " 1 >nul 2>&1";
+        config.virtual_ip + " " + config.subnet_mask + " none >nul 2>&1";
     ret = ExecuteCommandSilent(fallback);
     if (ret != 0 && error_msg != NULL) {
         *error_msg = CommandError(L"Setting Wintun address", fallback, ret);
@@ -291,17 +370,33 @@ bool WintunManager::ConfigureMtu(const TunnelLeaseRuntimeConfig& config, std::ws
 }
 
 bool WintunManager::ConfigureRoutes(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg) {
+    if (interface_index_ == 0) {
+        if (error_msg != NULL) {
+            *error_msg = L"Wintun interface index is unavailable";
+        }
+        return false;
+    }
+
     for (size_t i = 0; i < config.routes.size(); ++i) {
         const std::string& cidr = config.routes[i].cidr;
+        std::string network;
+        std::string mask;
+        if (!ParseIpv4Cidr(cidr, &network, &mask)) {
+            if (error_msg != NULL) {
+                *error_msg = L"Invalid IPv4 route cidr: " + Utf8ToWideLocal(cidr);
+            }
+            return false;
+        }
+
         std::string delete_cmd =
-            "netsh interface ipv4 delete route prefix=" + cidr +
-            " interface=\"DNFProxyWintun\" store=active >nul 2>&1";
+            "route delete " + network + " mask " + mask +
+            " IF " + std::to_string(interface_index_) + " >nul 2>&1";
         ExecuteCommandSilent(delete_cmd);
 
         std::string add_cmd =
-            "netsh interface ipv4 add route prefix=" + cidr +
-            " interface=\"DNFProxyWintun\" nexthop=" + config.gateway_ip +
-            " metric=1 store=active >nul 2>&1";
+            "route add " + network + " mask " + mask +
+            " 0.0.0.0 IF " + std::to_string(interface_index_) +
+            " metric 1 >nul 2>&1";
         int ret = ExecuteCommandSilent(add_cmd);
         if (ret != 0) {
             if (error_msg != NULL) {
@@ -354,14 +449,103 @@ bool WintunManager::Setup(const TunnelLeaseRuntimeConfig& config, std::wstring* 
         return false;
     }
 
-    if (IsTruthyEnv("DNF_PROXY_WINTUN_APPLY_NETWORK")) {
-        if (!ConfigureInterface(config, error_msg)) {
-            Cleanup();
-            return false;
+    active_ = true;
+    return true;
+}
+
+bool WintunManager::ActivateNetwork(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg) {
+    if (!session_ || !adapter_) {
+        if (error_msg != NULL) {
+            *error_msg = L"Wintun session is not active";
         }
+        return false;
     }
 
-    active_ = true;
+    if (!ConfigureInterface(config, error_msg)) {
+        return false;
+    }
+    return true;
+}
+
+bool WintunManager::ReadPacket(std::vector<uint8_t>* packet, DWORD wait_ms, std::wstring* error_msg) {
+    if (packet == NULL) {
+        if (error_msg != NULL) {
+            *error_msg = L"Wintun read packet output buffer is null";
+        }
+        return false;
+    }
+    packet->clear();
+
+    if (session_ == NULL || receive_packet_ == NULL || release_receive_packet_ == NULL) {
+        if (error_msg != NULL) {
+            *error_msg = L"Wintun session is not ready";
+        }
+        return false;
+    }
+
+    for (;;) {
+        DWORD packet_size = 0;
+        BYTE* incoming = receive_packet_(session_, &packet_size);
+        if (incoming != NULL) {
+            packet->assign(incoming, incoming + packet_size);
+            release_receive_packet_(session_, incoming);
+            return true;
+        }
+
+        DWORD err = GetLastError();
+        if (err == ERROR_NO_MORE_ITEMS) {
+            HANDLE event_handle = get_read_wait_event_(session_);
+            DWORD wait_ret = WaitForSingleObject(event_handle, wait_ms);
+            if (wait_ret == WAIT_TIMEOUT) {
+                return false;
+            }
+            if (wait_ret == WAIT_OBJECT_0) {
+                continue;
+            }
+            if (error_msg != NULL) {
+                *error_msg = BuildWindowsErrorMessage(L"Wintun wait failed", GetLastError());
+            }
+            return false;
+        }
+        if (err == ERROR_HANDLE_EOF) {
+            if (error_msg != NULL) {
+                *error_msg = L"Wintun adapter is terminating";
+            }
+            return false;
+        }
+
+        if (error_msg != NULL) {
+            *error_msg = BuildWindowsErrorMessage(L"Wintun receive failed", err);
+        }
+        return false;
+    }
+}
+
+bool WintunManager::WritePacket(const uint8_t* packet, size_t length, std::wstring* error_msg) {
+    if (packet == NULL || length == 0) {
+        if (error_msg != NULL) {
+            *error_msg = L"Wintun send packet is empty";
+        }
+        return false;
+    }
+
+    if (session_ == NULL || allocate_send_packet_ == NULL || send_packet_ == NULL) {
+        if (error_msg != NULL) {
+            *error_msg = L"Wintun session is not ready";
+        }
+        return false;
+    }
+
+    BYTE* outgoing = allocate_send_packet_(session_, (DWORD)length);
+    if (outgoing == NULL) {
+        if (error_msg != NULL) {
+            *error_msg = BuildWindowsErrorMessage(L"Wintun allocate send packet failed", GetLastError());
+        }
+        return false;
+    }
+
+    memcpy(outgoing, packet, length);
+    send_packet_(session_, outgoing);
     return true;
 }
 
@@ -369,9 +553,16 @@ void WintunManager::ResetRuntimeState() {
     create_adapter_ = NULL;
     open_adapter_ = NULL;
     close_adapter_ = NULL;
+    get_adapter_luid_ = NULL;
     get_running_driver_version_ = NULL;
     start_session_ = NULL;
     end_session_ = NULL;
+    get_read_wait_event_ = NULL;
+    receive_packet_ = NULL;
+    release_receive_packet_ = NULL;
+    allocate_send_packet_ = NULL;
+    send_packet_ = NULL;
+    interface_index_ = 0;
 }
 
 void WintunManager::Cleanup() {

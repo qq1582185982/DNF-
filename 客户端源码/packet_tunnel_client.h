@@ -5,7 +5,11 @@
 #endif
 #include <winsock2.h>
 
+#include <atomic>
 #include <string>
+#include <thread>
+
+class WintunManager;
 
 class PacketTunnelClient {
 public:
@@ -13,7 +17,8 @@ public:
                        uint16_t tunnel_port,
                        const std::string& session_uuid,
                        const std::string& virtual_ip,
-                       uint16_t mtu);
+                       uint16_t mtu,
+                       WintunManager* wintun_manager);
     ~PacketTunnelClient();
 
     bool Start(std::wstring* error_msg);
@@ -24,6 +29,11 @@ private:
     bool ConnectSocket(std::wstring* error_msg);
     bool SendHandshake(std::wstring* error_msg);
     bool ReceiveHandshakeAck(std::wstring* error_msg);
+    bool StartThreads(std::wstring* error_msg);
+    void SocketReadLoop();
+    void WintunReadLoop();
+    void HeartbeatLoop();
+    bool SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg);
     bool SendAll(const uint8_t* data, size_t length, std::wstring* error_msg);
     bool RecvAll(uint8_t* data, size_t length, std::wstring* error_msg);
     uint32_t ParseVirtualIp(std::wstring* error_msg) const;
@@ -34,6 +44,12 @@ private:
     std::string session_uuid_;
     std::string virtual_ip_;
     uint16_t mtu_;
+    WintunManager* wintun_manager_;
     SOCKET sock_;
-    bool connected_;
+    std::atomic<bool> connected_;
+    std::atomic<bool> stop_requested_;
+    std::thread socket_read_thread_;
+    std::thread wintun_read_thread_;
+    std::thread heartbeat_thread_;
+    CRITICAL_SECTION send_lock_;
 };

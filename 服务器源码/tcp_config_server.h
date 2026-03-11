@@ -6,7 +6,10 @@
 #ifndef TCP_CONFIG_SERVER_H
 #define TCP_CONFIG_SERVER_H
 
+#include <string>
 #include <pthread.h>
+
+#include "ip_pool_manager.h"
 
 // 启动TCP配置服务器
 // config_file: config.json路径
@@ -20,5 +23,9 @@ void stop_tcp_config_server();
 
 // 重新加载配置（热重载）
 bool reload_tcp_config();
+bool query_active_tcp_config_lease(const std::string& server_key,
+                                   const std::string& session_uuid,
+                                   IPPoolManager::LeaseRecord* out_record,
+                                   std::string* error);
 
 #endif // TCP_CONFIG_SERVER_H

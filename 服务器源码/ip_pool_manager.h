@@ -14,6 +14,7 @@ public:
         std::string server_key;
         std::string cidr;
         std::string gateway_ip;
+        std::string server_virtual_ip;
         uint32_t lease_seconds;
         uint32_t sticky_seconds;
         uint32_t first_host_offset;
@@ -31,6 +32,7 @@ public:
         std::string virtual_ip;
         std::string subnet_mask;
         std::string gateway_ip;
+        std::string server_virtual_ip;
         uint32_t lease_seconds;
         uint64_t issued_at_ms;
         uint64_t expires_at_ms;
@@ -47,6 +49,7 @@ public:
 
     bool ConfigurePool(const PoolConfig& config, std::string* error);
     bool AcquireLease(const ip_tunnel::LeaseRequest& request, LeaseRecord* out_record, std::string* error);
+    bool GetLease(const std::string& server_key, const std::string& session_uuid, LeaseRecord* out_record, std::string* error);
     bool RenewLease(const std::string& server_key, const std::string& session_uuid, LeaseRecord* out_record, std::string* error);
     bool ReleaseLease(const std::string& server_key, const std::string& session_uuid);
     size_t CleanupExpired(uint64_t now_ms);
@@ -66,6 +69,7 @@ private:
         uint32_t subnet_mask;
         uint32_t broadcast_ip;
         uint32_t gateway_ip;
+        uint32_t server_virtual_ip;
         std::vector<uint32_t> available_ips;
         std::map<std::string, LeaseState> by_session;
         std::map<uint32_t, std::string> by_ip;
@@ -76,7 +80,8 @@ private:
             : network_ip(0),
               subnet_mask(0),
               broadcast_ip(0),
-              gateway_ip(0) {}
+              gateway_ip(0),
+              server_virtual_ip(0) {}
     };
 
     static uint64_t NowMs();

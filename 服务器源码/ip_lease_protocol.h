@@ -53,6 +53,7 @@ struct LeaseGrant {
     std::string virtual_ip;
     std::string subnet_mask;
     std::string gateway_ip;
+    std::string server_virtual_ip;
     uint16_t mtu;
     uint32_t lease_seconds;
     std::vector<RouteEntry> routes;
