@@ -43,7 +43,8 @@ private:
                      int port,
                      const std::string& command,
                      std::string& response,
-                     std::wstring* error_msg);
+                     std::wstring* error_msg,
+                     bool allow_empty_response = false);
     bool ParseLeaseGrant(const std::string& json,
                          ip_tunnel::LeaseGrant* lease,
                          std::wstring* error_msg);

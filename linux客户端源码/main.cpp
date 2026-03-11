@@ -14,6 +14,8 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <thread>
 
@@ -23,6 +25,7 @@ struct Options {
     std::string api_url;
     int api_port;
     std::string server_key;
+    std::string server_virtual_ip;
     std::string client_id;
     std::string preferred_ip;
     std::string if_name;
@@ -142,6 +145,8 @@ bool LoadConfigFile(const std::string& path, Options* options, std::string* erro
             options->api_port = atoi(value.c_str());
         } else if (key == "server_key") {
             options->server_key = value;
+        } else if (key == "server_virtual_ip") {
+            options->server_virtual_ip = value;
         } else if (key == "client_id") {
             options->client_id = value;
         } else if (key == "preferred_ip") {
@@ -203,10 +208,11 @@ void PrintUsage() {
         << "  /etc/dnf-linux-client/client.conf\n\n"
         << "Required when no config file is present:\n"
         << "  --api-url HOST --api-port PORT\n"
-        << "  --server-key KEY   (optional if GET_SERVERS returns exactly 1 server)\n"
+        << "  --server-virtual-ip IP  (recommended when multiple nodes exist)\n"
         << "  --client-id ID     (optional, defaults to hostname)\n\n"
         << "Options:\n"
         << "  --config FILE          Load key=value config file\n"
+        << "  --server-virtual-ip IP Select node by server virtual IP\n"
         << "  --preferred-ip IP      Request a preferred virtual IP\n"
         << "  --if-name NAME         TUN interface name, default dnfcli0\n"
         << "  --session-uuid UUID    Reuse a fixed session UUID\n"
@@ -243,6 +249,7 @@ bool ParseArgs(int argc, char** argv, Options* options) {
     std::map<std::string, std::string*> string_flags;
     string_flags["--api-url"] = &options->api_url;
     string_flags["--server-key"] = &options->server_key;
+    string_flags["--server-virtual-ip"] = &options->server_virtual_ip;
     string_flags["--client-id"] = &options->client_id;
     string_flags["--preferred-ip"] = &options->preferred_ip;
     string_flags["--if-name"] = &options->if_name;
@@ -295,19 +302,38 @@ bool ParseArgs(int argc, char** argv, Options* options) {
 }
 
 bool FindServerInfo(const std::vector<LinuxServerInfo>& servers,
-                    const std::string& server_key,
+                    const std::string& server_selector,
                     LinuxServerInfo* out_server) {
     if (out_server == NULL) {
         return false;
     }
 
     for (size_t i = 0; i < servers.size(); ++i) {
-        if (std::to_string(servers[i].id) == server_key || servers[i].name == server_key) {
+        if (std::to_string(servers[i].id) == server_selector ||
+            servers[i].name == server_selector ||
+            servers[i].server_virtual_ip == server_selector) {
             *out_server = servers[i];
             return true;
         }
     }
     return false;
+}
+
+LinuxTunConfig BuildTunConfig(const Options& options,
+                              const LinuxServerInfo& server_info,
+                              const ip_tunnel::LeaseGrant& lease) {
+    LinuxTunConfig tun_config;
+    tun_config.if_name = options.if_name;
+    tun_config.virtual_ip = lease.virtual_ip;
+    tun_config.subnet_mask = lease.subnet_mask;
+    tun_config.mtu = lease.mtu;
+    for (size_t i = 0; i < lease.routes.size(); ++i) {
+        tun_config.routes.push_back(lease.routes[i].cidr);
+    }
+    if (tun_config.routes.empty() && !server_info.virtual_subnet.empty()) {
+        tun_config.routes.push_back(server_info.virtual_subnet);
+    }
+    return tun_config;
 }
 
 }  // namespace
@@ -341,19 +367,29 @@ int main(int argc, char** argv) {
     }
 
     LinuxServerInfo server_info;
-    if (options.server_key.empty()) {
+    std::string selected_server_key = options.server_key;
+    if (selected_server_key.empty() && !options.server_virtual_ip.empty()) {
+        selected_server_key = options.server_virtual_ip;
+    }
+
+    if (selected_server_key.empty()) {
         if (servers.size() == 1) {
-            options.server_key = std::to_string(servers[0].id);
-            LogInfo("server_key auto selected: " + options.server_key + " (" + servers[0].name + ")");
+            selected_server_key = std::to_string(servers[0].id);
+            LogInfo("node auto selected: " + selected_server_key + " (" + servers[0].name + ")");
         } else {
-            LogError("server_key is required when GET_SERVERS returns multiple servers");
+            LogError("server_virtual_ip is required when GET_SERVERS returns multiple nodes");
             return 1;
         }
     }
 
-    if (!FindServerInfo(servers, options.server_key, &server_info)) {
-        LogError("server_key not found: " + options.server_key);
+    if (!FindServerInfo(servers, selected_server_key, &server_info)) {
+        LogError("node not found: " + selected_server_key);
         return 1;
+    }
+
+    const std::string effective_server_key = std::to_string(server_info.id);
+    if (options.preferred_ip.empty() && !options.server_virtual_ip.empty()) {
+        options.preferred_ip = options.server_virtual_ip;
     }
 
     if (options.tunnel_host.empty()) {
@@ -365,7 +401,7 @@ int main(int argc, char** argv) {
 
     LinuxLeaseClient lease_client;
     ip_tunnel::LeaseRequest lease_request;
-    lease_request.server_key = options.server_key;
+    lease_request.server_key = effective_server_key;
     lease_request.session_uuid = options.session_uuid;
     lease_request.client_id = options.client_id;
     lease_request.preferred_ip = options.preferred_ip;
@@ -380,86 +416,170 @@ int main(int argc, char** argv) {
             " gateway=" + lease.gateway_ip +
             " server_virtual_ip=" + lease.server_virtual_ip);
 
-    LinuxTunConfig tun_config;
-    tun_config.if_name = options.if_name;
-    tun_config.virtual_ip = lease.virtual_ip;
-    tun_config.subnet_mask = lease.subnet_mask;
-    tun_config.mtu = lease.mtu;
-    for (size_t i = 0; i < lease.routes.size(); ++i) {
-        tun_config.routes.push_back(lease.routes[i].cidr);
-    }
-    if (tun_config.routes.empty() && !server_info.virtual_subnet.empty()) {
-        tun_config.routes.push_back(server_info.virtual_subnet);
-    }
-
     LinuxTunManager tun_manager;
+    LinuxTunConfig tun_config = BuildTunConfig(options, server_info, lease);
     if (!tun_manager.Setup(tun_config, &error)) {
         LogError("TUN setup failed: " + error);
-        lease_client.ReleaseLease(options.api_url, options.api_port, options.server_key, options.session_uuid, NULL);
+        lease_client.ReleaseLease(options.api_url, options.api_port, effective_server_key, options.session_uuid, NULL);
         return 1;
     }
 
     LogInfo("TUN ready: if=" + tun_manager.GetIfName() + " ip=" + lease.virtual_ip);
 
-    LinuxPacketTunnelClient packet_client(options.tunnel_host,
-                                          (uint16_t)options.tunnel_port,
-                                          options.session_uuid,
-                                          lease.virtual_ip,
-                                          lease.mtu,
-                                          &tun_manager);
+    std::unique_ptr<LinuxPacketTunnelClient> packet_client;
+    auto start_packet_client = [&](const ip_tunnel::LeaseGrant& current_lease, std::string* start_error) -> bool {
+        packet_client.reset(new LinuxPacketTunnelClient(options.tunnel_host,
+                                                        (uint16_t)options.tunnel_port,
+                                                        options.session_uuid,
+                                                        current_lease.virtual_ip,
+                                                        current_lease.mtu,
+                                                        &tun_manager));
+        return packet_client->Start(start_error);
+    };
 
-    if (!packet_client.Start(&error)) {
+    if (!start_packet_client(lease, &error)) {
         LogError("packet tunnel start failed: " + error);
         tun_manager.Cleanup();
-        lease_client.ReleaseLease(options.api_url, options.api_port, options.server_key, options.session_uuid, NULL);
+        lease_client.ReleaseLease(options.api_url, options.api_port, effective_server_key, options.session_uuid, NULL);
         return 1;
     }
 
     LogInfo("packet tunnel connected: " + options.tunnel_host + ":" + std::to_string(options.tunnel_port));
 
+    std::mutex lease_mutex;
     std::atomic<bool> renew_stop(false);
-    std::thread renew_thread([&]() {
-        while (!renew_stop && !g_linux_client_stop) {
-            uint32_t wait_seconds = lease.lease_seconds / 2;
-            if (wait_seconds < 15) {
-                wait_seconds = 15;
-            }
+    std::atomic<bool> renew_failed(false);
 
-            for (uint32_t i = 0; i < wait_seconds && !renew_stop && !g_linux_client_stop; ++i) {
-                sleep(1);
-            }
-            if (renew_stop || g_linux_client_stop) {
-                break;
-            }
+    auto start_renew_thread = [&]() {
+        return std::thread([&]() {
+            while (!renew_stop && !g_linux_client_stop) {
+                uint32_t wait_seconds = 0;
+                {
+                    std::lock_guard<std::mutex> lock(lease_mutex);
+                    wait_seconds = lease.lease_seconds / 2;
+                }
+                if (wait_seconds < 15) {
+                    wait_seconds = 15;
+                }
 
-            ip_tunnel::LeaseGrant renewed;
-            std::string renew_error;
-            if (!lease_client.RenewLease(options.api_url, options.api_port, options.server_key,
-                                         options.session_uuid, &renewed, &renew_error)) {
-                LogWarn("lease renew failed: " + renew_error);
+                for (uint32_t i = 0; i < wait_seconds && !renew_stop && !g_linux_client_stop; ++i) {
+                    sleep(1);
+                }
+                if (renew_stop || g_linux_client_stop) {
+                    break;
+                }
+
+                ip_tunnel::LeaseGrant renewed;
+                std::string renew_error;
+                if (!lease_client.RenewLease(options.api_url, options.api_port, effective_server_key,
+                                             options.session_uuid, &renewed, &renew_error)) {
+                    renew_failed = true;
+                    LogWarn("lease renew failed: " + renew_error);
+                    continue;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(lease_mutex);
+                    lease = renewed;
+                }
+                renew_failed = false;
+                LogInfo("lease renewed: virtual_ip=" + renewed.virtual_ip);
+            }
+        });
+    };
+
+    std::thread renew_thread = start_renew_thread();
+
+    while (!g_linux_client_stop) {
+        if (packet_client && packet_client->IsConnected() && !renew_failed) {
+            usleep(200 * 1000);
+            continue;
+        }
+
+        if (g_linux_client_stop) {
+            break;
+        }
+
+        renew_stop = true;
+        if (packet_client) {
+            packet_client->Stop();
+        }
+        if (renew_thread.joinable()) {
+            renew_thread.join();
+        }
+
+        LogWarn("packet tunnel disconnected, starting automatic recovery");
+
+        std::string preferred_ip;
+        {
+            std::lock_guard<std::mutex> lock(lease_mutex);
+            preferred_ip = lease.virtual_ip;
+        }
+
+        ip_tunnel::LeaseGrant recovered_lease;
+        std::string recover_error;
+        if (!lease_client.RenewLease(options.api_url, options.api_port, effective_server_key,
+                                     options.session_uuid, &recovered_lease, &recover_error)) {
+            ip_tunnel::LeaseRequest recover_request;
+            recover_request.server_key = effective_server_key;
+            recover_request.session_uuid = options.session_uuid;
+            recover_request.client_id = options.client_id;
+            recover_request.preferred_ip = preferred_ip;
+
+            if (!lease_client.RequestLease(options.api_url, options.api_port, recover_request,
+                                           &recovered_lease, &recover_error)) {
+                LogWarn("lease recovery failed: " + recover_error);
+                sleep(2);
                 continue;
             }
-
-            lease = renewed;
-            LogInfo("lease renewed: virtual_ip=" + lease.virtual_ip);
+            LogInfo("lease reacquired: virtual_ip=" + recovered_lease.virtual_ip);
+        } else {
+            LogInfo("lease recovered: virtual_ip=" + recovered_lease.virtual_ip);
         }
-    });
 
-    while (!g_linux_client_stop && packet_client.IsConnected()) {
-        usleep(200 * 1000);
+        {
+            std::lock_guard<std::mutex> lock(lease_mutex);
+            lease = recovered_lease;
+        }
+
+        LinuxTunConfig recovered_tun_config = BuildTunConfig(options, server_info, recovered_lease);
+        if (!tun_manager.Setup(recovered_tun_config, &error)) {
+            LogWarn("TUN reconfigure failed: " + error);
+            sleep(2);
+            continue;
+        }
+
+        if (!start_packet_client(recovered_lease, &error)) {
+            LogWarn("packet tunnel reconnect failed: " + error);
+            sleep(2);
+            continue;
+        }
+
+        renew_failed = false;
+        renew_stop = false;
+        renew_thread = start_renew_thread();
+        LogInfo("automatic reconnect succeeded: virtual_ip=" + recovered_lease.virtual_ip);
     }
 
     renew_stop = true;
-    packet_client.Stop();
+    if (packet_client) {
+        packet_client->Stop();
+    }
     if (renew_thread.joinable()) {
         renew_thread.join();
     }
     tun_manager.Cleanup();
 
     std::string release_error;
-    if (!lease_client.ReleaseLease(options.api_url, options.api_port, options.server_key,
+    if (!lease_client.ReleaseLease(options.api_url, options.api_port, effective_server_key,
                                    options.session_uuid, &release_error)) {
-        LogWarn("release lease failed: " + release_error);
+        if (release_error == "lease server returned empty response" ||
+            release_error.find("cannot connect to lease server: ") == 0 ||
+            release_error.find("send lease command failed") == 0) {
+            LogInfo("lease server unavailable during release, skipping");
+        } else {
+            LogWarn("release lease failed: " + release_error);
+        }
     } else {
         LogInfo("lease released");
     }

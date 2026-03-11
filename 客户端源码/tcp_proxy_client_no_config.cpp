@@ -513,7 +513,7 @@ string generate_session_uuid() {
 class LeaseSessionGuard {
 public:
     LeaseSessionGuard()
-        : api_port_(0), active_(false) {}
+        : api_port_(0), active_(false), renew_failed_(false) {}
 
     ~LeaseSessionGuard() {
         Release();
@@ -525,6 +525,7 @@ public:
                  const string& session_uuid,
                  const string& client_id,
                  wstring& error_msg) {
+        lock_guard<mutex> op_lock(op_lock_);
         IPLeaseClient client;
         ip_tunnel::LeaseRequest request;
         request.server_key = server_key;
@@ -547,6 +548,7 @@ public:
         }
 
         active_ = true;
+        renew_failed_ = false;
         renew_thread_ = thread(&LeaseSessionGuard::RenewLoop, this);
 
         Logger::info("[租约] 已申请虚拟IP: " + lease.virtual_ip +
@@ -581,10 +583,13 @@ public:
             virtual_ip = lease_.virtual_ip;
         }
 
+        lock_guard<mutex> op_lock(op_lock_);
         IPLeaseClient client;
         wstring error_msg;
         if (client.ReleaseLease(api_url, api_port, server_key, session_uuid, &error_msg)) {
             Logger::info("[租约] 已释放虚拟IP租约: " + virtual_ip);
+        } else if (IsServerUnavailableError(error_msg)) {
+            Logger::info("[租约] 租约服务器当前不可用，跳过释放: " + virtual_ip);
         } else {
             Logger::warning("[租约] 释放失败: " + wstring_to_utf8(error_msg));
         }
@@ -595,14 +600,70 @@ public:
         return lease_;
     }
 
+    bool RecoverLease(ip_tunnel::LeaseGrant* recovered_lease, wstring& error_msg) {
+        string api_url;
+        int api_port = 0;
+        string server_key;
+        string session_uuid;
+        string client_id;
+        string preferred_ip;
+
+        {
+            lock_guard<mutex> lock(lock_);
+            api_url = api_url_;
+            api_port = api_port_;
+            server_key = server_key_;
+            session_uuid = session_uuid_;
+            client_id = client_id_;
+            preferred_ip = lease_.virtual_ip;
+        }
+
+        lock_guard<mutex> op_lock(op_lock_);
+
+        IPLeaseClient client;
+        ip_tunnel::LeaseGrant lease;
+        if (!client.RenewLease(api_url, api_port, server_key, session_uuid, &lease, &error_msg)) {
+            ip_tunnel::LeaseRequest request;
+            request.server_key = server_key;
+            request.session_uuid = session_uuid;
+            request.client_id = client_id;
+            request.preferred_ip = preferred_ip;
+
+            if (!client.RequestLease(api_url, api_port, request, &lease, &error_msg)) {
+                return false;
+            }
+            Logger::info("[租约] 已重新申请虚拟IP: " + lease.virtual_ip);
+        } else {
+            Logger::info("[租约] 已恢复续租: " + lease.virtual_ip);
+        }
+
+        {
+            lock_guard<mutex> lock(lock_);
+            lease_ = lease;
+        }
+        renew_failed_ = false;
+
+        if (recovered_lease != nullptr) {
+            *recovered_lease = lease;
+        }
+        return true;
+    }
+
 private:
+    static bool IsServerUnavailableError(const wstring& error_msg) {
+        return error_msg.find(L"租约服务器返回空数据") != wstring::npos ||
+               error_msg.find(L"无法连接到租约服务器") != wstring::npos ||
+               error_msg.find(L"接收租约响应失败") != wstring::npos ||
+               error_msg.find(L"发送租约命令失败") != wstring::npos;
+    }
+
     void RenewLoop() {
         DWORD wait_ms = 30000;
 
         while (active_) {
             {
                 lock_guard<mutex> lock(lock_);
-                wait_ms = std::max<DWORD>(10000, lease_.lease_seconds * 500);
+                wait_ms = renew_failed_ ? 5000 : std::max<DWORD>(10000, lease_.lease_seconds * 500);
             }
 
             DWORD remaining = wait_ms;
@@ -629,6 +690,7 @@ private:
                 session_uuid = session_uuid_;
             }
 
+            lock_guard<mutex> op_lock(op_lock_);
             IPLeaseClient client;
             ip_tunnel::LeaseGrant renewed;
             wstring error_msg;
@@ -637,15 +699,18 @@ private:
                     lock_guard<mutex> lock(lock_);
                     lease_ = renewed;
                 }
+                renew_failed_ = false;
                 Logger::debug("[租约] 续租成功: " + renewed.virtual_ip +
                               " 租期=" + to_string(renewed.lease_seconds) + "秒");
             } else {
+                renew_failed_ = true;
                 Logger::warning("[租约] 续租失败: " + wstring_to_utf8(error_msg));
             }
         }
     }
 
     mutable mutex lock_;
+    mutable mutex op_lock_;
     string api_url_;
     int api_port_;
     string server_key_;
@@ -653,6 +718,7 @@ private:
     string client_id_;
     ip_tunnel::LeaseGrant lease_;
     atomic<bool> active_;
+    atomic<bool> renew_failed_;
     thread renew_thread_;
 };
 
@@ -961,13 +1027,18 @@ int main(int argc, char* argv[]) {
     }
     cout << endl;
 
-    TunnelLeaseRuntimeConfig lease_runtime;
-    lease_runtime.server_virtual_ip = granted_lease.server_virtual_ip;
-    lease_runtime.virtual_ip = granted_lease.virtual_ip;
-    lease_runtime.subnet_mask = granted_lease.subnet_mask;
-    lease_runtime.gateway_ip = granted_lease.gateway_ip;
-    lease_runtime.mtu = granted_lease.mtu;
-    lease_runtime.routes = granted_lease.routes;
+    auto BuildLeaseRuntimeConfig = [](const ip_tunnel::LeaseGrant& lease) {
+        TunnelLeaseRuntimeConfig runtime;
+        runtime.server_virtual_ip = lease.server_virtual_ip;
+        runtime.virtual_ip = lease.virtual_ip;
+        runtime.subnet_mask = lease.subnet_mask;
+        runtime.gateway_ip = lease.gateway_ip;
+        runtime.mtu = lease.mtu;
+        runtime.routes = lease.routes;
+        return runtime;
+    };
+
+    TunnelLeaseRuntimeConfig lease_runtime = BuildLeaseRuntimeConfig(granted_lease);
 
     if (g_shutdown_requested) {
         Logger::info("[退出] 启动阶段收到退出请求，取消继续启动");
@@ -1043,10 +1114,60 @@ int main(int argc, char* argv[]) {
     g_active_lease_session = &lease_session;
     SetConsoleCtrlHandler(ClientConsoleCtrlHandler, TRUE);
 
-    while (!g_shutdown_requested && packet_tunnel_client->IsConnected()) {
-        Sleep(200);
+    int reconnect_attempt = 0;
+    while (!g_shutdown_requested) {
+        if (packet_tunnel_client->IsConnected()) {
+            Sleep(200);
+            reconnect_attempt = 0;
+            continue;
+        }
+
+        if (g_shutdown_requested) {
+            break;
+        }
+
+        g_active_packet_tunnel = nullptr;
+        packet_tunnel_client->Stop();
+
+        ++reconnect_attempt;
+        Logger::warning("[数据面] IP Tunnel连接已断开，开始自动重连，第" + to_string(reconnect_attempt) + "次");
+
+        ip_tunnel::LeaseGrant recovered_lease;
+        wstring recover_error;
+        if (!lease_session.RecoverLease(&recovered_lease, recover_error)) {
+            Logger::warning("[租约] 自动恢复失败: " + wstring_to_utf8(recover_error));
+            Sleep(2000);
+            continue;
+        }
+
+        lease_runtime = BuildLeaseRuntimeConfig(recovered_lease);
+        wstring recover_network_error;
+        if (!wintun_manager->ActivateNetwork(lease_runtime, &recover_network_error)) {
+            Logger::warning("[数据面] 重连时应用Wintun网络配置失败: " + wstring_to_utf8(recover_network_error));
+            Sleep(2000);
+            continue;
+        }
+
+        packet_tunnel_client.reset(new PacketTunnelClient(
+            TUNNEL_SERVER_IP,
+            TUNNEL_PORT,
+            g_session_uuid,
+            recovered_lease.virtual_ip,
+            recovered_lease.mtu,
+            wintun_manager.get()));
+
+        wstring reconnect_error;
+        if (!packet_tunnel_client->Start(&reconnect_error)) {
+            Logger::warning("[数据面] 自动重连失败: " + wstring_to_utf8(reconnect_error));
+            Sleep(2000);
+            continue;
+        }
+
+        g_active_packet_tunnel = packet_tunnel_client.get();
+        Logger::info("[数据面] 自动重连成功，虚拟IP=" + recovered_lease.virtual_ip);
     }
 
+    g_active_packet_tunnel = nullptr;
     packet_tunnel_client->Stop();
 
     if (g_shutdown_requested) {

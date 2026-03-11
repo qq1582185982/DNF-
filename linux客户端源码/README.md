@@ -34,7 +34,7 @@ Optional:
   --config ./dnf-linux-client.conf
   --api-url 61.sviplk.com
   --api-port 35333
-  --server-key 1
+  --server-virtual-ip 10.0.11.5
   --client-id vm-95
   --if-name dnfcli95
   --preferred-ip 10.0.11.50
@@ -49,7 +49,7 @@ Defaults:
   - `./client.conf`
   - `/etc/dnf-linux-client.conf`
   - `/etc/dnf-linux-client/client.conf`
-- `server_key` can be omitted when the API returns only one server
+- `server_virtual_ip` is recommended when the API returns multiple nodes
 - `client_id` defaults to current hostname
 - `if_name` defaults to `dnfcli0`
 

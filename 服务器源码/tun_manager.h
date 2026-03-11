@@ -11,6 +11,7 @@ struct TunRuntimeConfig {
     std::string subnet_cidr;
     std::string gateway_ip;
     std::string server_virtual_ip;
+    std::vector<std::string> local_node_ips;
     uint16_t mtu;
 
     TunRuntimeConfig()

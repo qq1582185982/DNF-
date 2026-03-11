@@ -21,8 +21,8 @@ std::vector<std::string> Split(const std::string& input, char delim) {
 IPPoolManager::IPPoolManager() {}
 
 bool IPPoolManager::ConfigurePool(const PoolConfig& config, std::string* error) {
-    if (config.server_key.empty()) {
-        if (error) *error = "server_key is required";
+    if (config.pool_key.empty()) {
+        if (error) *error = "pool_key is required";
         return false;
     }
 
@@ -33,12 +33,12 @@ bool IPPoolManager::ConfigurePool(const PoolConfig& config, std::string* error) 
         return false;
     }
 
-    pools_[config.server_key] = pool;
+    pools_[config.pool_key] = pool;
     return true;
 }
 
-bool IPPoolManager::AcquireLease(const ip_tunnel::LeaseRequest& request, LeaseRecord* out_record, std::string* error) {
-    std::map<std::string, PoolState>::iterator it = pools_.find(request.server_key);
+bool IPPoolManager::AcquireLease(const std::string& pool_key, const ip_tunnel::LeaseRequest& request, LeaseRecord* out_record, std::string* error) {
+    std::map<std::string, PoolState>::iterator it = pools_.find(pool_key);
     if (it == pools_.end()) {
         if (error) *error = "server pool not found";
         return false;
@@ -76,10 +76,10 @@ bool IPPoolManager::AcquireLease(const ip_tunnel::LeaseRequest& request, LeaseRe
     return TryAcquireNextFreeIP(pool, request, now_ms, out_record, error);
 }
 
-bool IPPoolManager::GetLease(const std::string& server_key, const std::string& session_uuid, LeaseRecord* out_record, std::string* error) {
+bool IPPoolManager::GetLease(const std::string& pool_key, const std::string& session_uuid, LeaseRecord* out_record, std::string* error) {
     CleanupExpired(NowMs());
 
-    std::map<std::string, PoolState>::iterator it = pools_.find(server_key);
+    std::map<std::string, PoolState>::iterator it = pools_.find(pool_key);
     if (it == pools_.end()) {
         if (error) *error = "server pool not found";
         return false;
@@ -98,10 +98,10 @@ bool IPPoolManager::GetLease(const std::string& server_key, const std::string& s
     return true;
 }
 
-bool IPPoolManager::RenewLease(const std::string& server_key, const std::string& session_uuid, LeaseRecord* out_record, std::string* error) {
+bool IPPoolManager::RenewLease(const std::string& pool_key, const std::string& session_uuid, LeaseRecord* out_record, std::string* error) {
     CleanupExpired(NowMs());
 
-    std::map<std::string, PoolState>::iterator it = pools_.find(server_key);
+    std::map<std::string, PoolState>::iterator it = pools_.find(pool_key);
     if (it == pools_.end()) {
         if (error) *error = "server pool not found";
         return false;
@@ -121,10 +121,10 @@ bool IPPoolManager::RenewLease(const std::string& server_key, const std::string&
     return true;
 }
 
-bool IPPoolManager::ReleaseLease(const std::string& server_key, const std::string& session_uuid) {
+bool IPPoolManager::ReleaseLease(const std::string& pool_key, const std::string& session_uuid) {
     CleanupExpired(NowMs());
 
-    std::map<std::string, PoolState>::iterator it = pools_.find(server_key);
+    std::map<std::string, PoolState>::iterator it = pools_.find(pool_key);
     if (it == pools_.end()) {
         return false;
     }
@@ -141,7 +141,10 @@ bool IPPoolManager::ReleaseLease(const std::string& server_key, const std::strin
     pool->released_sessions[session_uuid] = lease_it->second;
     pool->released_sessions[session_uuid].released_at_ms = NowMs();
     pool->by_session.erase(lease_it);
-    pool->available_ips.push_back(ip);
+    if (pool->requestable_reserved_ips.count(ip) == 0 &&
+        pool->reserved_ips.count(ip) == 0) {
+        pool->available_ips.push_back(ip);
+    }
     return true;
 }
 
@@ -171,7 +174,10 @@ size_t IPPoolManager::CleanupExpired(uint64_t now_ms) {
             pool->released_sessions[session_uuid] = lease_it->second;
             pool->released_sessions[session_uuid].released_at_ms = now_ms;
             pool->by_session.erase(lease_it);
-            pool->available_ips.push_back(ip);
+            if (pool->requestable_reserved_ips.count(ip) == 0 &&
+                pool->reserved_ips.count(ip) == 0) {
+                pool->available_ips.push_back(ip);
+            }
             ++cleaned;
         }
 
@@ -191,9 +197,9 @@ size_t IPPoolManager::CleanupExpired(uint64_t now_ms) {
     return cleaned;
 }
 
-std::vector<IPPoolManager::LeaseRecord> IPPoolManager::Snapshot(const std::string& server_key) const {
+std::vector<IPPoolManager::LeaseRecord> IPPoolManager::Snapshot(const std::string& pool_key) const {
     std::vector<LeaseRecord> snapshot;
-    std::map<std::string, PoolState>::const_iterator it = pools_.find(server_key);
+    std::map<std::string, PoolState>::const_iterator it = pools_.find(pool_key);
     if (it == pools_.end()) {
         return snapshot;
     }
@@ -315,24 +321,47 @@ bool IPPoolManager::PreparePool(PoolState* pool, std::string* error) {
             if (error) *error = "invalid server_virtual_ip";
             return false;
         }
-    } else {
-        pool->server_virtual_ip = pool->network_ip + 2;
-        pool->config.server_virtual_ip = IPv4ToString(pool->server_virtual_ip);
     }
 
-    if (pool->server_virtual_ip <= pool->network_ip || pool->server_virtual_ip >= pool->broadcast_ip) {
-        if (error) *error = "server_virtual_ip is outside pool CIDR";
-        return false;
-    }
-    if (pool->server_virtual_ip == pool->gateway_ip) {
-        if (error) *error = "server_virtual_ip conflicts with gateway_ip";
-        return false;
+    if (pool->server_virtual_ip != 0) {
+        if (pool->server_virtual_ip <= pool->network_ip || pool->server_virtual_ip >= pool->broadcast_ip) {
+            if (error) *error = "server_virtual_ip is outside pool CIDR";
+            return false;
+        }
+        if (pool->server_virtual_ip == pool->gateway_ip) {
+            if (error) *error = "server_virtual_ip conflicts with gateway_ip";
+            return false;
+        }
     }
 
     pool->reserved_ips.insert(pool->network_ip);
     pool->reserved_ips.insert(pool->broadcast_ip);
     pool->reserved_ips.insert(pool->gateway_ip);
-    pool->reserved_ips.insert(pool->server_virtual_ip);
+    if (pool->server_virtual_ip != 0) {
+        pool->reserved_ips.insert(pool->server_virtual_ip);
+    }
+
+    for (size_t i = 0; i < pool->config.additional_reserved_ips.size(); ++i) {
+        uint32_t reserved_ip = 0;
+        if (!ParseIPv4(pool->config.additional_reserved_ips[i], &reserved_ip)) {
+            if (error) *error = "invalid additional_reserved_ip";
+            return false;
+        }
+        if (reserved_ip <= pool->network_ip || reserved_ip >= pool->broadcast_ip) {
+            if (error) *error = "additional_reserved_ip is outside pool CIDR";
+            return false;
+        }
+        if (reserved_ip == pool->gateway_ip) {
+            if (error) *error = "additional_reserved_ip conflicts with gateway_ip";
+            return false;
+        }
+        if (pool->server_virtual_ip != 0 && reserved_ip == pool->server_virtual_ip) {
+            if (error) *error = "additional_reserved_ip conflicts with server_virtual_ip";
+            return false;
+        }
+        pool->reserved_ips.insert(reserved_ip);
+        pool->requestable_reserved_ips.insert(reserved_ip);
+    }
 
     const uint32_t first_usable = pool->network_ip + std::max<uint32_t>(2, pool->config.first_host_offset);
     for (uint32_t ip = first_usable; ip < pool->broadcast_ip; ++ip) {
@@ -395,14 +424,26 @@ bool IPPoolManager::TryAcquireSpecificIP(PoolState* pool, const ip_tunnel::Lease
         return false;
     }
 
-    if (pool->reserved_ips.count(requested_ip) != 0) {
-        if (error) *error = "preferred_ip is reserved";
-        return false;
-    }
-
     if (pool->by_ip.count(requested_ip) != 0) {
         if (error) *error = "preferred_ip is already assigned";
         return false;
+    }
+
+    if (pool->reserved_ips.count(requested_ip) != 0) {
+        if (pool->requestable_reserved_ips.count(requested_ip) == 0) {
+            if (error) *error = "preferred_ip is reserved";
+            return false;
+        }
+
+        LeaseState state;
+        state.record = BuildLeaseRecord(*pool, request, requested_ip, now_ms, false);
+        pool->by_session[request.session_uuid] = state;
+        pool->by_ip[requested_ip] = request.session_uuid;
+
+        if (out_record) {
+            *out_record = state.record;
+        }
+        return true;
     }
 
     std::vector<uint32_t>::iterator it = std::find(pool->available_ips.begin(), pool->available_ips.end(), requested_ip);

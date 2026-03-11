@@ -30,7 +30,8 @@ private:
                      int port,
                      const std::string& command,
                      std::string* response,
-                     std::string* error);
+                     std::string* error,
+                     bool allow_empty_response = false);
     bool ParseLeaseGrant(const std::string& json,
                          ip_tunnel::LeaseGrant* lease,
                          std::string* error);

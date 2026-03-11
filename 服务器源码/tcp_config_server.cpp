@@ -34,28 +34,36 @@ using namespace std;
 // 前向声明
 void* config_monitor_thread(void* arg);
 
-// 服务器配置结构
-struct ServerConfig {
+// 节点配置结构
+struct NodeConfig {
     int id;
     string name;
-    string game_server_ip;
     string server_virtual_ip;
-    string tunnel_server_ip;
-    int tunnel_port;
+    bool bind_on_gateway;
     string download_url;  // 客户端下载地址
+
+    NodeConfig()
+        : id(0), bind_on_gateway(false) {}
+};
+
+struct NetworkConfig {
+    int tunnel_port;
     string virtual_subnet;
     string virtual_gateway;
+    string tunnel_server_ip;
+    int max_connections;
     int lease_seconds;
 
-    ServerConfig()
-        : id(0),
-          tunnel_port(0),
+    NetworkConfig()
+        : tunnel_port(33223),
+          max_connections(100),
           lease_seconds((int)ip_tunnel::kDefaultLeaseSeconds) {}
 };
 
 // 全局变量
-static vector<ServerConfig> g_servers;
-static mutex g_servers_mutex;  // 保护服务器列表和IP池
+static vector<NodeConfig> g_nodes;
+static NetworkConfig g_network;
+static mutex g_servers_mutex;  // 保护节点列表、网络配置和IP池
 static int g_api_port = 35000;
 static volatile bool g_running = true;
 static string g_config_file;  // 配置文件路径
@@ -63,6 +71,7 @@ static string g_tunnel_server_ip;  // 隧道服务器IP
 static bool g_auto_reload = true;  // 自动重载开关
 static pthread_t g_monitor_thread = 0;  // 配置监控线程ID
 static IPPoolManager g_ip_pool_manager;
+static const char* kNetworkPoolKey = "network";
 
 // 版本更新配置
 static string g_latest_md5;  // 最新版本MD5
@@ -102,6 +111,37 @@ int extract_json_int(const string& json, const string& key) {
     }
 
     return atoi(json.c_str() + pos);
+}
+
+bool extract_json_bool(const string& json, const string& key, bool* found = NULL) {
+    string search = "\"" + key + "\"";
+    size_t pos = json.find(search);
+    if (pos == string::npos) {
+        if (found != NULL) {
+            *found = false;
+        }
+        return false;
+    }
+
+    pos = json.find(":", pos);
+    if (pos == string::npos) {
+        if (found != NULL) {
+            *found = false;
+        }
+        return false;
+    }
+
+    while (pos < json.length() &&
+           (json[pos] == ':' || json[pos] == ' ' || json[pos] == '\t' ||
+            json[pos] == '\r' || json[pos] == '\n')) {
+        pos++;
+    }
+
+    if (found != NULL) {
+        *found = true;
+    }
+
+    return json.compare(pos, 4, "true") == 0 || json.compare(pos, 1, "1") == 0;
 }
 
 string trim_copy(const string& value) {
@@ -220,7 +260,7 @@ static string build_auto_virtual_gateway(const string& subnet_cidr, int tunnel_p
     return string(gateway_str);
 }
 
-static string build_default_server_virtual_ip(const string& subnet_cidr) {
+static string build_virtual_ip_with_offset(const string& subnet_cidr, uint32_t host_offset) {
     size_t slash = subnet_cidr.find('/');
     string base_ip = (slash == string::npos) ? subnet_cidr : subnet_cidr.substr(0, slash);
     int prefix_bits = 24;
@@ -239,35 +279,109 @@ static string build_default_server_virtual_ip(const string& subnet_cidr) {
 
     uint32_t network_host = ntohl(network_addr.s_addr);
     uint32_t host_count = 1u << (32 - prefix_bits);
-    if (host_count <= 3) {
+    if (host_offset >= host_count - 1) {
         return "";
     }
 
-    uint32_t server_host = network_host + 2;
-    in_addr server_addr{};
-    server_addr.s_addr = htonl(server_host);
+    uint32_t ip_host = network_host + host_offset;
+    in_addr ip_addr{};
+    ip_addr.s_addr = htonl(ip_host);
 
-    char server_str[INET_ADDRSTRLEN] = {};
-    if (!inet_ntop(AF_INET, &server_addr, server_str, sizeof(server_str))) {
+    char ip_str[INET_ADDRSTRLEN] = {};
+    if (!inet_ntop(AF_INET, &ip_addr, ip_str, sizeof(ip_str))) {
         return "";
     }
-    return string(server_str);
+    return string(ip_str);
 }
 
-string canonical_server_key(const ServerConfig& server) {
-    return to_string(server.id);
+string canonical_node_key(const NodeConfig& node) {
+    return to_string(node.id);
 }
 
-const ServerConfig* find_server_by_key_locked(const string& server_key) {
-    for (size_t i = 0; i < g_servers.size(); ++i) {
-        const ServerConfig& server = g_servers[i];
-        if (server_key == server.name ||
-            server_key == to_string(server.id) ||
-            server_key == to_string(server.tunnel_port)) {
-            return &server;
+const NodeConfig* find_node_by_key_locked(const string& node_key) {
+    for (size_t i = 0; i < g_nodes.size(); ++i) {
+        const NodeConfig& node = g_nodes[i];
+        if (node_key == node.name ||
+            node_key == to_string(node.id) ||
+            node_key == node.server_virtual_ip) {
+            return &node;
         }
     }
     return NULL;
+}
+
+size_t find_matching_brace(const string& content, size_t open_pos, char open_ch, char close_ch) {
+    int depth = 0;
+    bool in_string = false;
+    bool escape = false;
+
+    for (size_t i = open_pos; i < content.size(); ++i) {
+        char ch = content[i];
+        if (in_string) {
+            if (escape) {
+                escape = false;
+            } else if (ch == '\\') {
+                escape = true;
+            } else if (ch == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if (ch == '"') {
+            in_string = true;
+            continue;
+        }
+        if (ch == open_ch) {
+            depth++;
+        } else if (ch == close_ch) {
+            depth--;
+            if (depth == 0) {
+                return i;
+            }
+        }
+    }
+
+    return string::npos;
+}
+
+string extract_json_object(const string& json, const string& key) {
+    string search = "\"" + key + "\"";
+    size_t pos = json.find(search);
+    if (pos == string::npos) return "";
+
+    size_t start = json.find("{", pos);
+    if (start == string::npos) return "";
+
+    size_t end = find_matching_brace(json, start, '{', '}');
+    if (end == string::npos || end < start) return "";
+
+    return json.substr(start, end - start + 1);
+}
+
+vector<string> extract_json_object_array(const string& json, const string& key) {
+    vector<string> objects;
+    string search = "\"" + key + "\"";
+    size_t pos = json.find(search);
+    if (pos == string::npos) return objects;
+
+    size_t array_start = json.find("[", pos);
+    if (array_start == string::npos) return objects;
+
+    size_t array_end = find_matching_brace(json, array_start, '[', ']');
+    if (array_end == string::npos || array_end <= array_start) return objects;
+
+    size_t cursor = array_start + 1;
+    while (cursor < array_end) {
+        size_t obj_start = json.find("{", cursor);
+        if (obj_start == string::npos || obj_start >= array_end) break;
+        size_t obj_end = find_matching_brace(json, obj_start, '{', '}');
+        if (obj_end == string::npos || obj_end > array_end) break;
+        objects.push_back(json.substr(obj_start, obj_end - obj_start + 1));
+        cursor = obj_end + 1;
+    }
+
+    return objects;
 }
 
 ip_tunnel::StatusCode status_from_error(const string& error) {
@@ -299,14 +413,14 @@ string make_status_json(ip_tunnel::StatusCode status,
     return json.str();
 }
 
-string generate_lease_json(const ServerConfig& server,
+string generate_lease_json(const NodeConfig& node,
                            const IPPoolManager::LeaseRecord& lease,
                            const string& message) {
     stringstream json;
     json << "{"
          << "\"status\":" << (int)ip_tunnel::kStatusOk << ","
          << "\"message\":\"" << json_escape(message) << "\","
-         << "\"server_key\":\"" << json_escape(canonical_server_key(server)) << "\","
+         << "\"server_key\":\"" << json_escape(canonical_node_key(node)) << "\","
          << "\"virtual_ip\":\"" << json_escape(lease.virtual_ip) << "\","
          << "\"subnet_mask\":\"" << json_escape(lease.subnet_mask) << "\","
          << "\"gateway_ip\":\"" << json_escape(lease.gateway_ip) << "\","
@@ -316,15 +430,16 @@ string generate_lease_json(const ServerConfig& server,
          << "\"reused_previous_ip\":" << (lease.reused_previous_ip ? "true" : "false") << ","
          << "\"routes\":[";
 
-    if (!server.virtual_subnet.empty()) {
-        json << "\"" << json_escape(server.virtual_subnet) << "\"";
+    if (!g_network.virtual_subnet.empty()) {
+        json << "\"" << json_escape(g_network.virtual_subnet) << "\"";
     }
 
     json << "]}";
     return json.str();
 }
 
-bool rebuild_ip_pools(const vector<ServerConfig>& servers,
+bool rebuild_ip_pools(const NetworkConfig& network,
+                      const vector<NodeConfig>& nodes,
                       IPPoolManager* out_manager,
                       string* error) {
     if (!out_manager) {
@@ -333,25 +448,26 @@ bool rebuild_ip_pools(const vector<ServerConfig>& servers,
     }
 
     IPPoolManager manager;
-    for (size_t i = 0; i < servers.size(); ++i) {
-        const ServerConfig& server = servers[i];
+    IPPoolManager::PoolConfig pool_config;
+    pool_config.pool_key = kNetworkPoolKey;
+    pool_config.cidr = network.virtual_subnet;
+    pool_config.gateway_ip = network.virtual_gateway;
+    pool_config.lease_seconds = network.lease_seconds > 0
+        ? (uint32_t)network.lease_seconds
+        : ip_tunnel::kDefaultLeaseSeconds;
 
-        IPPoolManager::PoolConfig pool_config;
-        pool_config.server_key = canonical_server_key(server);
-        pool_config.cidr = server.virtual_subnet;
-        pool_config.gateway_ip = server.virtual_gateway;
-        pool_config.server_virtual_ip = server.server_virtual_ip;
-        pool_config.lease_seconds = server.lease_seconds > 0
-            ? (uint32_t)server.lease_seconds
-            : ip_tunnel::kDefaultLeaseSeconds;
-
-        string pool_error;
-        if (!manager.ConfigurePool(pool_config, &pool_error)) {
-            if (error) {
-                *error = "server [" + server.name + "] pool config failed: " + pool_error;
-            }
-            return false;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (!nodes[i].server_virtual_ip.empty()) {
+            pool_config.additional_reserved_ips.push_back(nodes[i].server_virtual_ip);
         }
+    }
+
+    string pool_error;
+    if (!manager.ConfigurePool(pool_config, &pool_error)) {
+        if (error) {
+            *error = "network pool config failed: " + pool_error;
+        }
+        return false;
     }
 
     *out_manager = manager;
@@ -397,7 +513,7 @@ void load_version_config(const string& content) {
     }
 }
 
-// 从config.json读取服务器配置
+// 从config.json读取节点和网络配置（仅支持 network + nodes 新格式）
 bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
     printf("加载配置文件: %s\n", config_file);
 
@@ -407,7 +523,6 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
         return false;
     }
 
-    // 读取文件内容
     stringstream buffer;
     buffer << f.rdbuf();
     string content = buffer.str();
@@ -415,201 +530,116 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
 
     printf("配置文件大小: %zu 字节\n", content.size());
 
-    // 加载版本更新配置
     load_version_config(content);
 
-    // 临时存储，避免在解析过程中持有锁
-    vector<ServerConfig> temp_servers;
-    int id = 1;
+    NetworkConfig temp_network;
+    temp_network.tunnel_server_ip = tunnel_server_ip ? tunnel_server_ip : "";
+    vector<NodeConfig> temp_nodes;
 
-    // 查找servers数组
-    size_t servers_pos = content.find("\"servers\"");
-    if (servers_pos == string::npos) {
-        fprintf(stderr, "配置文件缺少servers字段\n");
-        return false;
-    }
-    printf("找到servers字段位置: %zu\n", servers_pos);
-
-    // 查找数组开始 [
-    size_t array_start = content.find("[", servers_pos);
-    if (array_start == string::npos) {
-        fprintf(stderr, "配置文件格式错误: 找不到servers数组\n");
-        return false;
-    }
-    printf("数组开始位置: %zu\n", array_start);
-
-    // 查找数组结束 ]
-    size_t array_end = content.find("]", array_start);
-    if (array_end == string::npos || array_end <= array_start) {
-        fprintf(stderr, "配置文件格式错误: servers数组未闭合\n");
-        return false;
-    }
-    printf("数组结束位置: %zu\n", array_end);
-
-    // 安全检查: 确保不会溢出
-    if (array_end <= array_start + 1) {
-        // 空数组
-        fprintf(stderr, "配置文件格式错误: servers数组为空\n");
+    string network_obj = extract_json_object(content, "network");
+    if (network_obj.empty()) {
+        fprintf(stderr, "配置文件缺少network对象\n");
         return false;
     }
 
-    // 提取数组内容
-    size_t content_len = array_end - array_start - 1;
-    if (content_len == 0 || content_len > 1000000) {
-        fprintf(stderr, "配置文件格式错误: servers数组长度异常 (%zu)\n", content_len);
+    temp_network.tunnel_port = extract_json_int(network_obj, "tunnel_port");
+    if (temp_network.tunnel_port <= 0) {
+        fprintf(stderr, "network.tunnel_port 无效\n");
         return false;
     }
 
-    printf("准备提取数组内容，长度: %zu\n", content_len);
+    temp_network.virtual_subnet = extract_json_string(network_obj, "virtual_subnet");
+    if (temp_network.virtual_subnet.empty()) {
+        temp_network.virtual_subnet = build_default_virtual_subnet(temp_network.tunnel_port);
+    }
 
-    string array_content;
-    try {
-        array_content = content.substr(array_start + 1, content_len);
-        printf("数组内容提取成功，实际长度: %zu\n", array_content.size());
-    } catch (const exception& e) {
-        fprintf(stderr, "提取数组内容失败: %s\n", e.what());
+    temp_network.virtual_gateway = extract_json_string(network_obj, "virtual_gateway");
+    if (temp_network.virtual_gateway.empty()) {
+        temp_network.virtual_gateway =
+            build_auto_virtual_gateway(temp_network.virtual_subnet, temp_network.tunnel_port);
+    }
+
+    string network_tunnel_ip = extract_json_string(network_obj, "tunnel_server_ip");
+    if (!network_tunnel_ip.empty()) {
+        temp_network.tunnel_server_ip = network_tunnel_ip;
+    }
+
+    int network_max_connections = extract_json_int(network_obj, "max_connections");
+    if (network_max_connections > 0) {
+        temp_network.max_connections = network_max_connections;
+    }
+
+    int network_lease_seconds = extract_json_int(network_obj, "lease_seconds");
+    if (network_lease_seconds > 0) {
+        temp_network.lease_seconds = network_lease_seconds;
+    }
+
+    string api_obj = extract_json_object(content, "api_config");
+    if (!api_obj.empty()) {
+        int api_port = extract_json_int(api_obj, "port");
+        if (api_port > 0) {
+            g_api_port = api_port;
+        }
+    }
+
+    vector<string> node_objects = extract_json_object_array(content, "nodes");
+    if (node_objects.empty()) {
+        fprintf(stderr, "配置文件缺少nodes数组或nodes为空\n");
         return false;
     }
 
-    // 按对象数量预估容量，避免大配置时频繁realloc；不是数量上限
-    size_t estimated_servers = 0;
-    for (char c : array_content) {
-        if (c == '{') estimated_servers++;
+    bool has_explicit_gateway_binding = false;
+    temp_nodes.reserve(node_objects.size());
+    for (size_t i = 0; i < node_objects.size(); ++i) {
+        NodeConfig node;
+        node.id = (int)i + 1;
+        node.name = extract_json_string(node_objects[i], "name");
+        if (node.name.empty()) {
+            node.name = "节点" + to_string(node.id);
+        }
+        node.server_virtual_ip = extract_json_string(node_objects[i], "server_virtual_ip");
+        if (node.server_virtual_ip.empty()) {
+            node.server_virtual_ip = build_virtual_ip_with_offset(temp_network.virtual_subnet, (uint32_t)(i + 2));
+        }
+        node.download_url = extract_json_string(node_objects[i], "download_url");
+        bool bind_found = false;
+        node.bind_on_gateway = extract_json_bool(node_objects[i], "bind_on_gateway", &bind_found);
+        if (node.bind_on_gateway) {
+            has_explicit_gateway_binding = true;
+        }
+
+        printf("节点 #%d: name=%s server_virtual_ip=%s\n",
+               node.id,
+               node.name.c_str(),
+               node.server_virtual_ip.c_str());
+
+        if (node.server_virtual_ip.empty()) {
+            fprintf(stderr, "节点 %s 缺少有效的server_virtual_ip\n", node.name.c_str());
+            return false;
+        }
+        temp_nodes.push_back(node);
     }
-    if (estimated_servers > 0) {
-        temp_servers.reserve(estimated_servers);
-    }
-    printf("temp_servers预分配完成，容量: %zu\n", temp_servers.capacity());
 
-    // 逐个提取服务器对象 {...}
-    size_t pos = 0;
-    int server_count = 0;
-    while (true) {
-        size_t obj_start = array_content.find("{", pos);
-        if (obj_start == string::npos) {
-            printf("没有找到更多服务器对象\n");
-            break;
-        }
-
-        size_t obj_end = array_content.find("}", obj_start);
-        if (obj_end == string::npos) {
-            printf("服务器对象未闭合\n");
-            break;
-        }
-
-        printf("找到服务器对象 #%d: 位置 %zu - %zu\n", server_count + 1, obj_start, obj_end);
-
-        // 安全检查
-        if (obj_end <= obj_start || obj_end - obj_start > 10000) {
-            fprintf(stderr, "服务器对象大小异常: %zu\n", obj_end - obj_start);
-            break;
-        }
-
-        string obj;
-        try {
-            obj = array_content.substr(obj_start, obj_end - obj_start + 1);
-            printf("对象内容长度: %zu\n", obj.size());
-        } catch (const exception& e) {
-            fprintf(stderr, "提取对象失败: %s\n", e.what());
-            break;
-        }
-
-        // 使用C风格字符串暂存
-        string name_str = extract_json_string(obj, "name");
-        printf("  name: %s (长度: %zu)\n", name_str.c_str(), name_str.length());
-
-        string tunnel_ip_str = extract_json_string(obj, "tunnel_server_ip");
-        if (tunnel_ip_str.empty()) {
-            tunnel_ip_str.assign(tunnel_server_ip);
-        }
-        printf("  tunnel_ip: %s (长度: %zu)\n", tunnel_ip_str.c_str(), tunnel_ip_str.length());
-
-        int port = extract_json_int(obj, "listen_port");
-        printf("  port: %d\n", port);
-
-        string download_url_str = extract_json_string(obj, "download_url");
-        printf("  download_url: %s (长度: %zu)\n", download_url_str.c_str(), download_url_str.length());
-
-        string virtual_subnet_str = extract_json_string(obj, "virtual_subnet");
-        if (virtual_subnet_str.empty()) {
-            virtual_subnet_str = build_default_virtual_subnet(port);
-        }
-        printf("  virtual_subnet: %s\n", virtual_subnet_str.c_str());
-
-        string virtual_gateway_str = extract_json_string(obj, "virtual_gateway");
-        if (virtual_gateway_str.empty()) {
-            virtual_gateway_str = build_auto_virtual_gateway(virtual_subnet_str, port);
-        }
-        printf("  virtual_gateway: %s\n", virtual_gateway_str.c_str());
-
-        string server_virtual_ip_str = extract_json_string(obj, "server_virtual_ip");
-        if (server_virtual_ip_str.empty()) {
-            server_virtual_ip_str = build_default_server_virtual_ip(virtual_subnet_str);
-        }
-        printf("  server_virtual_ip: %s\n", server_virtual_ip_str.c_str());
-
-        string game_ip_str = extract_json_string(obj, "game_server_ip");
-        if (game_ip_str.empty()) {
-            game_ip_str = server_virtual_ip_str;
-        }
-        printf("  server_target_ip: %s (长度: %zu)\n", game_ip_str.c_str(), game_ip_str.length());
-
-        int lease_seconds = extract_json_int(obj, "lease_seconds");
-        if (lease_seconds <= 0) {
-            lease_seconds = (int)ip_tunnel::kDefaultLeaseSeconds;
-        }
-        printf("  lease_seconds: %d\n", lease_seconds);
-
-        // 使用emplace_back避免拷贝
-        printf("准备添加到临时列表...\n");        try {
-            temp_servers.emplace_back();
-            ServerConfig& s = temp_servers.back();
-            s.id = id++;
-            s.name.assign(name_str.c_str(), name_str.length());
-            s.game_server_ip.assign(game_ip_str.c_str(), game_ip_str.length());
-            s.server_virtual_ip.assign(server_virtual_ip_str.c_str(), server_virtual_ip_str.length());
-            s.tunnel_server_ip.assign(tunnel_ip_str.c_str(), tunnel_ip_str.length());
-            s.tunnel_port = port;
-            s.download_url.assign(download_url_str.c_str(), download_url_str.length());
-            s.virtual_subnet.assign(virtual_subnet_str.c_str(), virtual_subnet_str.length());
-            s.virtual_gateway.assign(virtual_gateway_str.c_str(), virtual_gateway_str.length());
-            s.lease_seconds = lease_seconds;
-
-            printf("added server #%d\n", s.id);
-            server_count++;
-        } catch (const bad_alloc& e) {
-            fprintf(stderr, "内存分配失败: %s\n", e.what());
-            fprintf(stderr, "temp_servers当前大小: %zu, 容量: %zu\n",
-                    temp_servers.size(), temp_servers.capacity());
-            break;
-        } catch (const exception& e) {
-            fprintf(stderr, "添加服务器失败: %s\n", e.what());
-            break;
-        }
-
-        pos = obj_end + 1;
-        if (pos >= array_content.size()) {
-            printf("已到达数组末尾\n");
-            break;
-        }
+    if (!has_explicit_gateway_binding && !temp_nodes.empty()) {
+        temp_nodes[0].bind_on_gateway = true;
     }
 
     IPPoolManager temp_pool_manager;
     string pool_error;
-    if (!rebuild_ip_pools(temp_servers, &temp_pool_manager, &pool_error)) {
+    if (!rebuild_ip_pools(temp_network, temp_nodes, &temp_pool_manager, &pool_error)) {
         fprintf(stderr, "IP池配置失败: %s\n", pool_error.c_str());
         return false;
     }
 
-    // 一次性更新全局列表（加锁）
     {
         lock_guard<mutex> lock(g_servers_mutex);
-        g_servers.swap(temp_servers);
+        g_network = temp_network;
+        g_nodes.swap(temp_nodes);
         g_ip_pool_manager = temp_pool_manager;
     }
 
-    printf("加载了 %zu 个服务器配置\n", g_servers.size());
-    return g_servers.size() > 0;
+    printf("加载了 %zu 个节点配置\n", g_nodes.size());
+    return !g_nodes.empty();
 }
 
 // 生成服务器列表JSON响应
@@ -619,8 +649,8 @@ string generate_server_list_json() {
 
     {
         lock_guard<mutex> lock(g_servers_mutex);
-        for (size_t i = 0; i < g_servers.size(); i++) {
-            const ServerConfig& s = g_servers[i];
+        for (size_t i = 0; i < g_nodes.size(); i++) {
+            const NodeConfig& s = g_nodes[i];
 
             if (i > 0) json << ",";
 
@@ -628,12 +658,13 @@ string generate_server_list_json() {
                  << "\"id\":" << s.id << ","
                  << "\"name\":\"" << json_escape(s.name) << "\","
                  << "\"server_virtual_ip\":\"" << json_escape(s.server_virtual_ip) << "\","
-                 << "\"tunnel_server_ip\":\"" << json_escape(s.tunnel_server_ip) << "\","
-                 << "\"tunnel_port\":" << s.tunnel_port << ","
+                 << "\"tunnel_server_ip\":\"" << json_escape(g_network.tunnel_server_ip) << "\","
+                 << "\"tunnel_port\":" << g_network.tunnel_port << ","
                  << "\"download_url\":\"" << json_escape(s.download_url) << "\","
-                 << "\"virtual_subnet\":\"" << json_escape(s.virtual_subnet) << "\","
-                 << "\"virtual_gateway\":\"" << json_escape(s.virtual_gateway) << "\","
-                 << "\"lease_seconds\":" << s.lease_seconds
+                 << "\"virtual_subnet\":\"" << json_escape(g_network.virtual_subnet) << "\","
+                 << "\"virtual_gateway\":\"" << json_escape(g_network.virtual_gateway) << "\","
+                 << "\"lease_seconds\":" << g_network.lease_seconds << ","
+                 << "\"bind_on_gateway\":" << (s.bind_on_gateway ? "true" : "false")
                  << "}";
         }
     }
@@ -692,12 +723,12 @@ void handle_tcp_request(int client_fd) {
         } else {
             string json_response;
             lock_guard<mutex> lock(g_servers_mutex);
-            const ServerConfig* server = find_server_by_key_locked(parts[1]);
-            if (server == NULL) {
-                json_response = make_status_json(ip_tunnel::kStatusServerNotFound, "server not found", parts[1]);
+            const NodeConfig* node = find_node_by_key_locked(parts[1]);
+            if (node == NULL) {
+                json_response = make_status_json(ip_tunnel::kStatusServerNotFound, "node not found", parts[1]);
             } else {
                 ip_tunnel::LeaseRequest lease_request;
-                lease_request.server_key = canonical_server_key(*server);
+                lease_request.server_key = canonical_node_key(*node);
                 lease_request.session_uuid = parts[2];
                 lease_request.client_id = parts[3];
                 if (parts.size() >= 5) {
@@ -706,10 +737,11 @@ void handle_tcp_request(int client_fd) {
 
                 IPPoolManager::LeaseRecord lease_record;
                 string error;
-                if (g_ip_pool_manager.AcquireLease(lease_request, &lease_record, &error)) {
-                    json_response = generate_lease_json(*server, lease_record, "lease granted");
+                if (g_ip_pool_manager.AcquireLease(kNetworkPoolKey, lease_request, &lease_record, &error)) {
+                    lease_record.server_virtual_ip = node->server_virtual_ip;
+                    json_response = generate_lease_json(*node, lease_record, "lease granted");
                 } else {
-                    json_response = make_status_json(status_from_error(error), error, canonical_server_key(*server));
+                    json_response = make_status_json(status_from_error(error), error, canonical_node_key(*node));
                 }
             }
 
@@ -724,16 +756,17 @@ void handle_tcp_request(int client_fd) {
         } else {
             string json_response;
             lock_guard<mutex> lock(g_servers_mutex);
-            const ServerConfig* server = find_server_by_key_locked(parts[1]);
-            if (server == NULL) {
-                json_response = make_status_json(ip_tunnel::kStatusServerNotFound, "server not found", parts[1]);
+            const NodeConfig* node = find_node_by_key_locked(parts[1]);
+            if (node == NULL) {
+                json_response = make_status_json(ip_tunnel::kStatusServerNotFound, "node not found", parts[1]);
             } else {
                 IPPoolManager::LeaseRecord lease_record;
                 string error;
-                if (g_ip_pool_manager.RenewLease(canonical_server_key(*server), parts[2], &lease_record, &error)) {
-                    json_response = generate_lease_json(*server, lease_record, "lease renewed");
+                if (g_ip_pool_manager.RenewLease(kNetworkPoolKey, parts[2], &lease_record, &error)) {
+                    lease_record.server_virtual_ip = node->server_virtual_ip;
+                    json_response = generate_lease_json(*node, lease_record, "lease renewed");
                 } else {
-                    json_response = make_status_json(status_from_error(error), error, canonical_server_key(*server));
+                    json_response = make_status_json(status_from_error(error), error, canonical_node_key(*node));
                 }
             }
 
@@ -748,13 +781,13 @@ void handle_tcp_request(int client_fd) {
         } else {
             string json_response;
             lock_guard<mutex> lock(g_servers_mutex);
-            const ServerConfig* server = find_server_by_key_locked(parts[1]);
-            if (server == NULL) {
-                json_response = make_status_json(ip_tunnel::kStatusServerNotFound, "server not found", parts[1]);
-            } else if (g_ip_pool_manager.ReleaseLease(canonical_server_key(*server), parts[2])) {
-                json_response = make_status_json(ip_tunnel::kStatusOk, "lease released", canonical_server_key(*server));
+            const NodeConfig* node = find_node_by_key_locked(parts[1]);
+            if (node == NULL) {
+                json_response = make_status_json(ip_tunnel::kStatusServerNotFound, "node not found", parts[1]);
+            } else if (g_ip_pool_manager.ReleaseLease(kNetworkPoolKey, parts[2])) {
+                json_response = make_status_json(ip_tunnel::kStatusOk, "lease released", canonical_node_key(*node));
             } else {
-                json_response = make_status_json(ip_tunnel::kStatusLeaseNotFound, "lease not found", canonical_server_key(*server));
+                json_response = make_status_json(ip_tunnel::kStatusLeaseNotFound, "lease not found", canonical_node_key(*node));
             }
 
             send(client_fd, json_response.c_str(), json_response.length(), 0);
@@ -917,16 +950,18 @@ bool reload_tcp_config() {
     printf("重新加载配置文件: %s\n", g_config_file.c_str());
 
     if (load_server_config(g_config_file.c_str(), g_tunnel_server_ip.c_str())) {
-        printf("✓ 配置重载成功，当前服务器数量: %zu\n", g_servers.size());
+        printf("✓ 配置重载成功，当前节点数量: %zu\n", g_nodes.size());
 
-        // 打印服务器列表
         lock_guard<mutex> lock(g_servers_mutex);
-        printf("\n当前服务器列表:\n");
+        printf("\n当前网络配置:\n");
         printf("------------------------------------\n");
-        for (const auto& s : g_servers) {
-            printf("  [%d] %s\n", s.id, s.name.c_str());
-            printf("      服务端虚拟IP: %s\n", s.server_virtual_ip.c_str());
-            printf("      隧道端口: %d\n", s.tunnel_port);
+        printf("  隧道端口: %d\n", g_network.tunnel_port);
+        printf("  虚拟网段: %s\n", g_network.virtual_subnet.c_str());
+        printf("  虚拟网关: %s\n", g_network.virtual_gateway.c_str());
+        printf("  公网入口: %s\n", g_network.tunnel_server_ip.c_str());
+        printf("  节点列表:\n");
+        for (const auto& s : g_nodes) {
+            printf("    [%d] %s -> %s\n", s.id, s.name.c_str(), s.server_virtual_ip.c_str());
         }
         printf("------------------------------------\n\n");
 
@@ -943,15 +978,8 @@ bool query_active_tcp_config_lease(const std::string& server_key,
                                    IPPoolManager::LeaseRecord* out_record,
                                    std::string* error) {
     lock_guard<mutex> lock(g_servers_mutex);
-    const ServerConfig* server = find_server_by_key_locked(server_key);
-    if (server == NULL) {
-        if (error) {
-            *error = "server not found";
-        }
-        return false;
-    }
-
-    return g_ip_pool_manager.GetLease(canonical_server_key(*server), session_uuid, out_record, error);
+    (void)server_key;
+    return g_ip_pool_manager.GetLease(kNetworkPoolKey, session_uuid, out_record, error);
 }
 
 void* config_monitor_thread(void* arg) {

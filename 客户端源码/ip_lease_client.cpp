@@ -30,7 +30,8 @@ bool IPLeaseClient::SendCommand(const std::string& host,
                                 int port,
                                 const std::string& command,
                                 std::string& response,
-                                std::wstring* error_msg) {
+                                std::wstring* error_msg,
+                                bool allow_empty_response) {
     SOCKET sock = INVALID_SOCKET;
     struct addrinfo hints;
     struct addrinfo* result = NULL;
@@ -115,6 +116,9 @@ bool IPLeaseClient::SendCommand(const std::string& host,
     closesocket(sock);
 
     if (response.empty()) {
+        if (allow_empty_response) {
+            return true;
+        }
         if (error_msg) {
             *error_msg = L"租约服务器返回空数据";
         }
@@ -345,8 +349,12 @@ bool IPLeaseClient::ReleaseLease(const std::string& api_url,
     command << "RELEASE_LEASE " << server_key << " " << session_uuid << "\n";
 
     std::string response;
-    if (!SendCommand(api_url, api_port, command.str(), response, error_msg)) {
+    if (!SendCommand(api_url, api_port, command.str(), response, error_msg, true)) {
         return false;
+    }
+
+    if (response.empty()) {
+        return true;
     }
 
     const int status = ExtractJsonInt(response, "status", (int)ip_tunnel::kStatusInvalidRequest);

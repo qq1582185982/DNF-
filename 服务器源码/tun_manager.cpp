@@ -21,6 +21,15 @@ int extract_prefix_length(const std::string& cidr) {
     return atoi(cidr.substr(slash + 1).c_str());
 }
 
+bool contains_ip(const std::vector<std::string>& ips, const std::string& ip) {
+    for (size_t i = 0; i < ips.size(); ++i) {
+        if (ips[i] == ip) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 TunManager::TunManager()
@@ -140,11 +149,22 @@ bool TunManager::ConfigureInterface(const TunRuntimeConfig& config, std::string*
         return false;
     }
 
-    if (!config.server_virtual_ip.empty() && config.server_virtual_ip != config.gateway_ip) {
-        std::ostringstream server_cmd;
-        server_cmd << "ip addr add " << config.server_virtual_ip << "/" << prefix_length
-                   << " dev " << if_name_;
-        if (!RunCommand(server_cmd.str(), error)) {
+    std::vector<std::string> local_ips = config.local_node_ips;
+    if (!config.server_virtual_ip.empty() &&
+        config.server_virtual_ip != config.gateway_ip &&
+        !contains_ip(local_ips, config.server_virtual_ip)) {
+        local_ips.push_back(config.server_virtual_ip);
+    }
+
+    for (size_t i = 0; i < local_ips.size(); ++i) {
+        if (local_ips[i].empty() || local_ips[i] == config.gateway_ip) {
+            continue;
+        }
+
+        std::ostringstream local_ip_cmd;
+        local_ip_cmd << "ip addr add " << local_ips[i] << "/" << prefix_length
+                     << " dev " << if_name_;
+        if (!RunCommand(local_ip_cmd.str(), error)) {
             return false;
         }
     }

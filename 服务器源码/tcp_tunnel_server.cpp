@@ -250,14 +250,23 @@ class Logger;
 // ==================== 配置 ====================
 // 单个服务器配置
 struct ServerConfig {
-    string name = "默认服务器";
+    string name = "虚拟局域网";
     int listen_port = 33223;
     string game_server_ip = "";
     string server_virtual_ip = "";
+    vector<string> local_node_ips;
     int max_connections = 100;
     string virtual_subnet = "";
     string virtual_gateway = "";
     int lease_seconds = 120;
+};
+
+struct NodeConfig {
+    int id = 0;
+    string name = "";
+    string server_virtual_ip = "";
+    string download_url = "";
+    bool bind_on_gateway = false;
 };
 
 // 全局配置
@@ -270,6 +279,7 @@ struct ApiConfig {
 
 struct GlobalConfig {
     vector<ServerConfig> servers;
+    vector<NodeConfig> nodes;
     string log_level = "INFO";
     ApiConfig api_config;
 };
@@ -322,7 +332,7 @@ static string build_auto_virtual_gateway(const string& subnet_cidr, int tunnel_p
     return string(gateway_str);
 }
 
-static string build_default_server_virtual_ip(const string& subnet_cidr) {
+static string build_virtual_ip_with_offset(const string& subnet_cidr, uint32_t host_offset) {
     size_t slash = subnet_cidr.find('/');
     string base_ip = (slash == string::npos) ? subnet_cidr : subnet_cidr.substr(0, slash);
     int prefix_bits = 24;
@@ -341,19 +351,162 @@ static string build_default_server_virtual_ip(const string& subnet_cidr) {
 
     uint32_t network_host = ntohl(network_addr.s_addr);
     uint32_t host_count = 1u << (32 - prefix_bits);
-    if (host_count <= 3) {
+    if (host_offset >= host_count - 1) {
         return "";
     }
 
-    uint32_t server_ip = network_host + 2;
-    in_addr server_addr{};
-    server_addr.s_addr = htonl(server_ip);
+    uint32_t ip_host = network_host + host_offset;
+    in_addr ip_addr{};
+    ip_addr.s_addr = htonl(ip_host);
 
-    char server_str[INET_ADDRSTRLEN] = {};
-    if (!inet_ntop(AF_INET, &server_addr, server_str, sizeof(server_str))) {
+    char ip_str[INET_ADDRSTRLEN] = {};
+    if (!inet_ntop(AF_INET, &ip_addr, ip_str, sizeof(ip_str))) {
         return "";
     }
-    return string(server_str);
+    return string(ip_str);
+}
+
+static string extract_json_string(const string& json, const string& key) {
+    string search = "\"" + key + "\"";
+    size_t pos = json.find(search);
+    if (pos == string::npos) return "";
+
+    pos = json.find(":", pos);
+    if (pos == string::npos) return "";
+
+    pos = json.find("\"", pos);
+    if (pos == string::npos) return "";
+
+    size_t end = json.find("\"", pos + 1);
+    if (end == string::npos) return "";
+
+    return json.substr(pos + 1, end - pos - 1);
+}
+
+static int extract_json_int(const string& json, const string& key) {
+    string search = "\"" + key + "\"";
+    size_t pos = json.find(search);
+    if (pos == string::npos) return 0;
+
+    pos = json.find(":", pos);
+    if (pos == string::npos) return 0;
+
+    while (pos < json.length() &&
+           (json[pos] == ':' || json[pos] == ' ' || json[pos] == '\t' ||
+            json[pos] == '\r' || json[pos] == '\n')) {
+        pos++;
+    }
+
+    return atoi(json.c_str() + pos);
+}
+
+static bool extract_json_bool(const string& json, const string& key, bool* found = nullptr) {
+    string search = "\"" + key + "\"";
+    size_t pos = json.find(search);
+    if (pos == string::npos) {
+        if (found != nullptr) {
+            *found = false;
+        }
+        return false;
+    }
+
+    pos = json.find(":", pos);
+    if (pos == string::npos) {
+        if (found != nullptr) {
+            *found = false;
+        }
+        return false;
+    }
+
+    while (pos < json.length() &&
+           (json[pos] == ':' || json[pos] == ' ' || json[pos] == '\t' ||
+            json[pos] == '\r' || json[pos] == '\n')) {
+        pos++;
+    }
+
+    if (found != nullptr) {
+        *found = true;
+    }
+
+    return json.compare(pos, 4, "true") == 0 || json.compare(pos, 1, "1") == 0;
+}
+
+static size_t find_matching_brace(const string& content, size_t open_pos, char open_ch, char close_ch) {
+    int depth = 0;
+    bool in_string = false;
+    bool escape = false;
+
+    for (size_t i = open_pos; i < content.size(); ++i) {
+        char ch = content[i];
+        if (in_string) {
+            if (escape) {
+                escape = false;
+            } else if (ch == '\\') {
+                escape = true;
+            } else if (ch == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if (ch == '"') {
+            in_string = true;
+            continue;
+        }
+        if (ch == open_ch) {
+            depth++;
+        } else if (ch == close_ch) {
+            depth--;
+            if (depth == 0) {
+                return i;
+            }
+        }
+    }
+
+    return string::npos;
+}
+
+static string extract_json_object_block(const string& json, const string& key) {
+    string search = "\"" + key + "\"";
+    size_t pos = json.find(search);
+    if (pos == string::npos) return "";
+
+    size_t start = json.find("{", pos);
+    if (start == string::npos) return "";
+
+    size_t end = find_matching_brace(json, start, '{', '}');
+    if (end == string::npos || end < start) return "";
+
+    return json.substr(start, end - start + 1);
+}
+
+static vector<string> extract_json_object_array_blocks(const string& json, const string& key) {
+    vector<string> objects;
+    string search = "\"" + key + "\"";
+    size_t pos = json.find(search);
+    if (pos == string::npos) return objects;
+
+    size_t array_start = json.find("[", pos);
+    if (array_start == string::npos) return objects;
+
+    size_t array_end = find_matching_brace(json, array_start, '[', ']');
+    if (array_end == string::npos || array_end <= array_start) return objects;
+
+    size_t cursor = array_start + 1;
+    while (cursor < array_end) {
+        size_t obj_start = json.find("{", cursor);
+        if (obj_start == string::npos || obj_start >= array_end) {
+            break;
+        }
+        size_t obj_end = find_matching_brace(json, obj_start, '{', '}');
+        if (obj_end == string::npos || obj_end > array_end) {
+            break;
+        }
+        objects.push_back(json.substr(obj_start, obj_end - obj_start + 1));
+        cursor = obj_end + 1;
+    }
+
+    return objects;
 }
 
 static string build_tun_interface_name(int listen_port) {
@@ -1832,9 +1985,8 @@ public:
         tun_config.gateway_ip = config.virtual_gateway.empty()
             ? build_auto_virtual_gateway(tun_config.subnet_cidr, config.listen_port)
             : config.virtual_gateway;
-        tun_config.server_virtual_ip = config.server_virtual_ip.empty()
-            ? build_default_server_virtual_ip(tun_config.subnet_cidr)
-            : config.server_virtual_ip;
+        tun_config.server_virtual_ip = config.server_virtual_ip;
+        tun_config.local_node_ips = config.local_node_ips;
         tun_config.mtu = 1400;
 
         has_gateway_ip_be = parse_ipv4_be(tun_config.gateway_ip, &gateway_ip_be);
@@ -1843,9 +1995,12 @@ public:
 
         string tun_error;
         if (tun_manager.Setup(tun_config, &tun_error)) {
-            Logger::info("[" + server_name + "] IP Tunnel TUN ready: if=" + tun_manager.GetIfName() +
-                         " subnet=" + tun_config.subnet_cidr + " gateway=" + tun_config.gateway_ip +
-                         " server_ip=" + tun_config.server_virtual_ip);
+            string tun_log = "[" + server_name + "] IP Tunnel TUN ready: if=" + tun_manager.GetIfName() +
+                             " subnet=" + tun_config.subnet_cidr + " gateway=" + tun_config.gateway_ip;
+            if (!tun_config.server_virtual_ip.empty()) {
+                tun_log += " server_ip=" + tun_config.server_virtual_ip;
+            }
+            Logger::info(tun_log);
             tun_read_thread = make_shared<thread>([this]() {
                 packet_tunnel_tun_loop();
             });
@@ -1853,10 +2008,8 @@ public:
             Logger::warning("[" + server_name + "] IP Tunnel TUN init failed: " + tun_error);
         }
         Logger::info("[" + server_name + "] 服务器启动成功，监听端口: " + to_string(config.listen_port) + " (IPv4/IPv6双栈)");
-        Logger::info("[" + server_name + "] 服务端虚拟IP: " + config.server_virtual_ip);
         Logger::info("[" + server_name + "] 虚拟网段: " + tun_config.subnet_cidr +
-                     (tun_config.gateway_ip.empty() ? "" : " 网关=" + tun_config.gateway_ip) +
-                     (tun_config.server_virtual_ip.empty() ? "" : " 服务端虚拟IP=" + tun_config.server_virtual_ip));
+                     (tun_config.gateway_ip.empty() ? "" : " 网关=" + tun_config.gateway_ip));
 
         accept_loop();
         return true;
@@ -2811,195 +2964,131 @@ GlobalConfig load_config(const string& filename) {
     ifstream file(filename);
     if (!file.is_open()) {
         Logger::warning("配置文件不存在: " + filename + "，使用默认配置");
-        // 返回包含一个默认服务器的配置
-        ServerConfig default_server;
-        default_server.virtual_subnet = build_default_virtual_subnet(default_server.listen_port);
-        default_server.virtual_gateway =
-            build_auto_virtual_gateway(default_server.virtual_subnet, default_server.listen_port);
-        default_server.server_virtual_ip = build_default_server_virtual_ip(default_server.virtual_subnet);
-        default_server.game_server_ip = default_server.server_virtual_ip;
-        global_config.servers.push_back(default_server);
+        ServerConfig runtime_server;
+        runtime_server.virtual_subnet = build_default_virtual_subnet(runtime_server.listen_port);
+        runtime_server.virtual_gateway =
+            build_auto_virtual_gateway(runtime_server.virtual_subnet, runtime_server.listen_port);
+        NodeConfig default_node;
+        default_node.id = 1;
+        default_node.name = "节点1";
+        default_node.server_virtual_ip = build_virtual_ip_with_offset(runtime_server.virtual_subnet, 2);
+        default_node.bind_on_gateway = true;
+        global_config.nodes.push_back(default_node);
+        runtime_server.local_node_ips.push_back(default_node.server_virtual_ip);
+        runtime_server.server_virtual_ip = default_node.server_virtual_ip;
+        runtime_server.game_server_ip = runtime_server.server_virtual_ip;
+        global_config.servers.push_back(runtime_server);
+        global_config.api_config.tunnel_server_ip = "127.0.0.1";
         return global_config;
     }
 
-    string line;
-    bool in_servers_array = false;
-    bool in_server_object = false;
-    ServerConfig current_server;
+    stringstream buffer;
+    buffer << file.rdbuf();
+    string content = buffer.str();
+    file.close();
 
-    while (getline(file, line)) {
-        // 检查是否进入servers数组
-        if (line.find("\"servers\"") != string::npos && line.find("[") != string::npos) {
-            in_servers_array = true;
+    string network_obj = extract_json_object_block(content, "network");
+    if (network_obj.empty()) {
+        Logger::error("配置文件缺少 network 对象");
+        return global_config;
+    }
+
+    ServerConfig runtime_server;
+    runtime_server.listen_port = extract_json_int(network_obj, "tunnel_port");
+    if (runtime_server.listen_port <= 0) {
+        runtime_server.listen_port = 33223;
+    }
+    runtime_server.virtual_subnet = extract_json_string(network_obj, "virtual_subnet");
+    if (runtime_server.virtual_subnet.empty()) {
+        runtime_server.virtual_subnet = build_default_virtual_subnet(runtime_server.listen_port);
+    }
+    runtime_server.virtual_gateway = extract_json_string(network_obj, "virtual_gateway");
+    if (runtime_server.virtual_gateway.empty()) {
+        runtime_server.virtual_gateway =
+            build_auto_virtual_gateway(runtime_server.virtual_subnet, runtime_server.listen_port);
+    }
+    runtime_server.max_connections = extract_json_int(network_obj, "max_connections");
+    if (runtime_server.max_connections <= 0) {
+        runtime_server.max_connections = 100;
+    }
+    runtime_server.lease_seconds = extract_json_int(network_obj, "lease_seconds");
+    if (runtime_server.lease_seconds <= 0) {
+        runtime_server.lease_seconds = (int)ip_tunnel::kDefaultLeaseSeconds;
+    }
+    runtime_server.game_server_ip.clear();
+    runtime_server.server_virtual_ip.clear();
+    runtime_server.name = "虚拟局域网";
+
+    global_config.api_config.tunnel_server_ip = extract_json_string(network_obj, "tunnel_server_ip");
+    if (global_config.api_config.tunnel_server_ip.empty()) {
+        global_config.api_config.tunnel_server_ip = "127.0.0.1";
+    }
+
+    string log_level = extract_json_string(content, "log_level");
+    if (!log_level.empty()) {
+        global_config.log_level = log_level;
+    }
+
+    string api_obj = extract_json_object_block(content, "api_config");
+    if (!api_obj.empty()) {
+        if (api_obj.find("\"enabled\"") != string::npos) {
+            global_config.api_config.enabled = (api_obj.find("true") != string::npos);
+        }
+        int api_port = extract_json_int(api_obj, "port");
+        if (api_port > 0) {
+            global_config.api_config.port = api_port;
+        }
+    }
+
+    vector<string> node_objects = extract_json_object_array_blocks(content, "nodes");
+    bool has_explicit_gateway_binding = false;
+    for (size_t i = 0; i < node_objects.size(); ++i) {
+        NodeConfig node;
+        node.id = (int)i + 1;
+        node.name = extract_json_string(node_objects[i], "name");
+        if (node.name.empty()) {
+            node.name = "节点" + to_string(node.id);
+        }
+        node.server_virtual_ip = extract_json_string(node_objects[i], "server_virtual_ip");
+        if (node.server_virtual_ip.empty()) {
+            node.server_virtual_ip = build_virtual_ip_with_offset(runtime_server.virtual_subnet, (uint32_t)(i + 2));
+        }
+        node.download_url = extract_json_string(node_objects[i], "download_url");
+        bool bind_found = false;
+        node.bind_on_gateway = extract_json_bool(node_objects[i], "bind_on_gateway", &bind_found);
+        if (node.bind_on_gateway) {
+            has_explicit_gateway_binding = true;
+        }
+        global_config.nodes.push_back(node);
+    }
+
+    if (global_config.nodes.empty()) {
+        NodeConfig default_node;
+        default_node.id = 1;
+        default_node.name = "节点1";
+        default_node.server_virtual_ip = build_virtual_ip_with_offset(runtime_server.virtual_subnet, 2);
+        global_config.nodes.push_back(default_node);
+    }
+
+    if (!has_explicit_gateway_binding && !global_config.nodes.empty()) {
+        global_config.nodes[0].bind_on_gateway = true;
+    }
+
+    for (size_t i = 0; i < global_config.nodes.size(); ++i) {
+        if (!global_config.nodes[i].bind_on_gateway) {
             continue;
         }
-
-        // 检查是否退出servers数组
-        if (in_servers_array && line.find("]") != string::npos) {
-            string trimmed = line;
-            trimmed.erase(0, trimmed.find_first_not_of(" \t"));
-            if (!trimmed.empty() && trimmed[0] == ']') {
-                in_servers_array = false;
-                continue;
-            }
-        }
-
-        // 在servers数组中
-        if (in_servers_array) {
-            // 检查是否开始一个新的server对象
-            if (line.find("{") != string::npos && !in_server_object) {
-                in_server_object = true;
-                current_server = ServerConfig();  // 重置为默认值
-                continue;
-            }
-
-            // 检查是否结束当前server对象
-            if (in_server_object && line.find("}") != string::npos) {
-                string trimmed = line;
-                trimmed.erase(0, trimmed.find_first_not_of(" \t"));
-                if (!trimmed.empty() && trimmed[0] == '}') {
-                    global_config.servers.push_back(current_server);
-                    in_server_object = false;
-                    continue;
-                }
-            }
-
-            // 解析server对象内的字段
-            if (in_server_object) {
-                if (line.find("\"name\"") != string::npos) {
-                    size_t start = line.find("\"", line.find(":")) + 1;
-                    size_t end = line.find("\"", start);
-                    if (start != string::npos && end != string::npos) {
-                        current_server.name = line.substr(start, end - start);
-                    }
-                }
-                else if (line.find("\"listen_port\"") != string::npos) {
-                    size_t pos = line.find(":");
-                    if (pos != string::npos) {
-                        string value = line.substr(pos + 1);
-                        int num = extract_number(value);
-                        if (num > 0) current_server.listen_port = num;
-                    }
-                }
-                else if (line.find("\"game_server_ip\"") != string::npos) {
-                    size_t start = line.find("\"", line.find(":")) + 1;
-                    size_t end = line.find("\"", start);
-                    if (start != string::npos && end != string::npos) {
-                        current_server.game_server_ip = line.substr(start, end - start);
-                    }
-                }
-                else if (line.find("\"server_virtual_ip\"") != string::npos) {
-                    size_t start = line.find("\"", line.find(":")) + 1;
-                    size_t end = line.find("\"", start);
-                    if (start != string::npos && end != string::npos) {
-                        current_server.server_virtual_ip = line.substr(start, end - start);
-                    }
-                }
-                else if (line.find("\"max_connections\"") != string::npos) {
-                    size_t pos = line.find(":");
-                    if (pos != string::npos) {
-                        string value = line.substr(pos + 1);
-                        int num = extract_number(value);
-                        if (num > 0) current_server.max_connections = num;
-                    }
-                }
-                else if (line.find("\"virtual_subnet\"") != string::npos) {
-                    size_t start = line.find("\"", line.find(":")) + 1;
-                    size_t end = line.find("\"", start);
-                    if (start != string::npos && end != string::npos) {
-                        current_server.virtual_subnet = line.substr(start, end - start);
-                    }
-                }
-                else if (line.find("\"virtual_gateway\"") != string::npos) {
-                    size_t start = line.find("\"", line.find(":")) + 1;
-                    size_t end = line.find("\"", start);
-                    if (start != string::npos && end != string::npos) {
-                        current_server.virtual_gateway = line.substr(start, end - start);
-                    }
-                }
-                else if (line.find("\"lease_seconds\"") != string::npos) {
-                    size_t pos = line.find(":");
-                    if (pos != string::npos) {
-                        string value = line.substr(pos + 1);
-                        int num = extract_number(value);
-                        if (num > 0) current_server.lease_seconds = num;
-                    }
-                }
-            }
-        }
-
-        // 解析全局log_level
-        if (!in_servers_array && line.find("\"log_level\"") != string::npos) {
-            size_t start = line.find("\"", line.find(":")) + 1;
-            size_t end = line.find("\"", start);
-            if (start != string::npos && end != string::npos) {
-                global_config.log_level = line.substr(start, end - start);
-            }
-        }
-
-        // 解析API配置 (简单判断:在api_config后面的字段)
-        static bool in_api_config = false;
-        if (line.find("\"api_config\"") != string::npos) {
-            in_api_config = true;
-        }
-        if (in_api_config && line.find("}") != string::npos) {
-            string trimmed = line;
-            trimmed.erase(0, trimmed.find_first_not_of(" \t"));
-            if (!trimmed.empty() && trimmed[0] == '}') {
-                in_api_config = false;
-            }
-        }
-
-        if (in_api_config && !in_servers_array) {
-            if (line.find("\"enabled\"") != string::npos) {
-                if (line.find("true") != string::npos) {
-                    global_config.api_config.enabled = true;
-                } else if (line.find("false") != string::npos) {
-                    global_config.api_config.enabled = false;
-                }
-            }
-            else if (line.find("\"port\"") != string::npos) {
-                size_t pos = line.find(":");
-                if (pos != string::npos) {
-                    string value = line.substr(pos + 1);
-                    int num = extract_number(value);
-                    if (num > 0) global_config.api_config.port = num;
-                }
-            }
-            else if (line.find("\"tunnel_server_ip\"") != string::npos) {
-                size_t start = line.find("\"", line.find(":")) + 1;
-                size_t end = line.find("\"", start);
-                if (start != string::npos && end != string::npos) {
-                    global_config.api_config.tunnel_server_ip = line.substr(start, end - start);
-                }
-            }
+        runtime_server.local_node_ips.push_back(global_config.nodes[i].server_virtual_ip);
+        if (runtime_server.server_virtual_ip.empty()) {
+            runtime_server.server_virtual_ip = global_config.nodes[i].server_virtual_ip;
         }
     }
 
-    // 如果没有解析到任何服务器，添加默认服务器
-    if (global_config.servers.empty()) {
-        Logger::warning("配置文件中未找到服务器配置，使用默认配置");
-        ServerConfig default_server;
-        global_config.servers.push_back(default_server);
+    if (!runtime_server.server_virtual_ip.empty()) {
+        runtime_server.game_server_ip = runtime_server.server_virtual_ip;
     }
 
-    for (size_t i = 0; i < global_config.servers.size(); ++i) {
-        if (global_config.servers[i].virtual_subnet.empty()) {
-            global_config.servers[i].virtual_subnet = build_default_virtual_subnet(global_config.servers[i].listen_port);
-        }
-        if (global_config.servers[i].virtual_gateway.empty()) {
-            global_config.servers[i].virtual_gateway =
-                build_auto_virtual_gateway(global_config.servers[i].virtual_subnet,
-                                           global_config.servers[i].listen_port);
-        }
-        if (global_config.servers[i].server_virtual_ip.empty()) {
-            global_config.servers[i].server_virtual_ip =
-                build_default_server_virtual_ip(global_config.servers[i].virtual_subnet);
-        }
-        if (global_config.servers[i].game_server_ip.empty()) {
-            global_config.servers[i].game_server_ip = global_config.servers[i].server_virtual_ip;
-        }
-    }
+    global_config.servers.push_back(runtime_server);
 
     return global_config;
 }
@@ -3011,119 +3100,33 @@ bool generate_default_config(const string& filename) {
         return false;
     }
 
-    file << "// ============================================================\n";
-    file << "// DNF隧道服务器配置文件 v3.6.1\n";
-    file << "// 支持多端口/多游戏服务器\n";
-    file << "// ============================================================\n";
-    file << "//\n";
-    file << "// 配置说明:\n";
-    file << "//\n";
-    file << "// name             - 服务器名称（用于日志标识）\n";
-    file << "// listen_port      - 隧道服务器监听端口（客户端连接此端口）\n";
-    file << "//                    范围: 1-65535，建议使用 30000-40000\n";
-    file << "//                    不同服务器必须使用不同端口\n";
-    file << "//\n";
-    file << "// virtual_subnet   - 虚拟局域网网段\n";
-    file << "//                    例如: 10.0.11.0/24\n";
-    file << "//\n";
-    file << "// virtual_gateway  - 虚拟局域网网关地址\n";
-    file << "//                    例如: 10.0.11.1\n";
-    file << "//\n";
-    file << "// server_virtual_ip - 服务端在虚拟局域网内的地址\n";
-    file << "//                    例如: 10.0.11.2\n";
-    file << "//\n";
-    file << "// max_connections  - 最大并发连接数\n";
-    file << "//                    根据服务器性能调整，建议 50-500\n";
-    file << "//\n";
-    file << "// download_url     - 客户端下载地址（可选）\n";
-    file << "//                    HTTP/HTTPS链接，用于客户端GUI显示下载地址\n";
-    file << "//                    例如: http://192.168.2.22:5244/d/DOF/客户端.7z\n";
-    file << "//\n";
-    file << "// log_level        - 全局日志级别: DEBUG, INFO, WARN, ERROR\n";
-    file << "//                    生产环境建议使用 INFO\n";
-    file << "//\n";
-    file << "// ============================================================\n";
-    file << "//\n";
-    file << "// 配置示例:\n";
-    file << "//\n";
-    file << "// 示例1: 单个游戏服务器\n";
-    file << "// {\n";
-    file << "//   \"servers\": [\n";
-    file << "//     {\n";
-    file << "//       \"name\": \"游戏服1\",\n";
-    file << "//       \"listen_port\": 33223,\n";
-    file << "//       \"virtual_subnet\": \"10.0.11.0/24\",\n";
-    file << "//       \"virtual_gateway\": \"10.0.11.1\",\n";
-    file << "//       \"server_virtual_ip\": \"10.0.11.2\",\n";
-    file << "//       \"max_connections\": 100,\n";
-    file << "//       \"download_url\": \"http://192.168.2.22:5244/d/DOF/客户端.7z\"\n";
-    file << "//     }\n";
-    file << "//   ],\n";
-    file << "//   \"log_level\": \"INFO\"\n";
-    file << "// }\n";
-    file << "//\n";
-    file << "// 示例2: 多个游戏服务器（推荐）\n";
-    file << "// {\n";
-    file << "//   \"servers\": [\n";
-    file << "//     {\n";
-    file << "//       \"name\": \"游戏服1\",\n";
-    file << "//       \"listen_port\": 33223,\n";
-    file << "//       \"virtual_subnet\": \"10.0.11.0/24\",\n";
-    file << "//       \"virtual_gateway\": \"10.0.11.1\",\n";
-    file << "//       \"server_virtual_ip\": \"10.0.11.2\",\n";
-    file << "//       \"max_connections\": 100,\n";
-    file << "//       \"download_url\": \"http://192.168.2.22:5244/d/DOF/服务器1/客户端.7z\"\n";
-    file << "//     },\n";
-    file << "//     {\n";
-    file << "//       \"name\": \"游戏服2\",\n";
-    file << "//       \"listen_port\": 33224,\n";
-    file << "//       \"virtual_subnet\": \"10.0.12.0/24\",\n";
-    file << "//       \"virtual_gateway\": \"10.0.12.1\",\n";
-    file << "//       \"server_virtual_ip\": \"10.0.12.2\",\n";
-    file << "//       \"max_connections\": 100,\n";
-    file << "//       \"download_url\": \"http://192.168.2.22:5244/d/DOF/服务器2/客户端.7z\"\n";
-    file << "//     },\n";
-    file << "//     {\n";
-    file << "//       \"name\": \"游戏服3\",\n";
-    file << "//       \"listen_port\": 33225,\n";
-    file << "//       \"virtual_subnet\": \"10.0.13.0/24\",\n";
-    file << "//       \"virtual_gateway\": \"10.0.13.1\",\n";
-    file << "//       \"server_virtual_ip\": \"10.0.13.2\",\n";
-    file << "//       \"max_connections\": 100,\n";
-    file << "//       \"download_url\": \"http://192.168.2.22:5244/d/DOF/服务器3/客户端.7z\"\n";
-    file << "//     }\n";
-    file << "//   ],\n";
-    file << "//   \"log_level\": \"INFO\"\n";
-    file << "// }\n";
-    file << "//\n";
-    file << "// ============================================================\n";
-    file << "//\n";
-    file << "// 注意事项:\n";
-    file << "// 1. 一个程序可以管理多个游戏服务器\n";
-    file << "// 2. 每个服务器必须使用不同的监听端口\n";
-    file << "// 3. 服务器名称用于日志中区分不同服务器\n";
-    file << "// 4. 所有服务器共享同一个日志文件\n";
-    file << "// 5. 客户端连接时需要指定对应的端口号\n";
-    file << "//\n";
-    file << "// ============================================================\n";
-    file << "\n";
     file << "{\n";
-    file << "  \"servers\": [\n";
+    file << "  \"network\": {\n";
+    file << "    \"tunnel_port\": 33335,\n";
+    file << "    \"virtual_subnet\": \"10.0.11.0/24\",\n";
+    file << "    \"virtual_gateway\": \"10.0.11.1\",\n";
+    file << "    \"tunnel_server_ip\": \"61.sviplk.com\",\n";
+    file << "    \"max_connections\": 100,\n";
+    file << "    \"lease_seconds\": 120\n";
+    file << "  },\n";
+    file << "  \"nodes\": [\n";
     file << "    {\n";
-    file << "      \"name\": \"游戏服1\",\n";
-    file << "      \"listen_port\": 33223,\n";
-    file << "      \"virtual_subnet\": \"10.0.11.0/24\",\n";
-    file << "      \"virtual_gateway\": \"10.0.11.1\",\n";
+    file << "      \"name\": \"95封印神迹\",\n";
     file << "      \"server_virtual_ip\": \"10.0.11.2\",\n";
-    file << "      \"max_connections\": 100,\n";
-    file << "      \"download_url\": \"http://example.com/download/client.7z\"\n";
+    file << "      \"bind_on_gateway\": true,\n";
+    file << "      \"download_url\": \"\"\n";
+    file << "    },\n";
+    file << "    {\n";
+    file << "      \"name\": \"95神迹\",\n";
+    file << "      \"server_virtual_ip\": \"10.0.11.5\",\n";
+    file << "      \"bind_on_gateway\": false,\n";
+    file << "      \"download_url\": \"\"\n";
     file << "    }\n";
     file << "  ],\n";
     file << "  \"log_level\": \"INFO\",\n";
     file << "  \"api_config\": {\n";
     file << "    \"enabled\": true,\n";
-    file << "    \"port\": 33231,\n";
-    file << "    \"tunnel_server_ip\": \"192.168.2.75\"\n";
+    file << "    \"port\": 35333\n";
     file << "  }\n";
     file << "}\n";
 
@@ -3156,6 +3159,10 @@ void reload_tunnel_servers() {
     }
 
     GlobalConfig new_config = load_config(g_config_file_path);
+    if (new_config.servers.empty()) {
+        Logger::error("热重载失败: 新配置缺少有效 network");
+        return;
+    }
 
     lock_guard<mutex> lock(g_running_servers_mutex);
 
@@ -3318,7 +3325,7 @@ void install_signal_handlers() {
 }
 
 // ==================== 主函数 ====================
-int main() {
+int main(int argc, char** argv) {
     // 创建log目录（如果不存在）
     mkdir("log", 0755);
 
@@ -3341,7 +3348,15 @@ int main() {
     cout << "============================================================" << endl;
     cout << endl;
 
-    const string config_file = "config.json";
+    string config_file = "config.json";
+    for (int i = 1; i < argc; ++i) {
+        string arg = argv[i];
+        if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
+            config_file = argv[++i];
+        } else if (!arg.empty() && arg[0] != '-') {
+            config_file = arg;
+        }
+    }
 
     // 检查配置文件是否存在
     ifstream check_file(config_file);
@@ -3364,14 +3379,8 @@ int main() {
             cout << "请按照以下步骤配置服务器:" << endl;
             cout << "----------------------------------------" << endl;
             cout << "1. 编辑 " << config_file << " 文件" << endl;
-            cout << "2. 在 servers 数组中配置虚拟局域网服务端:" << endl;
-            cout << "   - name: 服务器名称（用于日志标识）" << endl;
-            cout << "   - listen_port: 监听端口（不同服务器用不同端口）" << endl;
-            cout << "   - virtual_subnet: 虚拟网段，例如 10.0.11.0/24" << endl;
-            cout << "   - virtual_gateway: 虚拟网关，例如 10.0.11.1" << endl;
-            cout << "   - server_virtual_ip: 服务端虚拟IP，例如 10.0.11.2" << endl;
-            cout << "   - max_connections: 最大连接数" << endl;
-            cout << "3. 可以配置多个服务器，一个程序管理所有" << endl;
+            cout << "2. 在 network 中配置公网入口和虚拟网段" << endl;
+            cout << "3. 在 nodes 中配置各个节点的 server_virtual_ip" << endl;
             cout << "4. 保存文件后重新运行本程序" << endl;
             cout << "----------------------------------------" << endl;
             cout << endl;
@@ -3390,6 +3399,11 @@ int main() {
 
     // 配置文件存在 - 正常加载
     GlobalConfig global_config = load_config(config_file);
+    if (global_config.servers.empty()) {
+        Logger::error("配置文件格式无效: 仅支持 network + nodes 新格式");
+        Logger::close();
+        return 1;
+    }
 
     // 保存配置文件路径到全局变量（用于热重载）
     g_config_file_path = config_file;
@@ -3400,17 +3414,20 @@ int main() {
     // 为 std::thread / pthread 统一设置较小默认栈，避免服务器数量增多时内存暴涨
     configure_default_thread_stack();
 
-    Logger::info("配置加载完成，共 " + to_string(global_config.servers.size()) + " 个服务器");
+    Logger::info("配置加载完成，节点数量: " + to_string(global_config.nodes.size()));
     Logger::info("日志级别: " + global_config.log_level);
     cout << endl;
 
-    // 显示所有服务器配置
-    for (size_t i = 0; i < global_config.servers.size(); i++) {
-        const ServerConfig& srv = global_config.servers[i];
-        Logger::info("[" + srv.name + "] 端口:" + to_string(srv.listen_port) +
-                    " → " + srv.server_virtual_ip +
-                    " (最大连接:" + to_string(srv.max_connections) +
-                    ", 虚拟网段:" + srv.virtual_subnet + ")");
+    if (!global_config.servers.empty()) {
+        const ServerConfig& runtime = global_config.servers[0];
+        Logger::info("[虚拟局域网] 入口端口:" + to_string(runtime.listen_port) +
+                     " 网段:" + runtime.virtual_subnet +
+                     " 网关:" + runtime.virtual_gateway +
+                     " 最大连接:" + to_string(runtime.max_connections));
+    }
+    for (size_t i = 0; i < global_config.nodes.size(); i++) {
+        const NodeConfig& node = global_config.nodes[i];
+        Logger::info("[节点] [" + to_string(node.id) + "] " + node.name + " → " + node.server_virtual_ip);
     }
     cout << endl;
 

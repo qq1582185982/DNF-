@@ -11,10 +11,11 @@
 class IPPoolManager {
 public:
     struct PoolConfig {
-        std::string server_key;
+        std::string pool_key;
         std::string cidr;
         std::string gateway_ip;
         std::string server_virtual_ip;
+        std::vector<std::string> additional_reserved_ips;
         uint32_t lease_seconds;
         uint32_t sticky_seconds;
         uint32_t first_host_offset;
@@ -48,12 +49,12 @@ public:
     IPPoolManager();
 
     bool ConfigurePool(const PoolConfig& config, std::string* error);
-    bool AcquireLease(const ip_tunnel::LeaseRequest& request, LeaseRecord* out_record, std::string* error);
-    bool GetLease(const std::string& server_key, const std::string& session_uuid, LeaseRecord* out_record, std::string* error);
-    bool RenewLease(const std::string& server_key, const std::string& session_uuid, LeaseRecord* out_record, std::string* error);
-    bool ReleaseLease(const std::string& server_key, const std::string& session_uuid);
+    bool AcquireLease(const std::string& pool_key, const ip_tunnel::LeaseRequest& request, LeaseRecord* out_record, std::string* error);
+    bool GetLease(const std::string& pool_key, const std::string& session_uuid, LeaseRecord* out_record, std::string* error);
+    bool RenewLease(const std::string& pool_key, const std::string& session_uuid, LeaseRecord* out_record, std::string* error);
+    bool ReleaseLease(const std::string& pool_key, const std::string& session_uuid);
     size_t CleanupExpired(uint64_t now_ms);
-    std::vector<LeaseRecord> Snapshot(const std::string& server_key) const;
+    std::vector<LeaseRecord> Snapshot(const std::string& pool_key) const;
 
 private:
     struct LeaseState {
@@ -75,6 +76,7 @@ private:
         std::map<uint32_t, std::string> by_ip;
         std::map<std::string, LeaseState> released_sessions;
         std::set<uint32_t> reserved_ips;
+        std::set<uint32_t> requestable_reserved_ips;
 
         PoolState()
             : network_ip(0),

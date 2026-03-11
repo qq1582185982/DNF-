@@ -12,7 +12,8 @@ bool LinuxLeaseClient::SendCommand(const std::string& host,
                                    int port,
                                    const std::string& command,
                                    std::string* response,
-                                   std::string* error) {
+                                   std::string* error,
+                                   bool allow_empty_response) {
     if (response == NULL) {
         if (error != NULL) {
             *error = "response output is null";
@@ -90,6 +91,9 @@ bool LinuxLeaseClient::SendCommand(const std::string& host,
     close(sock);
 
     if (response->empty()) {
+        if (allow_empty_response) {
+            return true;
+        }
         if (error != NULL) {
             *error = "lease server returned empty response";
         }
@@ -186,8 +190,12 @@ bool LinuxLeaseClient::ReleaseLease(const std::string& api_url,
     command << "RELEASE_LEASE " << server_key << " " << session_uuid << "\n";
 
     std::string response;
-    if (!SendCommand(api_url, api_port, command.str(), &response, error)) {
+    if (!SendCommand(api_url, api_port, command.str(), &response, error, true)) {
         return false;
+    }
+
+    if (response.empty()) {
+        return true;
     }
 
     int status = ExtractJsonInt(response, "status", (int)ip_tunnel::kStatusInvalidRequest);
