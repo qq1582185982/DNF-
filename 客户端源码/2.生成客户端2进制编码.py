@@ -6,6 +6,18 @@ Convert exe file to C++ byte array
 import sys
 import os
 
+def _configure_console_encoding():
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if not stream:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+            except Exception:
+                pass
+
 def exe_to_cpp_array(exe_path, output_path):
     """Convert exe file to C++ byte array header"""
 
@@ -49,7 +61,7 @@ def exe_to_cpp_array(exe_path, output_path):
     cpp_content.append("")
 
     # Write to file
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding='utf-8', newline='\n') as f:
         f.write('\n'.join(cpp_content))
 
     print(f"Generated: {output_path}")
@@ -57,6 +69,7 @@ def exe_to_cpp_array(exe_path, output_path):
     return True
 
 if __name__ == '__main__':
+    _configure_console_encoding()
     exe_path = 'tcp_proxy_client_base.exe'
     output_path = 'embedded_client.h'
 
