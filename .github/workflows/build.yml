@@ -9,8 +9,8 @@ on:
   pull_request:
 
 jobs:
-  server-musl:
-    name: Server musl build
+  server-build:
+    name: Server build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -20,27 +20,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.14.0
-
       - name: Build server
         run: |
           chmod +x build.sh
-          ./build.sh
+          ./build.sh static
           file ./dnf-tunnel-server
 
       - name: Upload server artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dnf-tunnel-server-musl
+          name: dnf-tunnel-server-static
           path: |
             服务器源码/dnf-tunnel-server
             服务器源码/config.json
 
-  linux-client-musl:
-    name: Linux client musl build
+  linux-client-build:
+    name: Linux client build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -50,21 +45,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.14.0
-
       - name: Build linux client
         run: |
           chmod +x build.sh
-          ./build.sh
+          ./build.sh static
           file ./dnf-linux-client
 
       - name: Upload linux client artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dnf-linux-client-musl
+          name: dnf-linux-client-static
           path: |
             linux客户端源码/dnf-linux-client
             linux客户端源码/dnf-linux-client.conf.example
@@ -89,13 +79,13 @@ jobs:
           python-version: '3.x'
 
       - name: Build multi-server client
-        run: .\1.编译多服务器版.ps1
+        run: .\build-multi-server-client.ps1
 
       - name: Generate embedded multi-server client header
-        run: python .\2.生成客户端2进制编码.py .\DNF_Proxy_Client_MultiServer_v12.4.0.exe .\embedded_client_multiserver.h
+        run: .\generate-embedded-client-header.ps1
 
       - name: Build multi-server config injector
-        run: .\3.生成配置器_多服务器版.ps1
+        run: .\build-multi-server-injector.ps1
 
       - name: Upload windows artifacts
         uses: actions/upload-artifact@v4
