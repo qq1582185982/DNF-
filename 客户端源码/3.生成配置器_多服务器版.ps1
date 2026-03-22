@@ -12,12 +12,12 @@ if (-not (Test-Path "embedded_client_multiserver.h")) {
     exit 1
 }
 
-Write-Host "✓ Found embedded_client_multiserver.h" -ForegroundColor Green
+Write-Host "Found embedded_client_multiserver.h" -ForegroundColor Green
 Write-Host ""
 
 Write-Host "Checking Visual Studio environment..." -ForegroundColor Yellow
 $vsPath = Get-VsVcvarsPath
-Write-Host "✓ Visual Studio C++ environment found" -ForegroundColor Green
+Write-Host "Visual Studio C++ environment found" -ForegroundColor Green
 Write-Host "  $vsPath" -ForegroundColor DarkGray
 Write-Host ""
 
@@ -26,17 +26,25 @@ Write-Host "  Source: config_injector_multiserver.cpp" -ForegroundColor Gray
 Write-Host "  Output: DNFConfigInjector_MultiServer.exe" -ForegroundColor Gray
 Write-Host ""
 
-$compileCommand = @"
-"$vsPath" >nul 2>&1 && cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe:DNFConfigInjector_MultiServer.exe config_injector_multiserver.cpp 2>&1
-"@
+$batchFile = Join-Path $env:TEMP "dnf-build-multi-server-injector.bat"
+$batchContent = @(
+    '@echo off',
+    ('call "{0}" >nul 2>&1' -f $vsPath),
+    'if errorlevel 1 exit /b 1',
+    'cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe:DNFConfigInjector_MultiServer.exe config_injector_multiserver.cpp'
+)
+Set-Content -Path $batchFile -Value $batchContent -Encoding Ascii
 
-$output = cmd /c $compileCommand
-if ($LASTEXITCODE -ne 0) {
+$output = & cmd.exe /c $batchFile 2>&1
+$exitCode = $LASTEXITCODE
+Remove-Item $batchFile -ErrorAction SilentlyContinue
+
+if ($exitCode -ne 0) {
     Write-Host ""
     Write-Host "Compilation FAILED!" -ForegroundColor Red
     Write-Host ""
     Write-Host "Error output:" -ForegroundColor Yellow
-    Write-Host $output
+    $output | ForEach-Object { Write-Host $_ }
     exit 1
 }
 

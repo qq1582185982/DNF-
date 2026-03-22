@@ -12,18 +12,26 @@ if (-not (Test-Path "embedded_client.h")) {
 }
 
 $vsPath = Get-VsVcvarsPath
-Write-Host "✓ Visual Studio C++ environment found" -ForegroundColor Green
+Write-Host "Visual Studio C++ environment found" -ForegroundColor Green
 Write-Host "  $vsPath" -ForegroundColor DarkGray
 Write-Host ""
 
-$compileCommand = @"
-"$vsPath" >nul 2>&1 && cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe:config_injector.exe config_injector.cpp 2>&1
-"@
+$batchFile = Join-Path $env:TEMP "dnf-build-injector.bat"
+$batchContent = @(
+    '@echo off',
+    ('call "{0}" >nul 2>&1' -f $vsPath),
+    'if errorlevel 1 exit /b 1',
+    'cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe:config_injector.exe config_injector.cpp'
+)
+Set-Content -Path $batchFile -Value $batchContent -Encoding Ascii
 
-$output = cmd /c $compileCommand
-if ($LASTEXITCODE -ne 0) {
+$output = & cmd.exe /c $batchFile 2>&1
+$exitCode = $LASTEXITCODE
+Remove-Item $batchFile -ErrorAction SilentlyContinue
+
+if ($exitCode -ne 0) {
     Write-Host "Compilation FAILED!" -ForegroundColor Red
-    Write-Host $output
+    $output | ForEach-Object { Write-Host $_ }
     exit 1
 }
 
