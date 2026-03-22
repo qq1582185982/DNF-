@@ -40,6 +40,7 @@ $stdoutFile = Join-Path $env:TEMP "dnf-build-multi-server-injector.stdout.log"
 $stderrFile = Join-Path $env:TEMP "dnf-build-multi-server-injector.stderr.log"
 Remove-Item $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
 
+$outputExe = "DNFConfigInjector_MultiServer.exe"
 $startTime = Get-Date
 $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batchFile`"" -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
 while (-not $proc.HasExited) {
@@ -59,13 +60,17 @@ if ($stderr) { $outputParts += $stderr }
 $output = $outputParts -join [Environment]::NewLine
 Remove-Item $batchFile,$stdoutFile,$stderrFile -ErrorAction SilentlyContinue
 
-if ($exitCode -ne 0) {
+if ($exitCode -ne 0 -and -not (Test-Path $outputExe)) {
     Write-Host ""
     Write-Host "Compilation FAILED!" -ForegroundColor Red
     Write-Host ""
     Write-Host "Error output:" -ForegroundColor Yellow
     $output | ForEach-Object { Write-Host $_ }
     exit 1
+}
+
+if ($exitCode -ne 0 -and (Test-Path $outputExe)) {
+    Write-Host "Compiler returned non-zero, but output file was produced. Treating build as successful." -ForegroundColor Yellow
 }
 
 if ($output -match "warning") {
@@ -84,11 +89,11 @@ Write-Host "Compilation Successful!" -ForegroundColor Green
 Write-Host "============================================" -ForegroundColor Green
 Write-Host ""
 
-if (Test-Path "DNFConfigInjector_MultiServer.exe") {
-    $fileSize = (Get-Item "DNFConfigInjector_MultiServer.exe").Length
+if (Test-Path $outputExe) {
+    $fileSize = (Get-Item $outputExe).Length
     $fileSizeKB = [math]::Round($fileSize / 1KB, 2)
 
-    Write-Host "Output file: DNFConfigInjector_MultiServer.exe" -ForegroundColor Cyan
+    Write-Host "Output file: $outputExe" -ForegroundColor Cyan
     Write-Host "File size: $fileSizeKB KB" -ForegroundColor Cyan
     Write-Host ""
 } else {

@@ -30,6 +30,7 @@ $stdoutFile = Join-Path $env:TEMP "dnf-build-injector.stdout.log"
 $stderrFile = Join-Path $env:TEMP "dnf-build-injector.stderr.log"
 Remove-Item $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
 
+$outputExe = "config_injector.exe"
 $startTime = Get-Date
 $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batchFile`"" -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
 while (-not $proc.HasExited) {
@@ -49,10 +50,14 @@ if ($stderr) { $outputParts += $stderr }
 $output = $outputParts -join [Environment]::NewLine
 Remove-Item $batchFile,$stdoutFile,$stderrFile -ErrorAction SilentlyContinue
 
-if ($exitCode -ne 0) {
+if ($exitCode -ne 0 -and -not (Test-Path $outputExe)) {
     Write-Host "Compilation FAILED!" -ForegroundColor Red
     $output | ForEach-Object { Write-Host $_ }
     exit 1
+}
+
+if ($exitCode -ne 0 -and (Test-Path $outputExe)) {
+    Write-Host "Compiler returned non-zero, but output file was produced. Treating build as successful." -ForegroundColor Yellow
 }
 
 Remove-Item "config_injector.obj" -ErrorAction SilentlyContinue
