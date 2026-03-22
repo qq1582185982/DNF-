@@ -52,7 +52,16 @@ Write-Host "  - Auto Update: auto_updater.cpp" -ForegroundColor Gray
 Write-Host "  - Resources: app.res" -ForegroundColor Gray
 Write-Host ""
 
-$proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batchFile`"" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+$startTime = Get-Date
+$proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batchFile`"" -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+while (-not $proc.HasExited) {
+    Start-Sleep -Seconds 15
+    $proc.Refresh()
+    if (-not $proc.HasExited) {
+        $elapsed = [int]((Get-Date) - $startTime).TotalSeconds
+        Write-Host ("  - Still compiling... {0}s" -f $elapsed) -ForegroundColor DarkGray
+    }
+}
 $exitCode = $proc.ExitCode
 $stdout = if (Test-Path $stdoutFile) { Get-Content $stdoutFile -Raw } else { "" }
 $stderr = if (Test-Path $stderrFile) { Get-Content $stderrFile -Raw } else { "" }
