@@ -1,0 +1,107 @@
+﻿name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  server-musl:
+    name: Server musl build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: 服务器源码
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: latest
+
+      - name: Build server
+        run: |
+          chmod +x build.sh
+          ./build.sh
+          file ./dnf-tunnel-server
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnf-tunnel-server-musl
+          path: |
+            服务器源码/dnf-tunnel-server
+            服务器源码/config.json
+
+  linux-client-musl:
+    name: Linux client musl build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: linux客户端源码
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: latest
+
+      - name: Build linux client
+        run: |
+          chmod +x build.sh
+          ./build.sh
+          file ./dnf-linux-client
+
+      - name: Upload linux client artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnf-linux-client-musl
+          path: |
+            linux客户端源码/dnf-linux-client
+            linux客户端源码/dnf-linux-client.conf.example
+            linux客户端源码/run.sh
+            linux客户端源码/install.sh
+            linux客户端源码/dnf-linux-client@.service
+
+  windows-client:
+    name: Windows client build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+        working-directory: 客户端源码
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Build multi-server client
+        run: .\1.编译多服务器版.ps1
+
+      - name: Generate embedded multi-server client header
+        run: python .\2.生成客户端2进制编码.py .\DNF_Proxy_Client_MultiServer_v12.4.0.exe .\embedded_client_multiserver.h
+
+      - name: Build multi-server config injector
+        run: .\3.生成配置器_多服务器版.ps1
+
+      - name: Upload windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnf-windows-client
+          path: |
+            客户端源码/DNF_Proxy_Client_MultiServer_v12.4.0.exe
+            客户端源码/DNFConfigInjector_MultiServer.exe
+            客户端源码/embedded_client_multiserver.h

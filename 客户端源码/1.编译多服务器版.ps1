@@ -1,4 +1,5 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
+. "$PSScriptRoot\Resolve-VsVcvars.ps1"
 
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "Compiling DNF Proxy Client v12.4.0" -ForegroundColor Cyan
@@ -6,7 +7,6 @@ Write-Host "Multi-Server Version with GUI Selector" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Step 1: Generate embedded Wintun runtime
 Write-Host "[1/4] Preparing embedded Wintun runtime..." -ForegroundColor Yellow
 python generate_embedded_wintun.py
 if ($LASTEXITCODE -ne 0) {
@@ -17,23 +17,12 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "✓ Embedded Wintun runtime prepared" -ForegroundColor Green
 Write-Host ""
 
-# Step 2: Check Visual Studio
 Write-Host "[2/4] Checking Visual Studio environment..." -ForegroundColor Yellow
-
-$vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-
-if (-not (Test-Path $vsPath)) {
-    Write-Host "ERROR: Visual Studio 2022 not found at:" -ForegroundColor Red
-    Write-Host "  $vsPath" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Please install Visual Studio 2022 Community or update the path" -ForegroundColor Yellow
-    exit 1
-}
-
-Write-Host "✓ Visual Studio 2022 found" -ForegroundColor Green
+$vsPath = Get-VsVcvarsPath
+Write-Host "✓ Visual Studio C++ environment found" -ForegroundColor Green
+Write-Host "  $vsPath" -ForegroundColor DarkGray
 Write-Host ""
 
-# Step 3: Compile resources
 Write-Host "[3/4] Compiling resources..." -ForegroundColor Yellow
 Write-Host "  - Background image: background.jpg" -ForegroundColor Gray
 Write-Host ""
@@ -52,7 +41,6 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "✓ Resources compiled" -ForegroundColor Green
 Write-Host ""
 
-# Step 4: Compile multi-server version
 Write-Host "[4/4] Compiling multi-server version..." -ForegroundColor Yellow
 Write-Host "  - Main: tcp_proxy_client_no_config.cpp" -ForegroundColor Gray
 Write-Host "  - TCP Config: tcp_config_client.cpp" -ForegroundColor Gray
@@ -70,8 +58,6 @@ $compileCommand = @"
 "@
 
 $output = cmd /c $compileCommand
-
-# Check for compilation errors
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "Compilation FAILED!" -ForegroundColor Red
@@ -81,7 +67,6 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# Check for warnings
 if ($output -match "warning") {
     Write-Host ""
     Write-Host "Compilation succeeded with warnings:" -ForegroundColor Yellow
@@ -89,7 +74,6 @@ if ($output -match "warning") {
     Write-Host ""
 }
 
-# Clean up temp files
 Write-Host "Cleaning up temporary files..." -ForegroundColor Gray
 Remove-Item "tcp_proxy_client_no_config.obj" -ErrorAction SilentlyContinue
 Remove-Item "tcp_config_client.obj" -ErrorAction SilentlyContinue
@@ -106,7 +90,6 @@ Write-Host "Compilation Successful!" -ForegroundColor Green
 Write-Host "==========================================" -ForegroundColor Green
 Write-Host ""
 
-# Get file size
 if (Test-Path "DNF_Proxy_Client_MultiServer_v12.4.0.exe") {
     $fileSize = (Get-Item "DNF_Proxy_Client_MultiServer_v12.4.0.exe").Length
     $fileSizeKB = [math]::Round($fileSize / 1KB, 2)
@@ -117,25 +100,12 @@ if (Test-Path "DNF_Proxy_Client_MultiServer_v12.4.0.exe") {
     Write-Host ""
 
     Write-Host "New features in v12.4.0:" -ForegroundColor Yellow
-    Write-Host "  ✓ TCP protocol integration - fetch server list via TCP (no HTTP备案 needed)" -ForegroundColor Gray
+    Write-Host "  ✓ TCP protocol integration - fetch server list via TCP" -ForegroundColor Gray
     Write-Host "  ✓ GUI server selector - Windows-style dialog" -ForegroundColor Gray
     Write-Host "  ✓ Remember last choice - saved to %APPDATA%\DNFProxy\" -ForegroundColor Gray
     Write-Host "  ✓ Wintun + IP Tunnel virtual LAN path" -ForegroundColor Gray
     Write-Host "  ✓ Auto-update feature - download and replace on startup" -ForegroundColor Gray
     Write-Host ""
-
-    Write-Host "Next steps:" -ForegroundColor Yellow
-    Write-Host "  1. Use config injection tool to add API config to exe" -ForegroundColor Gray
-    Write-Host "     Config format:" -ForegroundColor Gray
-    Write-Host "     {`"config_api_url`":`"config.server.com`",`"config_api_port`":35000,`"data_plane_mode`":`"wintun`"}" -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "  2. Setup TCP server to listen and return:" -ForegroundColor Gray
-    Write-Host "     - GET_SERVERS: JSON server list" -ForegroundColor DarkGray
-    Write-Host "     - GET_VERSION: {`"latest_version`":`"1.0.0`",`"download_url`":`"..`"}" -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "  3. Run the client (requires admin privileges)" -ForegroundColor Gray
-    Write-Host ""
-
 } else {
     Write-Host "ERROR: Output file not found!" -ForegroundColor Red
     exit 1

@@ -1,20 +1,23 @@
-# DNF Linux 隧道客户端
-# 配置文件使用 key=value 格式。以 # 或 ; 开头的行会被忽略。
+# DNF Linux 虚拟局域网客户端示例配置
+# 配置文件使用 key=value 格式，以 # 开头的行为注释
 
+# 必填：服务端公网入口域名或 IP
 api_url=61.sviplk.com
+
+# 必填：配置接口端口
 api_port=35333
 
-# 当服务器列表里只有 1 个服务器时，这一项可以不写。
-server_key=1
+# 多节点时建议填写要加入的服务端虚拟 IP
+# 如果服务端只返回 1 个节点，这一项可以不写
+server_virtual_ip=10.0.11.5
 
-# 可选。不写时默认使用当前主机名。
+# 可选：当前这台 Linux 节点的标识，不写时默认使用主机名
 client_id=vm-95
 
-# 可选。不写时默认使用 dnfcli0。
+# 可选：本地 TUN 接口名，不写时默认使用 dnfcli0
 if_name=dnfcli95
 
-# 以下配置都是可选项。
+# 以下配置都是可选项
 # preferred_ip=10.0.11.50
 # tunnel_host=61.sviplk.com
 # tunnel_port=33335
-# session_uuid=你的固定会话UUID
