@@ -1,6 +1,9 @@
 .RECIPEPREFIX := >
-CXX := g++
+CXX ?= g++
+MUSL_CXX ?= x86_64-linux-musl-g++
 CXXFLAGS := -std=c++11 -O2 -Wall -pthread
+LDFLAGS :=
+STATIC_LDFLAGS := -static -static-libgcc -static-libstdc++
 TARGET := dnf-linux-client
 
 SOURCES := \
@@ -13,12 +16,20 @@ SOURCES := \
 
 OBJECTS := $(SOURCES:.cpp=.o)
 
-all: $(TARGET)
+all: musl
+
+static: $(TARGET)
 
 $(TARGET): $(OBJECTS)
->$(CXX) $(CXXFLAGS) $(OBJECTS) -o $(TARGET)
+>$(CXX) $(CXXFLAGS) $(OBJECTS) -o $(TARGET) $(STATIC_LDFLAGS)
+
+musl: $(OBJECTS)
+>$(MUSL_CXX) $(CXXFLAGS) -static $(OBJECTS) -o $(TARGET)
+
+dynamic: $(OBJECTS)
+>$(CXX) $(CXXFLAGS) $(OBJECTS) -o $(TARGET) $(LDFLAGS)
 
 clean:
 >rm -f $(OBJECTS) $(TARGET)
 
-.PHONY: all clean
+.PHONY: all static musl dynamic clean

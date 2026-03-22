@@ -1,22 +1,37 @@
 {
-  "servers": [
+  "network": {
+    "tunnel_port": 33335,                    # 必填：公网隧道入口端口，客户端先连这个端口加入虚拟局域网
+    "virtual_subnet": "10.0.11.0/24",       # 必填：整个虚拟局域网网段
+    "virtual_gateway": "10.0.11.1",         # 必填：虚拟网关 IP
+    "tunnel_server_ip": "61.sviplk.com",    # 必填：服务端公网入口域名或 IP
+    "max_connections": 100,                 # 可选：最大并发连接数
+    "lease_seconds": 120                    # 可选：IP 租约时长，单位秒
+  },
+
+  "nodes": [
     {
-      "name": "601",
-      "listen_port": 33223,
-      "game_server_ip": "192.168.2.110",
-      "max_connections": 100
+      "name": "95封印神迹",                  # 节点名称，仅用于显示
+      "server_virtual_ip": "10.0.11.2",     # 节点在虚拟局域网中的固定 IP
+      "bind_on_gateway": true,              # true=该 IP 直接绑定在公网入口服务器本机
+      "download_url": ""                    # 可选：客户端下载地址
     },
     {
-      "name": "602",
-      "listen_port": 33224,
-      "game_server_ip": "192.168.2.61",
-      "max_connections": 100
+      "name": "95神迹",                      # 第二个节点示例
+      "server_virtual_ip": "10.0.11.5",     # 远端 Linux 节点将认领这个固定 IP
+      "bind_on_gateway": false,             # false=不绑在网关机，留给远端节点连接后使用
+      "download_url": ""
     }
   ],
-  "log_level": "INFO",
+
+  "version": {
+    "md5": "7d4dc269eb925048d2f68682f496c19e",  # 可选：客户端最新版本 MD5
+    "download_url": "https://alist.sviplk.com/d/DOF/服务器/服务器插件/0.先启动-DOF服务器.exe"  # 可选：客户端更新下载地址
+  },
+
+  "log_level": "INFO",                      # 日志级别：DEBUG / INFO / WARN / ERROR
+
   "api_config": {
-    "enabled": true,
-    "port": 33231,
-    "tunnel_server_ip": "192.168.2.75"
+    "enabled": true,                        # 是否启用配置接口
+    "port": 35333                           # 配置接口端口
   }
 }

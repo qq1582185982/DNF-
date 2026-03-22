@@ -113,6 +113,65 @@ int extract_json_int(const string& json, const string& key) {
     return atoi(json.c_str() + pos);
 }
 
+static string strip_json_comments(const string& content) {
+    string result;
+    result.reserve(content.size());
+
+    bool in_string = false;
+    bool escape = false;
+
+    for (size_t i = 0; i < content.size(); ++i) {
+        char ch = content[i];
+
+        if (escape) {
+            result += ch;
+            escape = false;
+            continue;
+        }
+
+        if (ch == '\\') {
+            result += ch;
+            if (in_string) {
+                escape = true;
+            }
+            continue;
+        }
+
+        if (ch == '"') {
+            result += ch;
+            in_string = !in_string;
+            continue;
+        }
+
+        if (!in_string) {
+            if (ch == '#') {
+                while (i < content.size() && content[i] != '\n') {
+                    ++i;
+                }
+                if (i < content.size() && content[i] == '\n') {
+                    result += '\n';
+                }
+                continue;
+            }
+
+            if (ch == '/' && i + 1 < content.size() && content[i + 1] == '/') {
+                i += 2;
+                while (i < content.size() && content[i] != '\n') {
+                    ++i;
+                }
+                if (i < content.size() && content[i] == '\n') {
+                    result += '\n';
+                }
+                continue;
+            }
+        }
+
+        result += ch;
+    }
+
+    return result;
+}
+
 bool extract_json_bool(const string& json, const string& key, bool* found = NULL) {
     string search = "\"" + key + "\"";
     size_t pos = json.find(search);
@@ -525,7 +584,7 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
 
     stringstream buffer;
     buffer << f.rdbuf();
-    string content = buffer.str();
+    string content = strip_json_comments(buffer.str());
     f.close();
 
     printf("配置文件大小: %zu 字节\n", content.size());

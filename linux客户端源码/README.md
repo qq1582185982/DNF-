@@ -13,6 +13,14 @@ Build:
 ./build.sh
 ```
 
+说明：
+
+- `./build.sh` 默认生成 `musl` 静态发布版 `dnf-linux-client`
+- 如需手动指定：
+  - `./build.sh musl`
+  - `./build.sh static`
+  - `./build.sh dynamic`
+
 Quick start:
 
 ```bash
