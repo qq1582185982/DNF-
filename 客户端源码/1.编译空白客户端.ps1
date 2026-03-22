@@ -25,7 +25,9 @@ $batchContent = @(
     '@echo off',
     ('call "{0}" >nul 2>&1' -f $vsPath),
     'if errorlevel 1 exit /b 1',
-    'cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe"tcp_proxy_client_base.exe" tcp_proxy_client_no_config.cpp tcp_config_client.cpp ip_lease_client.cpp wintun_manager.cpp packet_tunnel_client.cpp server_selector_gui.cpp config_manager.cpp auto_updater.cpp /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup ws2_32.lib advapi32.lib iphlpapi.lib shell32.lib comctl32.lib user32.lib gdi32.lib gdiplus.lib ole32.lib'
+    'cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe"tcp_proxy_client_base.exe" tcp_proxy_client_no_config.cpp tcp_config_client.cpp ip_lease_client.cpp wintun_manager.cpp packet_tunnel_client.cpp server_selector_gui.cpp config_manager.cpp auto_updater.cpp /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup ws2_32.lib advapi32.lib iphlpapi.lib shell32.lib comctl32.lib user32.lib gdi32.lib gdiplus.lib ole32.lib',
+    'if errorlevel 1 exit /b 1',
+    'exit /b 0'
 )
 Set-Content -Path $batchFile -Value $batchContent -Encoding Ascii
 $stdoutFile = Join-Path $env:TEMP "dnf-build-base-client.stdout.log"

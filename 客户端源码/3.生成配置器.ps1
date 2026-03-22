@@ -21,7 +21,9 @@ $batchContent = @(
     '@echo off',
     ('call "{0}" >nul 2>&1' -f $vsPath),
     'if errorlevel 1 exit /b 1',
-    'cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe:config_injector.exe config_injector.cpp'
+    'cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe:config_injector.exe config_injector.cpp',
+    'if errorlevel 1 exit /b 1',
+    'exit /b 0'
 )
 Set-Content -Path $batchFile -Value $batchContent -Encoding Ascii
 $stdoutFile = Join-Path $env:TEMP "dnf-build-injector.stdout.log"
