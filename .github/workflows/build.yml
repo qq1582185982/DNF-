@@ -78,6 +78,18 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Download Wintun runtime
+        run: |
+          $url = "https://www.wintun.net/builds/wintun-0.14.1.zip"
+          $zipPath = Join-Path $env:TEMP "wintun-0.14.1.zip"
+          $extractPath = Join-Path $env:TEMP "wintun-0.14.1"
+          Invoke-WebRequest -Uri $url -OutFile $zipPath
+          if (Test-Path $extractPath) {
+            Remove-Item $extractPath -Recurse -Force
+          }
+          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+          Copy-Item (Join-Path $extractPath "bin\\amd64\\wintun.dll") ".\\wintun.dll" -Force
+
       - name: Build multi-server client
         run: .\build-multi-server-client.ps1
 
