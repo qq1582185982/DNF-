@@ -36,6 +36,9 @@ $batchContent = @(
     'cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe"DNF_Proxy_Client_MultiServer_v12.4.0.exe" tcp_proxy_client_no_config.cpp tcp_config_client.cpp ip_lease_client.cpp wintun_manager.cpp packet_tunnel_client.cpp server_selector_gui.cpp config_manager.cpp auto_updater.cpp app.res /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup ws2_32.lib advapi32.lib iphlpapi.lib shell32.lib comctl32.lib user32.lib gdi32.lib gdiplus.lib ole32.lib'
 )
 Set-Content -Path $batchFile -Value $batchContent -Encoding Ascii
+$stdoutFile = Join-Path $env:TEMP "dnf-build-client.stdout.log"
+$stderrFile = Join-Path $env:TEMP "dnf-build-client.stderr.log"
+Remove-Item $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
 
 Write-Host "[4/4] Compiling multi-server version..." -ForegroundColor Yellow
 Write-Host "  - Main: tcp_proxy_client_no_config.cpp" -ForegroundColor Gray
@@ -49,9 +52,15 @@ Write-Host "  - Auto Update: auto_updater.cpp" -ForegroundColor Gray
 Write-Host "  - Resources: app.res" -ForegroundColor Gray
 Write-Host ""
 
-$output = & cmd.exe /c $batchFile 2>&1
-$exitCode = $LASTEXITCODE
-Remove-Item $batchFile -ErrorAction SilentlyContinue
+$proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batchFile`"" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+$exitCode = $proc.ExitCode
+$stdout = if (Test-Path $stdoutFile) { Get-Content $stdoutFile -Raw } else { "" }
+$stderr = if (Test-Path $stderrFile) { Get-Content $stderrFile -Raw } else { "" }
+$outputParts = @()
+if ($stdout) { $outputParts += $stdout }
+if ($stderr) { $outputParts += $stderr }
+$output = $outputParts -join [Environment]::NewLine
+Remove-Item $batchFile,$stdoutFile,$stderrFile -ErrorAction SilentlyContinue
 
 if ($exitCode -ne 0) {
     Write-Host ""

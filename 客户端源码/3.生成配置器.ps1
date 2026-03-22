@@ -24,10 +24,19 @@ $batchContent = @(
     'cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe:config_injector.exe config_injector.cpp'
 )
 Set-Content -Path $batchFile -Value $batchContent -Encoding Ascii
+$stdoutFile = Join-Path $env:TEMP "dnf-build-injector.stdout.log"
+$stderrFile = Join-Path $env:TEMP "dnf-build-injector.stderr.log"
+Remove-Item $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
 
-$output = & cmd.exe /c $batchFile 2>&1
-$exitCode = $LASTEXITCODE
-Remove-Item $batchFile -ErrorAction SilentlyContinue
+$proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batchFile`"" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+$exitCode = $proc.ExitCode
+$stdout = if (Test-Path $stdoutFile) { Get-Content $stdoutFile -Raw } else { "" }
+$stderr = if (Test-Path $stderrFile) { Get-Content $stderrFile -Raw } else { "" }
+$outputParts = @()
+if ($stdout) { $outputParts += $stdout }
+if ($stderr) { $outputParts += $stderr }
+$output = $outputParts -join [Environment]::NewLine
+Remove-Item $batchFile,$stdoutFile,$stderrFile -ErrorAction SilentlyContinue
 
 if ($exitCode -ne 0) {
     Write-Host "Compilation FAILED!" -ForegroundColor Red
