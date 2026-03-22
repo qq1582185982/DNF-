@@ -18,12 +18,12 @@ jobs:
         working-directory: 服务器源码
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: latest
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools g++ make file
 
       - name: Build server
         run: |
@@ -48,12 +48,12 @@ jobs:
         working-directory: linux客户端源码
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: latest
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools g++ make file
 
       - name: Build linux client
         run: |
@@ -81,10 +81,10 @@ jobs:
         working-directory: 客户端源码
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
