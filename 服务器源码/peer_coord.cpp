@@ -63,6 +63,41 @@ void PeerCoord::SetState(const std::string& peer_virtual_ip, PeerEndpointState s
     }
 }
 
+std::vector<PeerCoordStatus> PeerCoord::ExpireStalePeers(uint64_t now_ms,
+                                                         uint64_t offer_timeout_ms,
+                                                         uint64_t active_timeout_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<PeerCoordStatus> changed;
+    for (std::map<std::string, Entry>::iterator it = peers_.begin(); it != peers_.end(); ++it) {
+        Entry& entry = it->second;
+        PeerEndpointState next_state = entry.state;
+
+        if (entry.state == PeerEndpointState::OfferPending &&
+            entry.last_observed_ms != 0 && now_ms > entry.last_observed_ms &&
+            (now_ms - entry.last_observed_ms) >= offer_timeout_ms) {
+            next_state = PeerEndpointState::RelayOnly;
+        } else if (entry.state == PeerEndpointState::Active &&
+                   entry.last_observed_ms != 0 && now_ms > entry.last_observed_ms &&
+                   (now_ms - entry.last_observed_ms) >= active_timeout_ms) {
+            next_state = PeerEndpointState::RelayOnly;
+        }
+
+        if (next_state != entry.state) {
+            entry.state = next_state;
+            entry.last_state_change_ms = now_ms;
+
+            PeerCoordStatus status;
+            status.peer_virtual_ip = it->first;
+            status.endpoint_version = entry.endpoint_version;
+            status.state = entry.state;
+            status.last_observed_ms = entry.last_observed_ms;
+            status.last_state_change_ms = entry.last_state_change_ms;
+            changed.push_back(status);
+        }
+    }
+    return changed;
+}
+
 uint64_t PeerCoord::GetEndpointVersion(const std::string& peer_virtual_ip) const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::map<std::string, Entry>::const_iterator it = peers_.find(peer_virtual_ip);

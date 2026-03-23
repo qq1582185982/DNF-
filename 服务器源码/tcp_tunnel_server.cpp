@@ -2214,6 +2214,41 @@ private:
                      " len=" + to_string(payload_len));
     }
 
+    const uint64_t kPeerOfferTimeoutMs = 9000;
+    const uint64_t kPeerActiveTimeoutMs = 15000;
+
+    const char* peer_endpoint_state_name(PeerEndpointState state) {
+        switch (state) {
+        case PeerEndpointState::Unknown:
+            return "unknown";
+        case PeerEndpointState::RelayOnly:
+            return "relay_only";
+        case PeerEndpointState::OfferPending:
+            return "offer_pending";
+        case PeerEndpointState::Active:
+            return "active";
+        default:
+            return "unknown";
+        }
+    }
+
+    void log_expired_peer_coord_states(PeerCoord* peer_coord, const string& server_name) {
+        if (peer_coord == nullptr) {
+            return;
+        }
+        const uint64_t now_ms = monotonic_millis();
+        vector<PeerCoordStatus> changed = peer_coord->ExpireStalePeers(
+            now_ms,
+            kPeerOfferTimeoutMs,
+            kPeerActiveTimeoutMs);
+        for (size_t i = 0; i < changed.size(); ++i) {
+            Logger::info("[" + server_name + "|IP Tunnel] peer coord state transition " +
+                         changed[i].peer_virtual_ip +
+                         " -> " + peer_endpoint_state_name(changed[i].state) +
+                         " version=" + to_string(changed[i].endpoint_version));
+        }
+    }
+
     bool send_packet_tunnel_frame(const shared_ptr<PacketTunnelSession>& session,
                                   uint8_t frame_type,
                                   const uint8_t* payload,
@@ -2261,6 +2296,8 @@ private:
         if (!session || !session->active || !session->use_udp) {
             return;
         }
+
+        log_expired_peer_coord_states(&peer_coord_, server_name);
 
         const string local_virtual_ip = ipv4_be_to_string(session->virtual_ip_be);
         const uint64_t local_version = peer_coord_.BumpEndpointVersion(local_virtual_ip);
@@ -2343,6 +2380,8 @@ private:
             return false;
         }
 
+        log_expired_peer_coord_states(&peer_coord_, server_name);
+
         shared_ptr<PacketTunnelSession> target_session;
         {
             lock_guard<mutex> lock(packet_tunnel_mutex);
@@ -2398,6 +2437,8 @@ private:
         if (!sender_session || !sender_session->active || !sender_session->use_udp) {
             return false;
         }
+
+        log_expired_peer_coord_states(&peer_coord_, server_name);
 
         shared_ptr<PacketTunnelSession> target_session;
         {

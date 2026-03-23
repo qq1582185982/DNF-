@@ -19,6 +19,9 @@ namespace {
 
 const int kHeartbeatIntervalMs = 3000;
 const int kHeartbeatTimeoutMs = 12000;
+const int kPeerOfferTimeoutMs = 9000;
+const int kPeerDirectReadyTimeoutMs = 15000;
+const int kPeerCooldownTimeoutMs = 12000;
 const int kSocketReadTimeoutMs = 1000;
 const int kTunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
@@ -67,6 +70,23 @@ std::string LinuxFrameName(uint8_t frame_type) {
         return "peer_keepalive";
     case packet_tunnel::kFramePeerDisable:
         return "peer_disable";
+    default:
+        return "unknown";
+    }
+}
+
+const char* LinuxPeerRouteStateName(LinuxPeerRouteState state) {
+    switch (state) {
+    case LinuxPeerRouteState::RelayOnly:
+        return "relay_only";
+    case LinuxPeerRouteState::OfferReceived:
+        return "offer_received";
+    case LinuxPeerRouteState::Probing:
+        return "probing";
+    case LinuxPeerRouteState::DirectReady:
+        return "direct_ready";
+    case LinuxPeerRouteState::Cooldown:
+        return "cooldown";
     default:
         return "unknown";
     }
@@ -416,16 +436,18 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                 " version=" + std::to_string(offer.endpoint_version) +
                 " endpoint=" + offer.endpoint);
         const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
-        if (SendPeerSignalFrame(packet_tunnel::kFramePeerHello,
-                                offer.peer_virtual_ip,
-                                offer.endpoint_version,
-                                nonce)) {
-            if (peer_link_manager_ != NULL) {
-                peer_link_manager_->MarkPeerProbing(offer.peer_virtual_ip);
-            }
-            LogInfo("peer control send peer_hello: peer=" + offer.peer_virtual_ip +
-                    " version=" + std::to_string(offer.endpoint_version) +
-                    " nonce=" + std::to_string(nonce));
+            if (SendPeerSignalFrame(packet_tunnel::kFramePeerHello,
+                                    offer.peer_virtual_ip,
+                                    offer.endpoint_version,
+                                    nonce)) {
+                if (peer_link_manager_ != NULL) {
+                    peer_link_manager_->RecordPeerHelloSent(offer.peer_virtual_ip,
+                                                            offer.endpoint_version,
+                                                            nonce);
+                }
+                LogInfo("peer control send peer_hello: peer=" + offer.peer_virtual_ip +
+                        " version=" + std::to_string(offer.endpoint_version) +
+                        " nonce=" + std::to_string(nonce));
         } else {
             LogWarn("peer control send peer_hello failed: peer=" + offer.peer_virtual_ip +
                     " version=" + std::to_string(offer.endpoint_version) +
@@ -448,7 +470,14 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             if (frame_type == packet_tunnel::kFramePeerHello) {
                 peer_link_manager_->MarkPeerProbing(signal.peer_virtual_ip, signal.endpoint_version);
             } else if (frame_type == packet_tunnel::kFramePeerAck) {
-                peer_link_manager_->MarkPeerDirectReady(signal.peer_virtual_ip, signal.endpoint_version);
+                if (!peer_link_manager_->TryPromotePeerDirectReady(signal.peer_virtual_ip,
+                                                                   signal.endpoint_version,
+                                                                   signal.nonce)) {
+                    LogInfo("peer control ignore unexpected peer_ack: peer=" + signal.peer_virtual_ip +
+                            " version=" + std::to_string(signal.endpoint_version) +
+                            " nonce=" + std::to_string(signal.nonce));
+                    return true;
+                }
             } else {
                 peer_link_manager_->TouchPeer(signal.peer_virtual_ip, signal.endpoint_version);
             }
@@ -571,7 +600,20 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
             break;
         }
 
+        const unsigned long long current_ms = now_ms();
+
         if (peer_link_manager_ != NULL) {
+            std::vector<LinuxPeerRouteStatus> expired = peer_link_manager_->ExpireStalePeers(
+                current_ms,
+                kPeerOfferTimeoutMs,
+                kPeerDirectReadyTimeoutMs,
+                kPeerCooldownTimeoutMs);
+            for (size_t i = 0; i < expired.size(); ++i) {
+                LogInfo("peer control state transition: peer=" + expired[i].peer_virtual_ip +
+                        " state=" + LinuxPeerRouteStateName(expired[i].state) +
+                        " version=" + std::to_string(expired[i].endpoint_version));
+            }
+
             std::vector<LinuxPeerRouteStatus> peers = peer_link_manager_->Snapshot();
             for (size_t i = 0; i < peers.size(); ++i) {
                 if (!peers[i].direct_ready || peers[i].endpoint_version == 0) {
@@ -590,7 +632,6 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
         }
 
         const unsigned long long last_ms = last_receive_ms_.load();
-        const unsigned long long current_ms = now_ms();
         if (last_ms != 0 && current_ms > last_ms && (current_ms - last_ms) > kHeartbeatTimeoutMs) {
             break;
         }

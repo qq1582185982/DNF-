@@ -52,6 +52,58 @@ void LinuxPeerLinkManager::ObservePeerFrame(const std::string& peer_virtual_ip,
         entry.state = state;
         entry.last_state_change_ms = now;
     }
+    if (state != LinuxPeerRouteState::Probing) {
+        entry.pending_hello_version = 0;
+        entry.pending_hello_nonce = 0;
+    }
+}
+
+void LinuxPeerLinkManager::RecordPeerHelloSent(const std::string& peer_virtual_ip,
+                                               uint64_t endpoint_version,
+                                               uint32_t nonce) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Entry& entry = peers_[peer_virtual_ip];
+    const uint64_t now = linux_peer_now_ms();
+    if (endpoint_version > entry.endpoint_version) {
+        entry.endpoint_version = endpoint_version;
+    }
+    entry.last_observed_ms = now;
+    entry.pending_hello_version = endpoint_version;
+    entry.pending_hello_nonce = nonce;
+    if (entry.state != LinuxPeerRouteState::Probing) {
+        entry.state = LinuxPeerRouteState::Probing;
+        entry.last_state_change_ms = now;
+    }
+}
+
+bool LinuxPeerLinkManager::TryPromotePeerDirectReady(const std::string& peer_virtual_ip,
+                                                     uint64_t endpoint_version,
+                                                     uint32_t nonce) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::map<std::string, Entry>::iterator it = peers_.find(peer_virtual_ip);
+    if (it == peers_.end()) {
+        return false;
+    }
+
+    Entry& entry = it->second;
+    const uint64_t now = linux_peer_now_ms();
+    if (endpoint_version > entry.endpoint_version) {
+        entry.endpoint_version = endpoint_version;
+    }
+    entry.last_observed_ms = now;
+
+    if (entry.pending_hello_version != endpoint_version ||
+        entry.pending_hello_nonce != nonce) {
+        return false;
+    }
+
+    entry.pending_hello_version = 0;
+    entry.pending_hello_nonce = 0;
+    if (entry.state != LinuxPeerRouteState::DirectReady) {
+        entry.state = LinuxPeerRouteState::DirectReady;
+        entry.last_state_change_ms = now;
+    }
+    return true;
 }
 
 void LinuxPeerLinkManager::MarkPeerProbing(const std::string& peer_virtual_ip, uint64_t endpoint_version) {
@@ -64,6 +116,51 @@ void LinuxPeerLinkManager::MarkPeerDirectReady(const std::string& peer_virtual_i
 
 void LinuxPeerLinkManager::MarkPeerCooldown(const std::string& peer_virtual_ip, uint64_t endpoint_version) {
     ObservePeerFrame(peer_virtual_ip, endpoint_version, LinuxPeerRouteState::Cooldown);
+}
+
+std::vector<LinuxPeerRouteStatus> LinuxPeerLinkManager::ExpireStalePeers(uint64_t now_ms,
+                                                                         uint64_t offer_timeout_ms,
+                                                                         uint64_t direct_ready_timeout_ms,
+                                                                         uint64_t cooldown_timeout_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<LinuxPeerRouteStatus> changed;
+    for (std::map<std::string, Entry>::iterator it = peers_.begin(); it != peers_.end(); ++it) {
+        Entry& entry = it->second;
+        LinuxPeerRouteState next_state = entry.state;
+
+        if ((entry.state == LinuxPeerRouteState::OfferReceived || entry.state == LinuxPeerRouteState::Probing) &&
+            entry.last_observed_ms != 0 && now_ms > entry.last_observed_ms &&
+            (now_ms - entry.last_observed_ms) >= offer_timeout_ms) {
+            next_state = LinuxPeerRouteState::Cooldown;
+        } else if (entry.state == LinuxPeerRouteState::DirectReady &&
+                   entry.last_observed_ms != 0 && now_ms > entry.last_observed_ms &&
+                   (now_ms - entry.last_observed_ms) >= direct_ready_timeout_ms) {
+            next_state = LinuxPeerRouteState::Cooldown;
+        } else if (entry.state == LinuxPeerRouteState::Cooldown &&
+                   entry.last_state_change_ms != 0 && now_ms > entry.last_state_change_ms &&
+                   (now_ms - entry.last_state_change_ms) >= cooldown_timeout_ms) {
+            next_state = LinuxPeerRouteState::RelayOnly;
+        }
+
+        if (next_state != entry.state) {
+            entry.state = next_state;
+            entry.last_state_change_ms = now_ms;
+            if (next_state != LinuxPeerRouteState::Probing) {
+                entry.pending_hello_version = 0;
+                entry.pending_hello_nonce = 0;
+            }
+
+            LinuxPeerRouteStatus status;
+            status.peer_virtual_ip = it->first;
+            status.state = entry.state;
+            status.endpoint_version = entry.endpoint_version;
+            status.direct_ready = (entry.state == LinuxPeerRouteState::DirectReady);
+            status.last_observed_ms = entry.last_observed_ms;
+            status.last_state_change_ms = entry.last_state_change_ms;
+            changed.push_back(status);
+        }
+    }
+    return changed;
 }
 
 bool LinuxPeerLinkManager::CanRouteDirect(const std::string& peer_virtual_ip) const {

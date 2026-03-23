@@ -33,6 +33,9 @@ public:
                           uint64_t endpoint_version,
                           PeerEndpointState state);
     void SetState(const std::string& peer_virtual_ip, PeerEndpointState state);
+    std::vector<PeerCoordStatus> ExpireStalePeers(uint64_t now_ms,
+                                                  uint64_t offer_timeout_ms,
+                                                  uint64_t active_timeout_ms);
     uint64_t GetEndpointVersion(const std::string& peer_virtual_ip) const;
     std::vector<PeerCoordStatus> Snapshot() const;
 

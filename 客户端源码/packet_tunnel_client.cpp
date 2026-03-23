@@ -19,6 +19,9 @@ namespace {
 
 const DWORD kHeartbeatIntervalMs = 3000;
 const DWORD kHeartbeatTimeoutMs = 12000;
+const DWORD kPeerOfferTimeoutMs = 9000;
+const DWORD kPeerDirectReadyTimeoutMs = 15000;
+const DWORD kPeerCooldownTimeoutMs = 12000;
 const DWORD kSocketReadTimeoutMs = 1000;
 const DWORD kWintunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
@@ -66,6 +69,23 @@ bool ParseIpv4StringToBe(const std::string& value, uint32_t* out_ip_be) {
 
     *out_ip_be = addr.S_un.S_addr;
     return true;
+}
+
+const char* PeerRouteStateName(PeerRouteState state) {
+    switch (state) {
+    case PeerRouteState::RelayOnly:
+        return "relay_only";
+    case PeerRouteState::OfferReceived:
+        return "offer_received";
+    case PeerRouteState::Probing:
+        return "probing";
+    case PeerRouteState::DirectReady:
+        return "direct_ready";
+    case PeerRouteState::Cooldown:
+        return "cooldown";
+    default:
+        return "unknown";
+    }
 }
 
 bool IsNoisyUdpForLogging(const uint8_t* packet, size_t packet_len) {
@@ -565,7 +585,21 @@ void PacketTunnelClient::HeartbeatLoop() {
             break;
         }
 
+        unsigned long long now_tick = GetTickCount64();
+
         if (peer_link_manager_ != NULL) {
+            std::vector<PeerRouteStatus> expired = peer_link_manager_->ExpireStalePeers(
+                now_tick,
+                kPeerOfferTimeoutMs,
+                kPeerDirectReadyTimeoutMs,
+                kPeerCooldownTimeoutMs);
+            for (size_t i = 0; i < expired.size(); ++i) {
+                PacketTunnelDebugLog("peer control state transition: peer=" +
+                                     expired[i].peer_virtual_ip +
+                                     " state=" + PeerRouteStateName(expired[i].state) +
+                                     " version=" + std::to_string(expired[i].endpoint_version));
+            }
+
             std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
             for (size_t i = 0; i < peers.size(); ++i) {
                 if (!peers[i].direct_ready || peers[i].endpoint_version == 0) {
@@ -585,7 +619,6 @@ void PacketTunnelClient::HeartbeatLoop() {
         }
 
         unsigned long long last_tick = last_receive_tick_.load();
-        unsigned long long now_tick = GetTickCount64();
         if (last_tick != 0 && now_tick > last_tick && (now_tick - last_tick) > kHeartbeatTimeoutMs) {
             PacketTunnelDebugLog("heartbeat timeout: idle_ms=" + std::to_string(now_tick - last_tick));
             break;
@@ -619,7 +652,9 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                                 offer.endpoint_version,
                                 nonce)) {
             if (peer_link_manager_ != NULL) {
-                peer_link_manager_->MarkPeerProbing(offer.peer_virtual_ip);
+                peer_link_manager_->RecordPeerHelloSent(offer.peer_virtual_ip,
+                                                        offer.endpoint_version,
+                                                        nonce);
             }
             PacketTunnelDebugLog("peer control send peer_hello: peer=" + offer.peer_virtual_ip +
                                  " version=" + std::to_string(offer.endpoint_version) +
@@ -646,7 +681,15 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             if (frame_type == packet_tunnel::kFramePeerHello) {
                 peer_link_manager_->MarkPeerProbing(signal.peer_virtual_ip, signal.endpoint_version);
             } else if (frame_type == packet_tunnel::kFramePeerAck) {
-                peer_link_manager_->MarkPeerDirectReady(signal.peer_virtual_ip, signal.endpoint_version);
+                if (!peer_link_manager_->TryPromotePeerDirectReady(signal.peer_virtual_ip,
+                                                                   signal.endpoint_version,
+                                                                   signal.nonce)) {
+                    PacketTunnelDebugLog("peer control ignore unexpected peer_ack: peer=" +
+                                         signal.peer_virtual_ip +
+                                         " version=" + std::to_string(signal.endpoint_version) +
+                                         " nonce=" + std::to_string(signal.nonce));
+                    return true;
+                }
             } else {
                 peer_link_manager_->TouchPeer(signal.peer_virtual_ip, signal.endpoint_version);
             }
