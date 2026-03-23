@@ -2247,6 +2247,30 @@ private:
                          " -> " + peer_endpoint_state_name(changed[i].state) +
                          " version=" + to_string(changed[i].endpoint_version));
         }
+        if (!changed.empty()) {
+            ostringstream ss;
+            vector<PeerCoordStatus> peers = peer_coord->Snapshot();
+            for (size_t i = 0; i < peers.size(); ++i) {
+                if (i != 0) {
+                    ss << "; ";
+                }
+                const uint64_t observed_age =
+                    (peers[i].last_observed_ms != 0 && now_ms > peers[i].last_observed_ms)
+                        ? (now_ms - peers[i].last_observed_ms)
+                        : 0;
+                const uint64_t state_age =
+                    (peers[i].last_state_change_ms != 0 && now_ms > peers[i].last_state_change_ms)
+                        ? (now_ms - peers[i].last_state_change_ms)
+                        : 0;
+                ss << peers[i].peer_virtual_ip
+                   << "[" << peer_endpoint_state_name(peers[i].state)
+                   << " v=" << peers[i].endpoint_version
+                   << " obs=" << observed_age << "ms"
+                   << " state=" << state_age << "ms]";
+            }
+            Logger::info("[" + server_name + "|IP Tunnel] peer coord snapshot: " +
+                         (peers.empty() ? string("none") : ss.str()));
+        }
     }
 
     bool send_packet_tunnel_frame(const shared_ptr<PacketTunnelSession>& session,
@@ -2371,6 +2395,19 @@ private:
                                 peer_virtual_ip + " -> " + local_virtual_ip);
             }
         }
+
+        ostringstream ss;
+        vector<PeerCoordStatus> snapshot = peer_coord_.Snapshot();
+        for (size_t i = 0; i < snapshot.size(); ++i) {
+            if (i != 0) {
+                ss << "; ";
+            }
+            ss << snapshot[i].peer_virtual_ip
+               << "[" << peer_endpoint_state_name(snapshot[i].state)
+               << " v=" << snapshot[i].endpoint_version << "]";
+        }
+        Logger::info("[" + server_name + "|IP Tunnel] peer coord snapshot: " +
+                     (snapshot.empty() ? string("none") : ss.str()));
     }
 
     bool route_peer_signal_frame(const shared_ptr<PacketTunnelSession>& sender_session,
@@ -2429,6 +2466,20 @@ private:
                      ipv4_be_to_string(target_session->virtual_ip_be) +
                      " nonce=" + to_string(signal.nonce) +
                      " version=" + to_string(sender_version));
+        {
+            ostringstream ss;
+            vector<PeerCoordStatus> snapshot = peer_coord_.Snapshot();
+            for (size_t i = 0; i < snapshot.size(); ++i) {
+                if (i != 0) {
+                    ss << "; ";
+                }
+                ss << snapshot[i].peer_virtual_ip
+                   << "[" << peer_endpoint_state_name(snapshot[i].state)
+                   << " v=" << snapshot[i].endpoint_version << "]";
+            }
+            Logger::info("[" + server_name + "|IP Tunnel] peer coord snapshot: " +
+                         (snapshot.empty() ? string("none") : ss.str()));
+        }
         return true;
     }
 
@@ -2478,6 +2529,20 @@ private:
                      ipv4_be_to_string(target_session->virtual_ip_be) +
                      " reason=" + to_string((int)disable.reason) +
                      " version=" + to_string(sender_version));
+        {
+            ostringstream ss;
+            vector<PeerCoordStatus> snapshot = peer_coord_.Snapshot();
+            for (size_t i = 0; i < snapshot.size(); ++i) {
+                if (i != 0) {
+                    ss << "; ";
+                }
+                ss << snapshot[i].peer_virtual_ip
+                   << "[" << peer_endpoint_state_name(snapshot[i].state)
+                   << " v=" << snapshot[i].endpoint_version << "]";
+            }
+            Logger::info("[" + server_name + "|IP Tunnel] peer coord snapshot: " +
+                         (snapshot.empty() ? string("none") : ss.str()));
+        }
         return true;
     }
 

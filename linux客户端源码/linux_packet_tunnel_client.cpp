@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <sstream>
 #include <vector>
 
 namespace {
@@ -22,6 +23,7 @@ const int kHeartbeatTimeoutMs = 12000;
 const int kPeerOfferTimeoutMs = 9000;
 const int kPeerDirectReadyTimeoutMs = 15000;
 const int kPeerCooldownTimeoutMs = 12000;
+const int kPeerSnapshotLogIntervalMs = 15000;
 const int kSocketReadTimeoutMs = 1000;
 const int kTunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
@@ -90,6 +92,34 @@ const char* LinuxPeerRouteStateName(LinuxPeerRouteState state) {
     default:
         return "unknown";
     }
+}
+
+std::string BuildLinuxPeerRouteSnapshotSummary(const std::vector<LinuxPeerRouteStatus>& peers,
+                                               unsigned long long now_ms_value) {
+    if (peers.empty()) {
+        return "none";
+    }
+
+    std::ostringstream ss;
+    for (size_t i = 0; i < peers.size(); ++i) {
+        if (i != 0) {
+            ss << "; ";
+        }
+        const unsigned long long observed_age =
+            (peers[i].last_observed_ms != 0 && now_ms_value > peers[i].last_observed_ms)
+                ? (now_ms_value - peers[i].last_observed_ms)
+                : 0;
+        const unsigned long long state_age =
+            (peers[i].last_state_change_ms != 0 && now_ms_value > peers[i].last_state_change_ms)
+                ? (now_ms_value - peers[i].last_state_change_ms)
+                : 0;
+        ss << peers[i].peer_virtual_ip
+           << "[" << LinuxPeerRouteStateName(peers[i].state)
+           << " v=" << peers[i].endpoint_version
+           << " obs=" << observed_age << "ms"
+           << " state=" << state_age << "ms]";
+    }
+    return ss.str();
 }
 
 std::string LinuxIpv4ToString(const uint8_t* addr) {
@@ -588,6 +618,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
 }
 
 void LinuxPacketTunnelClient::HeartbeatLoop() {
+    unsigned long long last_peer_snapshot_log_ms = 0;
     while (!stop_requested_) {
         for (int waited = 0; waited < kHeartbeatIntervalMs && !stop_requested_; waited += 200) {
             usleep(200 * 1000);
@@ -621,6 +652,14 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
             }
 
             std::vector<LinuxPeerRouteStatus> peers = peer_link_manager_->Snapshot();
+            if (!peers.empty() &&
+                (last_peer_snapshot_log_ms == 0 ||
+                 current_ms < last_peer_snapshot_log_ms ||
+                 (current_ms - last_peer_snapshot_log_ms) >= kPeerSnapshotLogIntervalMs)) {
+                LogInfo("peer control snapshot: " +
+                        BuildLinuxPeerRouteSnapshotSummary(peers, current_ms));
+                last_peer_snapshot_log_ms = current_ms;
+            }
             for (size_t i = 0; i < peers.size(); ++i) {
                 if (!peers[i].direct_ready || peers[i].endpoint_version == 0) {
                     continue;

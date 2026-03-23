@@ -22,6 +22,7 @@ const DWORD kHeartbeatTimeoutMs = 12000;
 const DWORD kPeerOfferTimeoutMs = 9000;
 const DWORD kPeerDirectReadyTimeoutMs = 15000;
 const DWORD kPeerCooldownTimeoutMs = 12000;
+const DWORD kPeerSnapshotLogIntervalMs = 15000;
 const DWORD kSocketReadTimeoutMs = 1000;
 const DWORD kWintunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
@@ -86,6 +87,34 @@ const char* PeerRouteStateName(PeerRouteState state) {
     default:
         return "unknown";
     }
+}
+
+std::string BuildPeerRouteSnapshotSummary(const std::vector<PeerRouteStatus>& peers,
+                                          unsigned long long now_tick) {
+    if (peers.empty()) {
+        return "none";
+    }
+
+    std::ostringstream ss;
+    for (size_t i = 0; i < peers.size(); ++i) {
+        if (i != 0) {
+            ss << "; ";
+        }
+        const unsigned long long observed_age =
+            (peers[i].last_observed_ms != 0 && now_tick > peers[i].last_observed_ms)
+                ? (now_tick - peers[i].last_observed_ms)
+                : 0;
+        const unsigned long long state_age =
+            (peers[i].last_state_change_ms != 0 && now_tick > peers[i].last_state_change_ms)
+                ? (now_tick - peers[i].last_state_change_ms)
+                : 0;
+        ss << peers[i].peer_virtual_ip
+           << "[" << PeerRouteStateName(peers[i].state)
+           << " v=" << peers[i].endpoint_version
+           << " obs=" << observed_age << "ms"
+           << " state=" << state_age << "ms]";
+    }
+    return ss.str();
 }
 
 bool IsNoisyUdpForLogging(const uint8_t* packet, size_t packet_len) {
@@ -572,6 +601,7 @@ void PacketTunnelClient::WintunReadLoop() {
 }
 
 void PacketTunnelClient::HeartbeatLoop() {
+    unsigned long long last_peer_snapshot_log_tick = 0;
     while (!stop_requested_) {
         for (DWORD waited = 0; waited < kHeartbeatIntervalMs && !stop_requested_; waited += 200) {
             Sleep(200);
@@ -607,6 +637,14 @@ void PacketTunnelClient::HeartbeatLoop() {
             }
 
             std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
+            if (!peers.empty() &&
+                (last_peer_snapshot_log_tick == 0 ||
+                 now_tick < last_peer_snapshot_log_tick ||
+                 (now_tick - last_peer_snapshot_log_tick) >= kPeerSnapshotLogIntervalMs)) {
+                PacketTunnelDebugLog("peer control snapshot: " +
+                                     BuildPeerRouteSnapshotSummary(peers, now_tick));
+                last_peer_snapshot_log_tick = now_tick;
+            }
             for (size_t i = 0; i < peers.size(); ++i) {
                 if (!peers[i].direct_ready || peers[i].endpoint_version == 0) {
                     continue;
