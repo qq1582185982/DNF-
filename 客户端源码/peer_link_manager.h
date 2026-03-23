@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
@@ -19,6 +20,9 @@ struct PeerRouteStatus {
     std::string peer_virtual_ip;
     PeerRouteState state;
     uint64_t endpoint_version;
+    uint8_t endpoint_family;
+    uint16_t endpoint_port;
+    uint8_t endpoint_addr[16];
     bool direct_ready;
     uint64_t last_observed_ms;
     uint64_t last_state_change_ms;
@@ -31,7 +35,11 @@ public:
     void SetLocalVirtualIp(const std::string& virtual_ip);
     void ResetAll();
 
-    void UpdatePeerOffer(const std::string& peer_virtual_ip, uint64_t endpoint_version);
+    void UpdatePeerOffer(const std::string& peer_virtual_ip,
+                         uint64_t endpoint_version,
+                         uint8_t endpoint_family,
+                         const uint8_t* endpoint_addr,
+                         uint16_t endpoint_port);
     void TouchPeer(const std::string& peer_virtual_ip, uint64_t endpoint_version);
     void ObservePeerFrame(const std::string& peer_virtual_ip,
                           uint64_t endpoint_version,
@@ -51,6 +59,11 @@ public:
                                                   uint64_t cooldown_timeout_ms);
 
     bool CanRouteDirect(const std::string& peer_virtual_ip) const;
+    bool TryGetDirectRoute(const std::string& peer_virtual_ip, PeerRouteStatus* out_status) const;
+    bool TryResolveByEndpoint(uint8_t endpoint_family,
+                              const uint8_t* endpoint_addr,
+                              uint16_t endpoint_port,
+                              PeerRouteStatus* out_status) const;
     std::vector<PeerRouteStatus> Snapshot() const;
 
 private:
@@ -58,13 +71,20 @@ private:
         Entry()
             : state(PeerRouteState::RelayOnly),
               endpoint_version(0),
+              endpoint_family(0),
+              endpoint_port(0),
               last_observed_ms(0),
               last_state_change_ms(0),
               pending_hello_version(0),
-              pending_hello_nonce(0) {}
+              pending_hello_nonce(0) {
+            memset(endpoint_addr, 0, sizeof(endpoint_addr));
+        }
 
         PeerRouteState state;
         uint64_t endpoint_version;
+        uint8_t endpoint_family;
+        uint16_t endpoint_port;
+        uint8_t endpoint_addr[16];
         uint64_t last_observed_ms;
         uint64_t last_state_change_ms;
         uint64_t pending_hello_version;

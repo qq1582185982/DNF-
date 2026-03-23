@@ -4,6 +4,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <winsock2.h>
+#include <ws2tcpip.h>
 
 #include <atomic>
 #include <cstdint>
@@ -28,6 +29,16 @@ public:
     bool IsConnected() const { return connected_; }
 
 private:
+    struct UdpEndpoint {
+        sockaddr_storage addr;
+        int addr_len;
+        bool valid;
+
+        UdpEndpoint() : addr_len(0), valid(false) {
+            ZeroMemory(&addr, sizeof(addr));
+        }
+    };
+
     bool ConnectSocket(std::wstring* error_msg);
     bool SendHandshake(std::wstring* error_msg);
     bool ReceiveHandshakeAck(std::wstring* error_msg);
@@ -43,6 +54,27 @@ private:
     bool SendPeerDisableFrame(const std::string& target_peer_virtual_ip,
                               uint64_t endpoint_version,
                               uint8_t reason);
+    bool TryBuildPeerEndpoint(const std::string& peer_virtual_ip,
+                              UdpEndpoint* endpoint) const;
+    bool TryResolvePeerBySource(const sockaddr_storage& source_addr,
+                                int source_addr_len,
+                                std::string* peer_virtual_ip) const;
+    bool IsServerEndpoint(const sockaddr_storage& source_addr,
+                          int source_addr_len) const;
+    bool SendFrameToEndpoint(const UdpEndpoint& endpoint,
+                             uint8_t frame_type,
+                             const uint8_t* data,
+                             size_t length,
+                             std::wstring* error_msg);
+    bool SendDatagramToEndpoint(const UdpEndpoint& endpoint,
+                                const uint8_t* data,
+                                size_t length,
+                                std::wstring* error_msg);
+    int RecvDatagramFrom(uint8_t* data,
+                         size_t length,
+                         sockaddr_storage* source_addr,
+                         int* source_addr_len,
+                         std::wstring* error_msg);
     bool SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg);
     bool SendDatagram(const uint8_t* data, size_t length, std::wstring* error_msg);
     int RecvDatagram(uint8_t* data, size_t length, std::wstring* error_msg);
@@ -56,6 +88,8 @@ private:
     uint16_t mtu_;
     WintunManager* wintun_manager_;
     SOCKET sock_;
+    int socket_family_;
+    UdpEndpoint server_endpoint_;
     std::atomic<bool> connected_;
     std::atomic<bool> stop_requested_;
     std::atomic<unsigned long long> last_receive_tick_;

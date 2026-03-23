@@ -39,6 +39,7 @@ struct ParsedLinuxPeerOffer {
     uint64_t endpoint_version;
     uint8_t endpoint_family;
     uint16_t endpoint_port;
+    uint8_t endpoint_addr[16];
     std::string endpoint;
 };
 
@@ -167,6 +168,8 @@ bool ParseLinuxPeerOfferPayload(const uint8_t* payload, size_t length, ParsedLin
     out_offer->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
     out_offer->endpoint_family = payload[12];
     out_offer->endpoint_port = packet_tunnel::read_u16_be(payload + 14);
+    memset(out_offer->endpoint_addr, 0, sizeof(out_offer->endpoint_addr));
+    memcpy(out_offer->endpoint_addr, payload + 16, sizeof(out_offer->endpoint_addr));
     out_offer->endpoint = LinuxPeerEndpointToString(out_offer->endpoint_family, payload + 16, out_offer->endpoint_port);
     return true;
 }
@@ -193,6 +196,33 @@ bool ParseLinuxPeerDisablePayload(const uint8_t* payload, size_t length, ParsedL
     return true;
 }
 
+bool LinuxSockaddrEquals(const sockaddr_storage& left,
+                         socklen_t left_len,
+                         const sockaddr_storage& right,
+                         socklen_t right_len) {
+    (void)left_len;
+    (void)right_len;
+    if (left.ss_family != right.ss_family) {
+        return false;
+    }
+
+    if (left.ss_family == AF_INET) {
+        const sockaddr_in* left4 = reinterpret_cast<const sockaddr_in*>(&left);
+        const sockaddr_in* right4 = reinterpret_cast<const sockaddr_in*>(&right);
+        return left4->sin_port == right4->sin_port &&
+               left4->sin_addr.s_addr == right4->sin_addr.s_addr;
+    }
+
+    if (left.ss_family == AF_INET6) {
+        const sockaddr_in6* left6 = reinterpret_cast<const sockaddr_in6*>(&left);
+        const sockaddr_in6* right6 = reinterpret_cast<const sockaddr_in6*>(&right);
+        return left6->sin6_port == right6->sin6_port &&
+               memcmp(&left6->sin6_addr, &right6->sin6_addr, sizeof(left6->sin6_addr)) == 0;
+    }
+
+    return false;
+}
+
 }  // namespace
 
 LinuxPacketTunnelClient::LinuxPacketTunnelClient(const std::string& tunnel_host,
@@ -208,6 +238,7 @@ LinuxPacketTunnelClient::LinuxPacketTunnelClient(const std::string& tunnel_host,
       mtu_(mtu),
       tun_manager_(tun_manager),
       sock_(-1),
+      socket_family_(AF_UNSPEC),
       connected_(false),
       stop_requested_(false),
       last_receive_ms_(0),
@@ -282,6 +313,9 @@ void LinuxPacketTunnelClient::Stop() {
 }
 
 bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
+    server_endpoint_ = UdpEndpoint();
+    socket_family_ = AF_UNSPEC;
+
     addrinfo hints = {};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_DGRAM;
@@ -304,6 +338,11 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
             continue;
         }
 
+        if (rp->ai_family == AF_INET6) {
+            int dual_stack = 0;
+            setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &dual_stack, sizeof(dual_stack));
+        }
+
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &kSocketBufferBytes, sizeof(kSocketBufferBytes));
         setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &kSocketBufferBytes, sizeof(kSocketBufferBytes));
 
@@ -316,13 +355,13 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
         recv_timeout.tv_usec = (kSocketReadTimeoutMs % 1000) * 1000;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
 
-        if (connect(sock, rp->ai_addr, rp->ai_addrlen) == 0) {
-            sock_ = sock;
-            connected = true;
-            break;
-        }
-
-        close(sock);
+        sock_ = sock;
+        socket_family_ = rp->ai_family;
+        server_endpoint_.addr_len = rp->ai_addrlen;
+        memcpy(&server_endpoint_.addr, rp->ai_addr, rp->ai_addrlen);
+        server_endpoint_.valid = true;
+        connected = true;
+        break;
     }
 
     freeaddrinfo(result);
@@ -361,34 +400,51 @@ bool LinuxPacketTunnelClient::SendHandshake(std::string* error) {
     memcpy(&handshake[tail + 2], &mtu_be, sizeof(mtu_be));
     memcpy(&handshake[tail + 4], &virtual_ip_be, sizeof(virtual_ip_be));
 
-    return SendDatagram(handshake.data(), handshake.size(), error);
+    return SendDatagramToEndpoint(server_endpoint_, handshake.data(), handshake.size(), error);
 }
 
 bool LinuxPacketTunnelClient::ReceiveHandshakeAck(std::string* error) {
     uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
-    int received = RecvDatagram(ack, sizeof(ack), error);
-    if (received != static_cast<int>(sizeof(ack))) {
-        if (received >= 0 && error != NULL) {
-            *error = "packet tunnel ack size mismatch";
+    while (!stop_requested_) {
+        sockaddr_storage source_addr = {};
+        socklen_t source_addr_len = sizeof(source_addr);
+        int received = RecvDatagramFrom(ack, sizeof(ack), &source_addr, &source_addr_len, error);
+        if (received < 0) {
+            return false;
         }
-        return false;
-    }
+        if (received == 0) {
+            continue;
+        }
+        if (!IsServerEndpoint(source_addr, source_addr_len)) {
+            continue;
+        }
+        if (received != static_cast<int>(sizeof(ack))) {
+            if (error != NULL) {
+                *error = "packet tunnel ack size mismatch";
+            }
+            return false;
+        }
 
-    if (ack[0] != packet_tunnel::kProtocolVersion) {
-        if (error != NULL) {
-            *error = "packet tunnel ack version mismatch";
+        if (ack[0] != packet_tunnel::kProtocolVersion) {
+            if (error != NULL) {
+                *error = "packet tunnel ack version mismatch";
+            }
+            return false;
         }
-        return false;
-    }
-    if (ack[1] != packet_tunnel::kStatusOk) {
-        if (error != NULL) {
-            *error = "packet tunnel ack rejected";
+        if (ack[1] != packet_tunnel::kStatusOk) {
+            if (error != NULL) {
+                *error = "packet tunnel ack rejected";
+            }
+            return false;
         }
-        return false;
-    }
 
-    last_receive_ms_ = now_ms();
-    return true;
+        last_receive_ms_ = now_ms();
+        return true;
+    }
+    if (error != NULL) {
+        *error = "packet tunnel handshake interrupted";
+    }
+    return false;
 }
 
 bool LinuxPacketTunnelClient::StartThreads(std::string* error) {
@@ -409,15 +465,19 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
     std::vector<uint8_t> buffer(65535);
     while (!stop_requested_) {
         std::string error;
-        int received = RecvDatagram(buffer.data(), buffer.size(), &error);
+        sockaddr_storage source_addr = {};
+        socklen_t source_addr_len = sizeof(source_addr);
+        int received = RecvDatagramFrom(buffer.data(),
+                                        buffer.size(),
+                                        &source_addr,
+                                        &source_addr_len,
+                                        &error);
         if (received < 0) {
             break;
         }
         if (received == 0) {
             continue;
         }
-
-        last_receive_ms_ = now_ms();
 
         if (received < static_cast<int>(packet_tunnel::kFrameHeaderSize)) {
             continue;
@@ -429,18 +489,34 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
             continue;
         }
 
-        if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
-            continue;
-        }
+        const bool from_server = IsServerEndpoint(source_addr, source_addr_len);
+        std::string peer_virtual_ip;
+        const bool from_known_peer = !from_server &&
+                                     TryResolvePeerBySource(source_addr, source_addr_len, &peer_virtual_ip);
 
-        if (HandlePeerControlFrame(frame_type,
-                                   buffer.data() + packet_tunnel::kFrameHeaderSize,
-                                   payload_len)) {
-            continue;
+        if (from_server) {
+            last_receive_ms_ = now_ms();
+
+            if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
+                continue;
+            }
+
+            if (HandlePeerControlFrame(frame_type,
+                                       buffer.data() + packet_tunnel::kFrameHeaderSize,
+                                       payload_len)) {
+                continue;
+            }
         }
 
         if (frame_type == packet_tunnel::kFrameIpv4Packet && tun_manager_ != NULL) {
+            if (from_known_peer &&
+                (payload_len < 20 ||
+                 LinuxIpv4ToString(buffer.data() + packet_tunnel::kFrameHeaderSize + 12) != peer_virtual_ip)) {
+                LogWarn("ignore peer ipv4 packet with mismatched inner src peer=" + peer_virtual_ip);
+                continue;
+            }
             tun_manager_->WritePacket(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len, NULL);
+            continue;
         }
     }
 
@@ -458,9 +534,11 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             return true;
         }
         if (peer_link_manager_ != NULL) {
-            peer_link_manager_->ObservePeerFrame(offer.peer_virtual_ip,
-                                                 offer.endpoint_version,
-                                                 LinuxPeerRouteState::OfferReceived);
+            peer_link_manager_->UpdatePeerOffer(offer.peer_virtual_ip,
+                                                offer.endpoint_version,
+                                                offer.endpoint_family,
+                                                offer.endpoint_addr,
+                                                offer.endpoint_port);
         }
         LogInfo("peer control peer_offer: peer=" + offer.peer_virtual_ip +
                 " version=" + std::to_string(offer.endpoint_version) +
@@ -584,6 +662,192 @@ bool LinuxPacketTunnelClient::SendPeerDisableFrame(const std::string& target_pee
     return SendFrame(packet_tunnel::kFramePeerDisable, payload.data(), payload.size(), NULL);
 }
 
+bool LinuxPacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtual_ip,
+                                                   UdpEndpoint* endpoint) const {
+    if (endpoint == NULL || peer_link_manager_ == NULL) {
+        return false;
+    }
+
+    LinuxPeerRouteStatus route = {};
+    if (!peer_link_manager_->TryGetDirectRoute(peer_virtual_ip, &route)) {
+        return false;
+    }
+
+    memset(&endpoint->addr, 0, sizeof(endpoint->addr));
+    endpoint->addr_len = 0;
+    endpoint->valid = false;
+
+    if (socket_family_ == AF_INET && route.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4) {
+        sockaddr_in* addr4 = reinterpret_cast<sockaddr_in*>(&endpoint->addr);
+        addr4->sin_family = AF_INET;
+        addr4->sin_port = htons(route.endpoint_port);
+        memcpy(&addr4->sin_addr, route.endpoint_addr, 4);
+        endpoint->addr_len = sizeof(sockaddr_in);
+        endpoint->valid = true;
+        return true;
+    }
+
+    if (socket_family_ == AF_INET6) {
+        sockaddr_in6* addr6 = reinterpret_cast<sockaddr_in6*>(&endpoint->addr);
+        addr6->sin6_family = AF_INET6;
+        addr6->sin6_port = htons(route.endpoint_port);
+        if (route.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv6) {
+            memcpy(&addr6->sin6_addr, route.endpoint_addr, 16);
+            endpoint->addr_len = sizeof(sockaddr_in6);
+            endpoint->valid = true;
+            return true;
+        }
+        if (route.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4) {
+            memset(&addr6->sin6_addr, 0, sizeof(addr6->sin6_addr));
+            addr6->sin6_addr.s6_addr[10] = 0xFF;
+            addr6->sin6_addr.s6_addr[11] = 0xFF;
+            memcpy(&addr6->sin6_addr.s6_addr[12], route.endpoint_addr, 4);
+            endpoint->addr_len = sizeof(sockaddr_in6);
+            endpoint->valid = true;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool LinuxPacketTunnelClient::TryResolvePeerBySource(const sockaddr_storage& source_addr,
+                                                     socklen_t source_addr_len,
+                                                     std::string* peer_virtual_ip) const {
+    (void)source_addr_len;
+    if (peer_link_manager_ == NULL) {
+        return false;
+    }
+
+    uint8_t endpoint_family = packet_tunnel::kPeerEndpointFamilyUnknown;
+    uint16_t endpoint_port = 0;
+    uint8_t endpoint_addr[16] = {};
+
+    if (source_addr.ss_family == AF_INET) {
+        const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(&source_addr);
+        endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
+        endpoint_port = ntohs(addr4->sin_port);
+        memcpy(endpoint_addr, &addr4->sin_addr, 4);
+    } else if (source_addr.ss_family == AF_INET6) {
+        const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(&source_addr);
+        endpoint_port = ntohs(addr6->sin6_port);
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&addr6->sin6_addr);
+        static const uint8_t kV4MappedPrefix[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
+        if (memcmp(bytes, kV4MappedPrefix, sizeof(kV4MappedPrefix)) == 0) {
+            endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
+            memcpy(endpoint_addr, bytes + 12, 4);
+        } else {
+            endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv6;
+            memcpy(endpoint_addr, bytes, 16);
+        }
+    } else {
+        return false;
+    }
+
+    LinuxPeerRouteStatus route = {};
+    if (!peer_link_manager_->TryResolveByEndpoint(endpoint_family,
+                                                  endpoint_addr,
+                                                  endpoint_port,
+                                                  &route)) {
+        return false;
+    }
+
+    if (peer_virtual_ip != NULL) {
+        *peer_virtual_ip = route.peer_virtual_ip;
+    }
+    return true;
+}
+
+bool LinuxPacketTunnelClient::IsServerEndpoint(const sockaddr_storage& source_addr,
+                                               socklen_t source_addr_len) const {
+    if (!server_endpoint_.valid) {
+        return false;
+    }
+    return LinuxSockaddrEquals(source_addr,
+                               source_addr_len,
+                               server_endpoint_.addr,
+                               server_endpoint_.addr_len);
+}
+
+bool LinuxPacketTunnelClient::SendFrameToEndpoint(const UdpEndpoint& endpoint,
+                                                  uint8_t frame_type,
+                                                  const uint8_t* data,
+                                                  size_t length,
+                                                  std::string* error) {
+    std::vector<uint8_t> frame(packet_tunnel::kFrameHeaderSize + length, 0);
+    frame[0] = frame_type;
+    *(uint16_t*)(&frame[1]) = htons(static_cast<uint16_t>(length));
+    if (length > 0 && data != NULL) {
+        memcpy(&frame[packet_tunnel::kFrameHeaderSize], data, length);
+    }
+
+    std::lock_guard<std::mutex> lock(send_mutex_);
+    return SendDatagramToEndpoint(endpoint, frame.data(), frame.size(), error);
+}
+
+bool LinuxPacketTunnelClient::SendDatagramToEndpoint(const UdpEndpoint& endpoint,
+                                                     const uint8_t* data,
+                                                     size_t length,
+                                                     std::string* error) {
+    if (!endpoint.valid) {
+        if (error != NULL) {
+            *error = "packet tunnel send target is invalid";
+        }
+        return false;
+    }
+
+    ssize_t n = sendto(sock_,
+                       data,
+                       length,
+                       0,
+                       reinterpret_cast<const sockaddr*>(&endpoint.addr),
+                       endpoint.addr_len);
+    if (n != static_cast<ssize_t>(length)) {
+        if (error != NULL) {
+            *error = std::string("packet tunnel send failed: ") + strerror(errno);
+        }
+        return false;
+    }
+    return true;
+}
+
+int LinuxPacketTunnelClient::RecvDatagramFrom(uint8_t* data,
+                                              size_t length,
+                                              sockaddr_storage* source_addr,
+                                              socklen_t* source_addr_len,
+                                              std::string* error) {
+    socklen_t addr_len = static_cast<socklen_t>(sizeof(sockaddr_storage));
+    if (source_addr_len != NULL && *source_addr_len > 0) {
+        addr_len = *source_addr_len;
+    }
+    ssize_t n = recvfrom(sock_,
+                         data,
+                         length,
+                         0,
+                         (source_addr != NULL) ? reinterpret_cast<sockaddr*>(source_addr) : NULL,
+                         (source_addr_len != NULL) ? &addr_len : NULL);
+    if (source_addr_len != NULL) {
+        *source_addr_len = addr_len;
+    }
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK ||
+            errno == ECONNREFUSED || errno == ECONNRESET) {
+            return 0;
+        }
+        if (error != NULL) {
+            *error = std::string("packet tunnel recv failed: ") + strerror(errno);
+        }
+        return -1;
+    }
+    if (n == 0) {
+        if (error != NULL) {
+            *error = "packet tunnel peer closed";
+        }
+        return -1;
+    }
+    return static_cast<int>(n);
+}
+
 void LinuxPacketTunnelClient::TunReadLoop() {
     while (!stop_requested_) {
         std::vector<uint8_t> packet;
@@ -605,6 +869,21 @@ void LinuxPacketTunnelClient::TunReadLoop() {
             if ((dst_octet0 >= 224 && dst_octet0 <= 239) ||
                 (packet[16] == 255 && packet[17] == 255 && packet[18] == 255 && packet[19] == 255)) {
                 continue;
+            }
+        }
+
+        const bool is_udp = packet.size() >= 20 && packet[9] == IPPROTO_UDP;
+        if (is_udp) {
+            const std::string dst_virtual_ip = LinuxIpv4ToString(packet.data() + 16);
+            UdpEndpoint peer_endpoint;
+            if (TryBuildPeerEndpoint(dst_virtual_ip, &peer_endpoint)) {
+                if (SendFrameToEndpoint(peer_endpoint,
+                                        packet_tunnel::kFrameIpv4Packet,
+                                        packet.data(),
+                                        packet.size(),
+                                        NULL)) {
+                    continue;
+                }
             }
         }
 
@@ -690,46 +969,17 @@ bool LinuxPacketTunnelClient::SendFrame(uint8_t frame_type,
                                         const uint8_t* data,
                                         size_t length,
                                         std::string* error) {
-    std::vector<uint8_t> frame(packet_tunnel::kFrameHeaderSize + length, 0);
-    frame[0] = frame_type;
-    *(uint16_t*)(&frame[1]) = htons(static_cast<uint16_t>(length));
-    if (length > 0 && data != NULL) {
-        memcpy(&frame[packet_tunnel::kFrameHeaderSize], data, length);
-    }
-
-    std::lock_guard<std::mutex> lock(send_mutex_);
-    return SendDatagram(frame.data(), frame.size(), error);
+    return SendFrameToEndpoint(server_endpoint_, frame_type, data, length, error);
 }
 
 bool LinuxPacketTunnelClient::SendDatagram(const uint8_t* data, size_t length, std::string* error) {
-    ssize_t n = send(sock_, data, length, 0);
-    if (n != static_cast<ssize_t>(length)) {
-        if (error != NULL) {
-            *error = std::string("packet tunnel send failed: ") + strerror(errno);
-        }
-        return false;
-    }
-    return true;
+    return SendDatagramToEndpoint(server_endpoint_, data, length, error);
 }
 
 int LinuxPacketTunnelClient::RecvDatagram(uint8_t* data, size_t length, std::string* error) {
-    ssize_t n = recv(sock_, data, length, 0);
-    if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return 0;
-        }
-        if (error != NULL) {
-            *error = std::string("packet tunnel recv failed: ") + strerror(errno);
-        }
-        return -1;
-    }
-    if (n == 0) {
-        if (error != NULL) {
-            *error = "packet tunnel peer closed";
-        }
-        return -1;
-    }
-    return static_cast<int>(n);
+    sockaddr_storage source_addr = {};
+    socklen_t source_addr_len = sizeof(source_addr);
+    return RecvDatagramFrom(data, length, &source_addr, &source_addr_len, error);
 }
 
 uint32_t LinuxPacketTunnelClient::ParseVirtualIp(std::string* error) const {

@@ -1,6 +1,7 @@
 #include "linux_peer_link_manager.h"
 
 #include <chrono>
+#include <cstring>
 
 namespace {
 
@@ -25,8 +26,28 @@ void LinuxPeerLinkManager::ResetAll() {
     peers_.clear();
 }
 
-void LinuxPeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip, uint64_t endpoint_version) {
-    ObservePeerFrame(peer_virtual_ip, endpoint_version, LinuxPeerRouteState::OfferReceived);
+void LinuxPeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
+                                           uint64_t endpoint_version,
+                                           uint8_t endpoint_family,
+                                           const uint8_t* endpoint_addr,
+                                           uint16_t endpoint_port) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Entry& entry = peers_[peer_virtual_ip];
+    const uint64_t now = linux_peer_now_ms();
+    if (endpoint_version > entry.endpoint_version) {
+        entry.endpoint_version = endpoint_version;
+    }
+    entry.endpoint_family = endpoint_family;
+    entry.endpoint_port = endpoint_port;
+    memset(entry.endpoint_addr, 0, sizeof(entry.endpoint_addr));
+    if (endpoint_addr != NULL) {
+        memcpy(entry.endpoint_addr, endpoint_addr, sizeof(entry.endpoint_addr));
+    }
+    entry.last_observed_ms = now;
+    if (entry.state != LinuxPeerRouteState::OfferReceived) {
+        entry.state = LinuxPeerRouteState::OfferReceived;
+        entry.last_state_change_ms = now;
+    }
 }
 
 void LinuxPeerLinkManager::TouchPeer(const std::string& peer_virtual_ip, uint64_t endpoint_version) {
@@ -154,6 +175,9 @@ std::vector<LinuxPeerRouteStatus> LinuxPeerLinkManager::ExpireStalePeers(uint64_
             status.peer_virtual_ip = it->first;
             status.state = entry.state;
             status.endpoint_version = entry.endpoint_version;
+            status.endpoint_family = entry.endpoint_family;
+            status.endpoint_port = entry.endpoint_port;
+            memcpy(status.endpoint_addr, entry.endpoint_addr, sizeof(status.endpoint_addr));
             status.direct_ready = (entry.state == LinuxPeerRouteState::DirectReady);
             status.last_observed_ms = entry.last_observed_ms;
             status.last_state_change_ms = entry.last_state_change_ms;
@@ -166,7 +190,69 @@ std::vector<LinuxPeerRouteStatus> LinuxPeerLinkManager::ExpireStalePeers(uint64_
 bool LinuxPeerLinkManager::CanRouteDirect(const std::string& peer_virtual_ip) const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::map<std::string, Entry>::const_iterator it = peers_.find(peer_virtual_ip);
-    return it != peers_.end() && it->second.state == LinuxPeerRouteState::DirectReady;
+    return it != peers_.end() &&
+           it->second.state == LinuxPeerRouteState::DirectReady &&
+           it->second.endpoint_family != 0 &&
+           it->second.endpoint_port != 0;
+}
+
+bool LinuxPeerLinkManager::TryGetDirectRoute(const std::string& peer_virtual_ip,
+                                             LinuxPeerRouteStatus* out_status) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::map<std::string, Entry>::const_iterator it = peers_.find(peer_virtual_ip);
+    if (it == peers_.end() ||
+        it->second.state != LinuxPeerRouteState::DirectReady ||
+        it->second.endpoint_family == 0 ||
+        it->second.endpoint_port == 0) {
+        return false;
+    }
+
+    if (out_status != NULL) {
+        out_status->peer_virtual_ip = it->first;
+        out_status->state = it->second.state;
+        out_status->endpoint_version = it->second.endpoint_version;
+        out_status->endpoint_family = it->second.endpoint_family;
+        out_status->endpoint_port = it->second.endpoint_port;
+        memcpy(out_status->endpoint_addr, it->second.endpoint_addr, sizeof(out_status->endpoint_addr));
+        out_status->direct_ready = true;
+        out_status->last_observed_ms = it->second.last_observed_ms;
+        out_status->last_state_change_ms = it->second.last_state_change_ms;
+    }
+    return true;
+}
+
+bool LinuxPeerLinkManager::TryResolveByEndpoint(uint8_t endpoint_family,
+                                                const uint8_t* endpoint_addr,
+                                                uint16_t endpoint_port,
+                                                LinuxPeerRouteStatus* out_status) const {
+    if (endpoint_addr == NULL || endpoint_family == 0 || endpoint_port == 0) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (std::map<std::string, Entry>::const_iterator it = peers_.begin(); it != peers_.end(); ++it) {
+        if (it->second.state != LinuxPeerRouteState::DirectReady ||
+            it->second.endpoint_family != endpoint_family ||
+            it->second.endpoint_port != endpoint_port ||
+            memcmp(it->second.endpoint_addr, endpoint_addr, sizeof(it->second.endpoint_addr)) != 0) {
+            continue;
+        }
+
+        if (out_status != NULL) {
+            out_status->peer_virtual_ip = it->first;
+            out_status->state = it->second.state;
+            out_status->endpoint_version = it->second.endpoint_version;
+            out_status->endpoint_family = it->second.endpoint_family;
+            out_status->endpoint_port = it->second.endpoint_port;
+            memcpy(out_status->endpoint_addr, it->second.endpoint_addr, sizeof(out_status->endpoint_addr));
+            out_status->direct_ready = true;
+            out_status->last_observed_ms = it->second.last_observed_ms;
+            out_status->last_state_change_ms = it->second.last_state_change_ms;
+        }
+        return true;
+    }
+
+    return false;
 }
 
 std::vector<LinuxPeerRouteStatus> LinuxPeerLinkManager::Snapshot() const {
@@ -177,6 +263,9 @@ std::vector<LinuxPeerRouteStatus> LinuxPeerLinkManager::Snapshot() const {
         status.peer_virtual_ip = it->first;
         status.state = it->second.state;
         status.endpoint_version = it->second.endpoint_version;
+        status.endpoint_family = it->second.endpoint_family;
+        status.endpoint_port = it->second.endpoint_port;
+        memcpy(status.endpoint_addr, it->second.endpoint_addr, sizeof(status.endpoint_addr));
         status.direct_ready = (it->second.state == LinuxPeerRouteState::DirectReady);
         status.last_observed_ms = it->second.last_observed_ms;
         status.last_state_change_ms = it->second.last_state_change_ms;

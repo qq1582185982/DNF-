@@ -5,6 +5,7 @@
 #include "wintun_manager.h"
 
 #include <windows.h>
+#include <mstcpip.h>
 #include <ws2tcpip.h>
 
 #include <algorithm>
@@ -16,6 +17,10 @@
 void PacketTunnelDebugLog(const std::string& msg);
 
 namespace {
+
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
 
 const DWORD kHeartbeatIntervalMs = 3000;
 const DWORD kHeartbeatTimeoutMs = 12000;
@@ -175,6 +180,7 @@ struct ParsedPeerOffer {
     uint64_t endpoint_version;
     uint8_t endpoint_family;
     uint16_t endpoint_port;
+    uint8_t endpoint_addr[16];
     std::string endpoint;
 };
 
@@ -236,6 +242,8 @@ bool ParsePeerOfferPayload(const uint8_t* payload, size_t length, ParsedPeerOffe
     out_offer->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
     out_offer->endpoint_family = payload[12];
     out_offer->endpoint_port = packet_tunnel::read_u16_be(payload + 14);
+    memset(out_offer->endpoint_addr, 0, sizeof(out_offer->endpoint_addr));
+    memcpy(out_offer->endpoint_addr, payload + 16, sizeof(out_offer->endpoint_addr));
     out_offer->endpoint = PeerEndpointToString(out_offer->endpoint_family, payload + 16, out_offer->endpoint_port);
     return true;
 }
@@ -262,6 +270,33 @@ bool ParsePeerDisablePayload(const uint8_t* payload, size_t length, ParsedPeerDi
     return true;
 }
 
+bool SockaddrEquals(const sockaddr_storage& left,
+                    int left_len,
+                    const sockaddr_storage& right,
+                    int right_len) {
+    (void)left_len;
+    (void)right_len;
+    if (left.ss_family != right.ss_family) {
+        return false;
+    }
+
+    if (left.ss_family == AF_INET) {
+        const sockaddr_in* left4 = reinterpret_cast<const sockaddr_in*>(&left);
+        const sockaddr_in* right4 = reinterpret_cast<const sockaddr_in*>(&right);
+        return left4->sin_port == right4->sin_port &&
+               left4->sin_addr.S_un.S_addr == right4->sin_addr.S_un.S_addr;
+    }
+
+    if (left.ss_family == AF_INET6) {
+        const sockaddr_in6* left6 = reinterpret_cast<const sockaddr_in6*>(&left);
+        const sockaddr_in6* right6 = reinterpret_cast<const sockaddr_in6*>(&right);
+        return left6->sin6_port == right6->sin6_port &&
+               memcmp(&left6->sin6_addr, &right6->sin6_addr, sizeof(left6->sin6_addr)) == 0;
+    }
+
+    return false;
+}
+
 }  // namespace
 
 PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
@@ -277,6 +312,7 @@ PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
       mtu_(mtu),
       wintun_manager_(wintun_manager),
       sock_(INVALID_SOCKET),
+      socket_family_(AF_UNSPEC),
       connected_(false),
       stop_requested_(false),
       last_receive_tick_(0),
@@ -369,6 +405,9 @@ void PacketTunnelClient::Stop() {
 }
 
 bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
+    server_endpoint_ = UdpEndpoint();
+    socket_family_ = AF_UNSPEC;
+
     struct addrinfo hints = {};
     struct addrinfo* result = NULL;
     hints.ai_family = AF_UNSPEC;
@@ -391,6 +430,11 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
             continue;
         }
 
+        if (rp->ai_family == AF_INET6) {
+            DWORD dual_stack = 0;
+            setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&dual_stack), sizeof(dual_stack));
+        }
+
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&kSocketBufferBytes, sizeof(kSocketBufferBytes));
         setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&kSocketBufferBytes, sizeof(kSocketBufferBytes));
 
@@ -399,15 +443,27 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         DWORD recv_timeout = kSocketReadTimeoutMs;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&recv_timeout, sizeof(recv_timeout));
 
-        if (connect(sock, rp->ai_addr, (int)rp->ai_addrlen) != SOCKET_ERROR) {
-            sock_ = sock;
-            connected = true;
-            PacketTunnelDebugLog("udp socket connected to " + tunnel_server_ip_ +
-                                 ":" + std::to_string(tunnel_port_));
-            break;
-        }
+        BOOL disable_udp_connreset = FALSE;
+        DWORD bytes_returned = 0;
+        WSAIoctl(sock,
+                 SIO_UDP_CONNRESET,
+                 &disable_udp_connreset,
+                 sizeof(disable_udp_connreset),
+                 NULL,
+                 0,
+                 &bytes_returned,
+                 NULL,
+                 NULL);
 
-        closesocket(sock);
+        sock_ = sock;
+        socket_family_ = rp->ai_family;
+        server_endpoint_.addr_len = static_cast<int>(rp->ai_addrlen);
+        memcpy(&server_endpoint_.addr, rp->ai_addr, rp->ai_addrlen);
+        server_endpoint_.valid = true;
+        connected = true;
+        PacketTunnelDebugLog("udp socket ready for relay server " + tunnel_server_ip_ +
+                             ":" + std::to_string(tunnel_port_));
+        break;
     }
 
     freeaddrinfo(result);
@@ -450,37 +506,54 @@ bool PacketTunnelClient::SendHandshake(std::wstring* error_msg) {
     PacketTunnelDebugLog("sending handshake: session=" + session_uuid_ +
                          " mtu=" + std::to_string(mtu_) +
                          " virtual_ip=" + virtual_ip_);
-    return SendDatagram(handshake.data(), handshake.size(), error_msg);
+    return SendDatagramToEndpoint(server_endpoint_, handshake.data(), handshake.size(), error_msg);
 }
 
 bool PacketTunnelClient::ReceiveHandshakeAck(std::wstring* error_msg) {
     uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
-    int received = RecvDatagram(ack, sizeof(ack), error_msg);
-    if (received != (int)sizeof(ack)) {
-        if (received >= 0 && error_msg != NULL) {
-            *error_msg = L"IP Tunnel ack size mismatch";
+    while (!stop_requested_) {
+        sockaddr_storage source_addr = {};
+        int source_addr_len = 0;
+        int received = RecvDatagramFrom(ack, sizeof(ack), &source_addr, &source_addr_len, error_msg);
+        if (received < 0) {
+            return false;
         }
-        return false;
-    }
-
-    if (ack[0] != packet_tunnel::kProtocolVersion) {
-        if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel ack version mismatch";
+        if (received == 0) {
+            continue;
         }
-        return false;
-    }
-
-    if (ack[1] != packet_tunnel::kStatusOk) {
-        if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel ack rejected, status=" + Utf8ToWide(std::to_string((int)ack[1]));
+        if (!IsServerEndpoint(source_addr, source_addr_len)) {
+            continue;
         }
-        return false;
-    }
+        if (received != (int)sizeof(ack)) {
+            if (error_msg != NULL) {
+                *error_msg = L"IP Tunnel ack size mismatch";
+            }
+            return false;
+        }
 
-    last_receive_tick_ = GetTickCount64();
-    PacketTunnelDebugLog("received handshake ack: mtu=" + std::to_string(mtu_) +
-                         " virtual_ip=" + virtual_ip_);
-    return true;
+        if (ack[0] != packet_tunnel::kProtocolVersion) {
+            if (error_msg != NULL) {
+                *error_msg = L"IP Tunnel ack version mismatch";
+            }
+            return false;
+        }
+
+        if (ack[1] != packet_tunnel::kStatusOk) {
+            if (error_msg != NULL) {
+                *error_msg = L"IP Tunnel ack rejected, status=" + Utf8ToWide(std::to_string((int)ack[1]));
+            }
+            return false;
+        }
+
+        last_receive_tick_ = GetTickCount64();
+        PacketTunnelDebugLog("received handshake ack: mtu=" + std::to_string(mtu_) +
+                             " virtual_ip=" + virtual_ip_);
+        return true;
+    }
+    if (error_msg != NULL) {
+        *error_msg = L"IP Tunnel handshake interrupted";
+    }
+    return false;
 }
 
 bool PacketTunnelClient::StartThreads(std::wstring* error_msg) {
@@ -501,7 +574,13 @@ void PacketTunnelClient::SocketReadLoop() {
     std::vector<uint8_t> buffer(65535);
     while (!stop_requested_) {
         std::wstring err;
-        int received = RecvDatagram(buffer.data(), buffer.size(), &err);
+        sockaddr_storage source_addr = {};
+        int source_addr_len = 0;
+        int received = RecvDatagramFrom(buffer.data(),
+                                        buffer.size(),
+                                        &source_addr,
+                                        &source_addr_len,
+                                        &err);
         if (received < 0) {
             if (!err.empty()) {
                 PacketTunnelDebugLog("socket read loop stopped: " + WideToUtf8(err));
@@ -511,8 +590,6 @@ void PacketTunnelClient::SocketReadLoop() {
         if (received == 0) {
             continue;
         }
-
-        last_receive_tick_ = GetTickCount64();
 
         if (received < (int)packet_tunnel::kFrameHeaderSize) {
             continue;
@@ -524,23 +601,45 @@ void PacketTunnelClient::SocketReadLoop() {
             continue;
         }
 
-        if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
-            continue;
-        }
+        const bool from_server = IsServerEndpoint(source_addr, source_addr_len);
+        std::string peer_virtual_ip;
+        const bool from_known_peer = !from_server &&
+                                     TryResolvePeerBySource(source_addr, source_addr_len, &peer_virtual_ip);
 
-        if (HandlePeerControlFrame(frame_type,
-                                   buffer.data() + packet_tunnel::kFrameHeaderSize,
-                                   payload_len)) {
-            continue;
+        if (from_server) {
+            last_receive_tick_ = GetTickCount64();
+
+            if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
+                continue;
+            }
+
+            if (HandlePeerControlFrame(frame_type,
+                                       buffer.data() + packet_tunnel::kFrameHeaderSize,
+                                       payload_len)) {
+                continue;
+            }
         }
 
         if (frame_type == packet_tunnel::kFrameIpv4Packet && wintun_manager_ != NULL) {
+            if (from_known_peer &&
+                (payload_len < 20 ||
+                 Ipv4ToString(buffer.data() + packet_tunnel::kFrameHeaderSize + 12) != peer_virtual_ip)) {
+                PacketTunnelDebugLog("ignore peer ipv4 packet with mismatched inner src peer=" +
+                                     peer_virtual_ip);
+                continue;
+            }
             std::string desc;
             if (!IsNoisyUdpForLogging(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len) &&
                 TryDescribeUdpPacket(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len, &desc)) {
-                PacketTunnelDebugLog("udp tunnel->wintun " + desc);
+                PacketTunnelDebugLog(std::string(from_known_peer ? "udp peer->wintun " : "udp tunnel->wintun ") + desc);
             }
             wintun_manager_->WritePacket(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len, NULL);
+            continue;
+        }
+
+        if (!from_server && !from_known_peer) {
+            PacketTunnelDebugLog("ignore packet from unknown endpoint frame=" +
+                                 PacketTunnelFrameName(frame_type));
         }
     }
 
@@ -584,12 +683,32 @@ void PacketTunnelClient::WintunReadLoop() {
             continue;
         }
 
+        std::string desc;
+        if (!IsNoisyUdpForLogging(packet.data(), packet.size()) &&
+            TryDescribeUdpPacket(packet.data(), packet.size(), &desc)) {
+            const bool is_udp = packet.size() >= 20 && packet[9] == IPPROTO_UDP;
+            if (is_udp) {
+                std::string dst_virtual_ip = Ipv4ToString(packet.data() + 16);
+                UdpEndpoint peer_endpoint;
+                if (TryBuildPeerEndpoint(dst_virtual_ip, &peer_endpoint)) {
+                    if (SendFrameToEndpoint(peer_endpoint,
+                                            packet_tunnel::kFrameIpv4Packet,
+                                            packet.data(),
+                                            packet.size(),
+                                            NULL)) {
+                        PacketTunnelDebugLog("udp wintun->peer " + desc);
+                        continue;
+                    }
+                    PacketTunnelDebugLog("udp peer send failed, fallback to relay " + desc);
+                }
+            }
+        }
+
         if (!SendFrame(packet_tunnel::kFrameIpv4Packet, packet.data(), packet.size(), NULL)) {
             PacketTunnelDebugLog("wintun read loop send failed");
             break;
         }
 
-        std::string desc;
         if (!IsNoisyUdpForLogging(packet.data(), packet.size()) &&
             TryDescribeUdpPacket(packet.data(), packet.size(), &desc)) {
             PacketTunnelDebugLog("udp wintun->tunnel " + desc);
@@ -683,9 +802,11 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             return true;
         }
         if (peer_link_manager_ != NULL) {
-            peer_link_manager_->ObservePeerFrame(offer.peer_virtual_ip,
-                                                 offer.endpoint_version,
-                                                 PeerRouteState::OfferReceived);
+            peer_link_manager_->UpdatePeerOffer(offer.peer_virtual_ip,
+                                                offer.endpoint_version,
+                                                offer.endpoint_family,
+                                                offer.endpoint_addr,
+                                                offer.endpoint_port);
         }
         PacketTunnelDebugLog("peer control peer_offer: peer=" + offer.peer_virtual_ip +
                              " version=" + std::to_string(offer.endpoint_version) +
@@ -811,7 +932,116 @@ bool PacketTunnelClient::SendPeerDisableFrame(const std::string& target_peer_vir
     return SendFrame(packet_tunnel::kFramePeerDisable, payload.data(), payload.size(), NULL);
 }
 
-bool PacketTunnelClient::SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg) {
+bool PacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtual_ip,
+                                              UdpEndpoint* endpoint) const {
+    if (endpoint == NULL || peer_link_manager_ == NULL) {
+        return false;
+    }
+
+    PeerRouteStatus route = {};
+    if (!peer_link_manager_->TryGetDirectRoute(peer_virtual_ip, &route)) {
+        return false;
+    }
+
+    ZeroMemory(&endpoint->addr, sizeof(endpoint->addr));
+    endpoint->addr_len = 0;
+    endpoint->valid = false;
+
+    if (socket_family_ == AF_INET && route.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4) {
+        sockaddr_in* addr4 = reinterpret_cast<sockaddr_in*>(&endpoint->addr);
+        addr4->sin_family = AF_INET;
+        addr4->sin_port = htons(route.endpoint_port);
+        memcpy(&addr4->sin_addr, route.endpoint_addr, 4);
+        endpoint->addr_len = sizeof(sockaddr_in);
+        endpoint->valid = true;
+        return true;
+    }
+
+    if (socket_family_ == AF_INET6) {
+        sockaddr_in6* addr6 = reinterpret_cast<sockaddr_in6*>(&endpoint->addr);
+        addr6->sin6_family = AF_INET6;
+        addr6->sin6_port = htons(route.endpoint_port);
+        if (route.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv6) {
+            memcpy(&addr6->sin6_addr, route.endpoint_addr, 16);
+            endpoint->addr_len = sizeof(sockaddr_in6);
+            endpoint->valid = true;
+            return true;
+        }
+        if (route.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4) {
+            memset(&addr6->sin6_addr, 0, sizeof(addr6->sin6_addr));
+            addr6->sin6_addr.u.Word[5] = 0xFFFF;
+            memcpy(&addr6->sin6_addr.u.Byte[12], route.endpoint_addr, 4);
+            endpoint->addr_len = sizeof(sockaddr_in6);
+            endpoint->valid = true;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool PacketTunnelClient::TryResolvePeerBySource(const sockaddr_storage& source_addr,
+                                                int source_addr_len,
+                                                std::string* peer_virtual_ip) const {
+    if (peer_link_manager_ == NULL) {
+        return false;
+    }
+
+    uint8_t endpoint_family = packet_tunnel::kPeerEndpointFamilyUnknown;
+    uint16_t endpoint_port = 0;
+    uint8_t endpoint_addr[16] = {};
+
+    if (source_addr.ss_family == AF_INET) {
+        const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(&source_addr);
+        endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
+        endpoint_port = ntohs(addr4->sin_port);
+        memcpy(endpoint_addr, &addr4->sin_addr, 4);
+    } else if (source_addr.ss_family == AF_INET6) {
+        const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(&source_addr);
+        endpoint_port = ntohs(addr6->sin6_port);
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&addr6->sin6_addr);
+        const uint8_t v4_mapped_prefix[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
+        if (memcmp(bytes, v4_mapped_prefix, sizeof(v4_mapped_prefix)) == 0) {
+            endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
+            memcpy(endpoint_addr, bytes + 12, 4);
+        } else {
+            endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv6;
+            memcpy(endpoint_addr, bytes, 16);
+        }
+    } else {
+        return false;
+    }
+
+    PeerRouteStatus route = {};
+    if (!peer_link_manager_->TryResolveByEndpoint(endpoint_family,
+                                                  endpoint_addr,
+                                                  endpoint_port,
+                                                  &route)) {
+        return false;
+    }
+
+    if (peer_virtual_ip != NULL) {
+        *peer_virtual_ip = route.peer_virtual_ip;
+    }
+    return true;
+}
+
+bool PacketTunnelClient::IsServerEndpoint(const sockaddr_storage& source_addr,
+                                          int source_addr_len) const {
+    if (!server_endpoint_.valid) {
+        return false;
+    }
+    return SockaddrEquals(source_addr,
+                          source_addr_len,
+                          server_endpoint_.addr,
+                          server_endpoint_.addr_len);
+}
+
+bool PacketTunnelClient::SendFrameToEndpoint(const UdpEndpoint& endpoint,
+                                             uint8_t frame_type,
+                                             const uint8_t* data,
+                                             size_t length,
+                                             std::wstring* error_msg) {
     std::vector<uint8_t> frame(packet_tunnel::kFrameHeaderSize + length, 0);
     frame[0] = frame_type;
     *(uint16_t*)(&frame[1]) = htons((uint16_t)length);
@@ -820,13 +1050,28 @@ bool PacketTunnelClient::SendFrame(uint8_t frame_type, const uint8_t* data, size
     }
 
     EnterCriticalSection(&send_lock_);
-    bool ok = SendDatagram(frame.data(), frame.size(), error_msg);
+    bool ok = SendDatagramToEndpoint(endpoint, frame.data(), frame.size(), error_msg);
     LeaveCriticalSection(&send_lock_);
     return ok;
 }
 
-bool PacketTunnelClient::SendDatagram(const uint8_t* data, size_t length, std::wstring* error_msg) {
-    int n = send(sock_, reinterpret_cast<const char*>(data), static_cast<int>(length), 0);
+bool PacketTunnelClient::SendDatagramToEndpoint(const UdpEndpoint& endpoint,
+                                                const uint8_t* data,
+                                                size_t length,
+                                                std::wstring* error_msg) {
+    if (!endpoint.valid) {
+        if (error_msg != NULL) {
+            *error_msg = L"IP Tunnel send target is invalid";
+        }
+        return false;
+    }
+
+    int n = sendto(sock_,
+                   reinterpret_cast<const char*>(data),
+                   static_cast<int>(length),
+                   0,
+                   reinterpret_cast<const sockaddr*>(&endpoint.addr),
+                   endpoint.addr_len);
     if (n != (int)length) {
         if (error_msg != NULL) {
             *error_msg = BuildSocketError(L"IP Tunnel send failed", WSAGetLastError());
@@ -836,11 +1081,27 @@ bool PacketTunnelClient::SendDatagram(const uint8_t* data, size_t length, std::w
     return true;
 }
 
-int PacketTunnelClient::RecvDatagram(uint8_t* data, size_t length, std::wstring* error_msg) {
-    int n = recv(sock_, reinterpret_cast<char*>(data), static_cast<int>(length), 0);
+int PacketTunnelClient::RecvDatagramFrom(uint8_t* data,
+                                         size_t length,
+                                         sockaddr_storage* source_addr,
+                                         int* source_addr_len,
+                                         std::wstring* error_msg) {
+    int addr_len = static_cast<int>(sizeof(sockaddr_storage));
+    if (source_addr_len != NULL && *source_addr_len > 0) {
+        addr_len = *source_addr_len;
+    }
+    int n = recvfrom(sock_,
+                     reinterpret_cast<char*>(data),
+                     static_cast<int>(length),
+                     0,
+                     (source_addr != NULL) ? reinterpret_cast<sockaddr*>(source_addr) : NULL,
+                     (source_addr_len != NULL) ? &addr_len : NULL);
+    if (source_addr_len != NULL) {
+        *source_addr_len = addr_len;
+    }
     if (n == SOCKET_ERROR) {
         int err = WSAGetLastError();
-        if (err == WSAETIMEDOUT) {
+        if (err == WSAETIMEDOUT || err == WSAECONNRESET) {
             return 0;
         }
         if (error_msg != NULL) {
@@ -855,6 +1116,20 @@ int PacketTunnelClient::RecvDatagram(uint8_t* data, size_t length, std::wstring*
         return -1;
     }
     return n;
+}
+
+bool PacketTunnelClient::SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg) {
+    return SendFrameToEndpoint(server_endpoint_, frame_type, data, length, error_msg);
+}
+
+bool PacketTunnelClient::SendDatagram(const uint8_t* data, size_t length, std::wstring* error_msg) {
+    return SendDatagramToEndpoint(server_endpoint_, data, length, error_msg);
+}
+
+int PacketTunnelClient::RecvDatagram(uint8_t* data, size_t length, std::wstring* error_msg) {
+    sockaddr_storage source_addr = {};
+    int source_addr_len = 0;
+    return RecvDatagramFrom(data, length, &source_addr, &source_addr_len, error_msg);
 }
 
 uint32_t PacketTunnelClient::ParseVirtualIp(std::wstring* error_msg) const {

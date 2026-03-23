@@ -3,7 +3,9 @@
 #include "linux_tun_manager.h"
 
 #include <atomic>
+#include <cstring>
 #include <mutex>
+#include <netinet/in.h>
 #include <string>
 #include <thread>
 
@@ -24,6 +26,16 @@ public:
     bool IsConnected() const { return connected_; }
 
 private:
+    struct UdpEndpoint {
+        sockaddr_storage addr;
+        socklen_t addr_len;
+        bool valid;
+
+        UdpEndpoint() : addr_len(0), valid(false) {
+            memset(&addr, 0, sizeof(addr));
+        }
+    };
+
     bool ConnectSocket(std::string* error);
     bool SendHandshake(std::string* error);
     bool ReceiveHandshakeAck(std::string* error);
@@ -36,6 +48,27 @@ private:
     bool SendPeerDisableFrame(const std::string& target_peer_virtual_ip,
                               uint64_t endpoint_version,
                               uint8_t reason);
+    bool TryBuildPeerEndpoint(const std::string& peer_virtual_ip,
+                              UdpEndpoint* endpoint) const;
+    bool TryResolvePeerBySource(const sockaddr_storage& source_addr,
+                                socklen_t source_addr_len,
+                                std::string* peer_virtual_ip) const;
+    bool IsServerEndpoint(const sockaddr_storage& source_addr,
+                          socklen_t source_addr_len) const;
+    bool SendFrameToEndpoint(const UdpEndpoint& endpoint,
+                             uint8_t frame_type,
+                             const uint8_t* data,
+                             size_t length,
+                             std::string* error);
+    bool SendDatagramToEndpoint(const UdpEndpoint& endpoint,
+                                const uint8_t* data,
+                                size_t length,
+                                std::string* error);
+    int RecvDatagramFrom(uint8_t* data,
+                         size_t length,
+                         sockaddr_storage* source_addr,
+                         socklen_t* source_addr_len,
+                         std::string* error);
     void SocketReadLoop();
     void TunReadLoop();
     void HeartbeatLoop();
@@ -51,6 +84,8 @@ private:
     uint16_t mtu_;
     LinuxTunManager* tun_manager_;
     int sock_;
+    int socket_family_;
+    UdpEndpoint server_endpoint_;
     std::atomic<bool> connected_;
     std::atomic<bool> stop_requested_;
     std::atomic<unsigned long long> last_receive_ms_;
