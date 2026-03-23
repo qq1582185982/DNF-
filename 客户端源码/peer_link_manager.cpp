@@ -14,10 +14,18 @@ void PeerLinkManager::ResetAll() {
 }
 
 void PeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip, uint64_t endpoint_version) {
+    ObservePeerFrame(peer_virtual_ip, endpoint_version, PeerRouteState::OfferReceived);
+}
+
+void PeerLinkManager::ObservePeerFrame(const std::string& peer_virtual_ip,
+                                       uint64_t endpoint_version,
+                                       PeerRouteState state) {
     std::lock_guard<std::mutex> lock(mutex_);
     Entry& entry = peers_[peer_virtual_ip];
-    entry.endpoint_version = endpoint_version;
-    entry.state = PeerRouteState::OfferReceived;
+    if (endpoint_version > entry.endpoint_version) {
+        entry.endpoint_version = endpoint_version;
+    }
+    entry.state = state;
 }
 
 void PeerLinkManager::MarkPeerProbing(const std::string& peer_virtual_ip) {

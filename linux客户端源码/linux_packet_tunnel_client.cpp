@@ -1,5 +1,6 @@
 #include "linux_packet_tunnel_client.h"
 
+#include "linux_client_common.h"
 #include "linux_peer_link_manager.h"
 #include "packet_tunnel_protocol.h"
 
@@ -26,6 +27,106 @@ unsigned long long now_ms() {
     return static_cast<unsigned long long>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+struct ParsedLinuxPeerOffer {
+    std::string peer_virtual_ip;
+    uint64_t endpoint_version;
+    uint8_t endpoint_family;
+    uint16_t endpoint_port;
+    std::string endpoint;
+};
+
+struct ParsedLinuxPeerSignal {
+    std::string peer_virtual_ip;
+    uint64_t endpoint_version;
+    uint32_t nonce;
+};
+
+struct ParsedLinuxPeerDisable {
+    std::string peer_virtual_ip;
+    uint64_t endpoint_version;
+    uint8_t reason;
+};
+
+std::string LinuxFrameName(uint8_t frame_type) {
+    switch (frame_type) {
+    case packet_tunnel::kFrameHeartbeat:
+        return "heartbeat";
+    case packet_tunnel::kFrameHeartbeatAck:
+        return "heartbeat_ack";
+    case packet_tunnel::kFrameIpv4Packet:
+        return "ipv4_packet";
+    case packet_tunnel::kFramePeerOffer:
+        return "peer_offer";
+    case packet_tunnel::kFramePeerHello:
+        return "peer_hello";
+    case packet_tunnel::kFramePeerAck:
+        return "peer_ack";
+    case packet_tunnel::kFramePeerKeepalive:
+        return "peer_keepalive";
+    case packet_tunnel::kFramePeerDisable:
+        return "peer_disable";
+    default:
+        return "unknown";
+    }
+}
+
+std::string LinuxIpv4ToString(const uint8_t* addr) {
+    char buffer[INET_ADDRSTRLEN] = {};
+    if (inet_ntop(AF_INET, addr, buffer, sizeof(buffer)) == NULL) {
+        return "?";
+    }
+    return std::string(buffer);
+}
+
+std::string LinuxPeerEndpointToString(uint8_t family, const uint8_t* addr, uint16_t port) {
+    char buffer[INET6_ADDRSTRLEN] = {};
+    if (family == packet_tunnel::kPeerEndpointFamilyIpv4) {
+        if (inet_ntop(AF_INET, addr, buffer, sizeof(buffer)) != NULL) {
+            return std::string(buffer) + ":" + std::to_string(port);
+        }
+    } else if (family == packet_tunnel::kPeerEndpointFamilyIpv6) {
+        if (inet_ntop(AF_INET6, addr, buffer, sizeof(buffer)) != NULL) {
+            return "[" + std::string(buffer) + "]:" + std::to_string(port);
+        }
+    }
+    return "unknown";
+}
+
+bool ParseLinuxPeerOfferPayload(const uint8_t* payload, size_t length, ParsedLinuxPeerOffer* out_offer) {
+    if (payload == NULL || out_offer == NULL || length != packet_tunnel::kPeerOfferPayloadSize) {
+        return false;
+    }
+
+    out_offer->peer_virtual_ip = LinuxIpv4ToString(payload);
+    out_offer->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
+    out_offer->endpoint_family = payload[12];
+    out_offer->endpoint_port = packet_tunnel::read_u16_be(payload + 14);
+    out_offer->endpoint = LinuxPeerEndpointToString(out_offer->endpoint_family, payload + 16, out_offer->endpoint_port);
+    return true;
+}
+
+bool ParseLinuxPeerSignalPayload(const uint8_t* payload, size_t length, ParsedLinuxPeerSignal* out_signal) {
+    if (payload == NULL || out_signal == NULL || length != packet_tunnel::kPeerSignalPayloadSize) {
+        return false;
+    }
+
+    out_signal->peer_virtual_ip = LinuxIpv4ToString(payload);
+    out_signal->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
+    out_signal->nonce = packet_tunnel::read_u32_be(payload + 12);
+    return true;
+}
+
+bool ParseLinuxPeerDisablePayload(const uint8_t* payload, size_t length, ParsedLinuxPeerDisable* out_disable) {
+    if (payload == NULL || out_disable == NULL || length != packet_tunnel::kPeerDisablePayloadSize) {
+        return false;
+    }
+
+    out_disable->peer_virtual_ip = LinuxIpv4ToString(payload);
+    out_disable->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
+    out_disable->reason = payload[12];
+    return true;
 }
 
 }  // namespace
@@ -256,6 +357,12 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
             continue;
         }
 
+        if (HandlePeerControlFrame(frame_type,
+                                   buffer.data() + packet_tunnel::kFrameHeaderSize,
+                                   payload_len)) {
+            continue;
+        }
+
         if (frame_type == packet_tunnel::kFrameIpv4Packet && tun_manager_ != NULL) {
             tun_manager_->WritePacket(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len, NULL);
         }
@@ -263,6 +370,74 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
 
     connected_ = false;
     stop_requested_ = true;
+}
+
+bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
+                                                     const uint8_t* payload,
+                                                     size_t length) {
+    if (frame_type == packet_tunnel::kFramePeerOffer) {
+        ParsedLinuxPeerOffer offer = {};
+        if (!ParseLinuxPeerOfferPayload(payload, length, &offer)) {
+            LogWarn("ignore invalid peer_offer frame len=" + std::to_string(length));
+            return true;
+        }
+        if (peer_link_manager_ != NULL) {
+            peer_link_manager_->ObservePeerFrame(offer.peer_virtual_ip,
+                                                 offer.endpoint_version,
+                                                 LinuxPeerRouteState::OfferReceived);
+        }
+        LogInfo("peer control peer_offer: peer=" + offer.peer_virtual_ip +
+                " version=" + std::to_string(offer.endpoint_version) +
+                " endpoint=" + offer.endpoint);
+        return true;
+    }
+
+    if (frame_type == packet_tunnel::kFramePeerHello ||
+        frame_type == packet_tunnel::kFramePeerAck ||
+        frame_type == packet_tunnel::kFramePeerKeepalive) {
+        ParsedLinuxPeerSignal signal = {};
+        if (!ParseLinuxPeerSignalPayload(payload, length, &signal)) {
+            LogWarn("ignore invalid " + LinuxFrameName(frame_type) +
+                    " frame len=" + std::to_string(length));
+            return true;
+        }
+
+        if (peer_link_manager_ != NULL) {
+            LinuxPeerRouteState state = LinuxPeerRouteState::Probing;
+            if (frame_type == packet_tunnel::kFramePeerAck ||
+                frame_type == packet_tunnel::kFramePeerKeepalive) {
+                state = LinuxPeerRouteState::DirectReady;
+            }
+            peer_link_manager_->ObservePeerFrame(signal.peer_virtual_ip,
+                                                 signal.endpoint_version,
+                                                 state);
+        }
+
+        LogInfo("peer control " + LinuxFrameName(frame_type) +
+                ": peer=" + signal.peer_virtual_ip +
+                " version=" + std::to_string(signal.endpoint_version) +
+                " nonce=" + std::to_string(signal.nonce));
+        return true;
+    }
+
+    if (frame_type == packet_tunnel::kFramePeerDisable) {
+        ParsedLinuxPeerDisable disable = {};
+        if (!ParseLinuxPeerDisablePayload(payload, length, &disable)) {
+            LogWarn("ignore invalid peer_disable frame len=" + std::to_string(length));
+            return true;
+        }
+        if (peer_link_manager_ != NULL) {
+            peer_link_manager_->ObservePeerFrame(disable.peer_virtual_ip,
+                                                 disable.endpoint_version,
+                                                 LinuxPeerRouteState::Cooldown);
+        }
+        LogInfo("peer control peer_disable: peer=" + disable.peer_virtual_ip +
+                " version=" + std::to_string(disable.endpoint_version) +
+                " reason=" + std::to_string(disable.reason));
+        return true;
+    }
+
+    return false;
 }
 
 void LinuxPacketTunnelClient::TunReadLoop() {

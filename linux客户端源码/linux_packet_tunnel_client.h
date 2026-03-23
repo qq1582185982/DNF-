@@ -28,6 +28,7 @@ private:
     bool SendHandshake(std::string* error);
     bool ReceiveHandshakeAck(std::string* error);
     bool StartThreads(std::string* error);
+    bool HandlePeerControlFrame(uint8_t frame_type, const uint8_t* payload, size_t length);
     void SocketReadLoop();
     void TunReadLoop();
     void HeartbeatLoop();

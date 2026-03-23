@@ -30,6 +30,9 @@ public:
     void ResetAll();
 
     void UpdatePeerOffer(const std::string& peer_virtual_ip, uint64_t endpoint_version);
+    void ObservePeerFrame(const std::string& peer_virtual_ip,
+                          uint64_t endpoint_version,
+                          PeerRouteState state);
     void MarkPeerProbing(const std::string& peer_virtual_ip);
     void MarkPeerDirectReady(const std::string& peer_virtual_ip);
     void MarkPeerCooldown(const std::string& peer_virtual_ip);

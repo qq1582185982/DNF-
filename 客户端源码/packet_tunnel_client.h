@@ -35,6 +35,7 @@ private:
     void SocketReadLoop();
     void WintunReadLoop();
     void HeartbeatLoop();
+    bool HandlePeerControlFrame(uint8_t frame_type, const uint8_t* payload, size_t length);
     bool SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg);
     bool SendDatagram(const uint8_t* data, size_t length, std::wstring* error_msg);
     int RecvDatagram(uint8_t* data, size_t length, std::wstring* error_msg);

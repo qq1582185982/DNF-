@@ -238,6 +238,7 @@
 #include <pthread.h>
 #include "tcp_config_server.h"
 #include "packet_tunnel_protocol.h"
+#include "peer_coord.h"
 #include "tun_manager.h"
 
 using namespace std;
@@ -1003,6 +1004,99 @@ string Logger::current_log_level = "INFO";
 string Logger::log_dir = "log";
 string Logger::current_date = "";
 bool Logger::auto_rotate = true;
+
+struct ParsedPeerOfferFrame {
+    uint32_t peer_virtual_ip_be;
+    uint64_t endpoint_version;
+    uint8_t endpoint_family;
+    uint16_t endpoint_port;
+};
+
+struct ParsedPeerSignalFrame {
+    uint32_t peer_virtual_ip_be;
+    uint64_t endpoint_version;
+    uint32_t nonce;
+};
+
+struct ParsedPeerDisableFrame {
+    uint32_t peer_virtual_ip_be;
+    uint64_t endpoint_version;
+    uint8_t reason;
+};
+
+static string packet_tunnel_frame_name(uint8_t frame_type) {
+    switch (frame_type) {
+    case packet_tunnel::kFrameHeartbeat:
+        return "heartbeat";
+    case packet_tunnel::kFrameHeartbeatAck:
+        return "heartbeat_ack";
+    case packet_tunnel::kFrameIpv4Packet:
+        return "ipv4_packet";
+    case packet_tunnel::kFramePeerOffer:
+        return "peer_offer";
+    case packet_tunnel::kFramePeerHello:
+        return "peer_hello";
+    case packet_tunnel::kFramePeerAck:
+        return "peer_ack";
+    case packet_tunnel::kFramePeerKeepalive:
+        return "peer_keepalive";
+    case packet_tunnel::kFramePeerDisable:
+        return "peer_disable";
+    default:
+        return "unknown";
+    }
+}
+
+static bool is_peer_control_frame(uint8_t frame_type) {
+    return frame_type == packet_tunnel::kFramePeerOffer ||
+           frame_type == packet_tunnel::kFramePeerHello ||
+           frame_type == packet_tunnel::kFramePeerAck ||
+           frame_type == packet_tunnel::kFramePeerKeepalive ||
+           frame_type == packet_tunnel::kFramePeerDisable;
+}
+
+static bool parse_peer_offer_frame(const uint8_t* payload,
+                                   size_t payload_len,
+                                   ParsedPeerOfferFrame* out_offer) {
+    if (payload == nullptr || out_offer == nullptr ||
+        payload_len != packet_tunnel::kPeerOfferPayloadSize) {
+        return false;
+    }
+
+    out_offer->peer_virtual_ip_be = packet_tunnel::read_u32_be(payload);
+    out_offer->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
+    out_offer->endpoint_family = payload[12];
+    out_offer->endpoint_port = packet_tunnel::read_u16_be(payload + 14);
+    return true;
+}
+
+static bool parse_peer_signal_frame(const uint8_t* payload,
+                                    size_t payload_len,
+                                    ParsedPeerSignalFrame* out_signal) {
+    if (payload == nullptr || out_signal == nullptr ||
+        payload_len != packet_tunnel::kPeerSignalPayloadSize) {
+        return false;
+    }
+
+    out_signal->peer_virtual_ip_be = packet_tunnel::read_u32_be(payload);
+    out_signal->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
+    out_signal->nonce = packet_tunnel::read_u32_be(payload + 12);
+    return true;
+}
+
+static bool parse_peer_disable_frame(const uint8_t* payload,
+                                     size_t payload_len,
+                                     ParsedPeerDisableFrame* out_disable) {
+    if (payload == nullptr || out_disable == nullptr ||
+        payload_len != packet_tunnel::kPeerDisablePayloadSize) {
+        return false;
+    }
+
+    out_disable->peer_virtual_ip_be = packet_tunnel::read_u32_be(payload);
+    out_disable->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
+    out_disable->reason = payload[12];
+    return true;
+}
 
 // ==================== IP替换辅助函数 ====================
 // 在payload中查找并替换IP地址(支持大端序和小端序)
@@ -1973,6 +2067,7 @@ private:
 
     ServerConfig config;
     string server_name;
+    PeerCoord peer_coord_;
     int listen_fd;
     map<string, shared_ptr<TunnelConnection>> connections;  // key: "client_addr:conn_id" - 使用智能指针
     mutex conn_mutex;
@@ -2497,6 +2592,7 @@ private:
                         packet_tunnel_sessions[virtual_ip_be] = session;
                         packet_tunnel_sessions_by_endpoint[client_str] = session;
                     }
+                    peer_coord_.ObservePeerFrame(virtual_ip, 0, PeerEndpointState::RelayOnly);
 
                     if (replaced_session && !replaced_session->use_udp && replaced_session->client_fd >= 0) {
                         replaced_session->active = false;
@@ -2537,6 +2633,67 @@ private:
                 if (!send_packet_tunnel_frame(session, packet_tunnel::kFrameHeartbeatAck, nullptr, 0)) {
                     session->active = false;
                 }
+                continue;
+            }
+
+            if (is_peer_control_frame(frame_type)) {
+                if (frame_type == packet_tunnel::kFramePeerOffer) {
+                    ParsedPeerOfferFrame offer = {};
+                    if (!parse_peer_offer_frame(payload, payload_len, &offer)) {
+                        Logger::warning("[IP Tunnel|" + session->session_uuid + "] invalid " +
+                                        packet_tunnel_frame_name(frame_type) +
+                                        " payload_len=" + to_string(payload_len));
+                        continue;
+                    }
+                    peer_coord_.ObservePeerFrame(ipv4_be_to_string(offer.peer_virtual_ip_be),
+                                                 offer.endpoint_version,
+                                                 PeerEndpointState::OfferPending);
+                    Logger::debug("[IP Tunnel|" + session->session_uuid + "] peer control " +
+                                  packet_tunnel_frame_name(frame_type) +
+                                  ": peer=" + ipv4_be_to_string(offer.peer_virtual_ip_be) +
+                                  " version=" + to_string(offer.endpoint_version) +
+                                  " family=" + to_string((int)offer.endpoint_family) +
+                                  " port=" + to_string(offer.endpoint_port));
+                    continue;
+                }
+
+                if (frame_type == packet_tunnel::kFramePeerDisable) {
+                    ParsedPeerDisableFrame disable = {};
+                    if (!parse_peer_disable_frame(payload, payload_len, &disable)) {
+                        Logger::warning("[IP Tunnel|" + session->session_uuid + "] invalid " +
+                                        packet_tunnel_frame_name(frame_type) +
+                                        " payload_len=" + to_string(payload_len));
+                        continue;
+                    }
+                    peer_coord_.ObservePeerFrame(ipv4_be_to_string(disable.peer_virtual_ip_be),
+                                                 disable.endpoint_version,
+                                                 PeerEndpointState::RelayOnly);
+                    Logger::debug("[IP Tunnel|" + session->session_uuid + "] peer control " +
+                                  packet_tunnel_frame_name(frame_type) +
+                                  ": peer=" + ipv4_be_to_string(disable.peer_virtual_ip_be) +
+                                  " version=" + to_string(disable.endpoint_version) +
+                                  " reason=" + to_string((int)disable.reason));
+                    continue;
+                }
+
+                ParsedPeerSignalFrame signal = {};
+                if (!parse_peer_signal_frame(payload, payload_len, &signal)) {
+                    Logger::warning("[IP Tunnel|" + session->session_uuid + "] invalid " +
+                                    packet_tunnel_frame_name(frame_type) +
+                                    " payload_len=" + to_string(payload_len));
+                    continue;
+                }
+                peer_coord_.ObservePeerFrame(ipv4_be_to_string(signal.peer_virtual_ip_be),
+                                             signal.endpoint_version,
+                                             frame_type == packet_tunnel::kFramePeerAck ||
+                                             frame_type == packet_tunnel::kFramePeerKeepalive
+                                                 ? PeerEndpointState::Active
+                                                 : PeerEndpointState::OfferPending);
+                Logger::debug("[IP Tunnel|" + session->session_uuid + "] peer control " +
+                              packet_tunnel_frame_name(frame_type) +
+                              ": peer=" + ipv4_be_to_string(signal.peer_virtual_ip_be) +
+                              " version=" + to_string(signal.endpoint_version) +
+                              " nonce=" + to_string(signal.nonce));
                 continue;
             }
 
@@ -2798,6 +2955,7 @@ private:
                 }
                 packet_tunnel_sessions[virtual_ip_be] = session;
             }
+            peer_coord_.ObservePeerFrame(virtual_ip, 0, PeerEndpointState::RelayOnly);
 
             if (replaced_session && replaced_session->client_fd != client_fd) {
                 replaced_session->active = false;
@@ -2833,6 +2991,67 @@ private:
                         Logger::warning("[IP Tunnel|" + session_uuid + "] 发送心跳确认失败");
                         break;
                     }
+                    continue;
+                }
+
+                if (is_peer_control_frame(frame_type)) {
+                    if (frame_type == packet_tunnel::kFramePeerOffer) {
+                        ParsedPeerOfferFrame offer = {};
+                        if (!parse_peer_offer_frame(payload.data(), payload_len, &offer)) {
+                            Logger::warning("[IP Tunnel|" + session_uuid + "] invalid " +
+                                            packet_tunnel_frame_name(frame_type) +
+                                            " payload_len=" + to_string(payload_len));
+                            continue;
+                        }
+                        peer_coord_.ObservePeerFrame(ipv4_be_to_string(offer.peer_virtual_ip_be),
+                                                     offer.endpoint_version,
+                                                     PeerEndpointState::OfferPending);
+                        Logger::debug("[IP Tunnel|" + session_uuid + "] peer control " +
+                                      packet_tunnel_frame_name(frame_type) +
+                                      ": peer=" + ipv4_be_to_string(offer.peer_virtual_ip_be) +
+                                      " version=" + to_string(offer.endpoint_version) +
+                                      " family=" + to_string((int)offer.endpoint_family) +
+                                      " port=" + to_string(offer.endpoint_port));
+                        continue;
+                    }
+
+                    if (frame_type == packet_tunnel::kFramePeerDisable) {
+                        ParsedPeerDisableFrame disable = {};
+                        if (!parse_peer_disable_frame(payload.data(), payload_len, &disable)) {
+                            Logger::warning("[IP Tunnel|" + session_uuid + "] invalid " +
+                                            packet_tunnel_frame_name(frame_type) +
+                                            " payload_len=" + to_string(payload_len));
+                            continue;
+                        }
+                        peer_coord_.ObservePeerFrame(ipv4_be_to_string(disable.peer_virtual_ip_be),
+                                                     disable.endpoint_version,
+                                                     PeerEndpointState::RelayOnly);
+                        Logger::debug("[IP Tunnel|" + session_uuid + "] peer control " +
+                                      packet_tunnel_frame_name(frame_type) +
+                                      ": peer=" + ipv4_be_to_string(disable.peer_virtual_ip_be) +
+                                      " version=" + to_string(disable.endpoint_version) +
+                                      " reason=" + to_string((int)disable.reason));
+                        continue;
+                    }
+
+                    ParsedPeerSignalFrame signal = {};
+                    if (!parse_peer_signal_frame(payload.data(), payload_len, &signal)) {
+                        Logger::warning("[IP Tunnel|" + session_uuid + "] invalid " +
+                                        packet_tunnel_frame_name(frame_type) +
+                                        " payload_len=" + to_string(payload_len));
+                        continue;
+                    }
+                    peer_coord_.ObservePeerFrame(ipv4_be_to_string(signal.peer_virtual_ip_be),
+                                                 signal.endpoint_version,
+                                                 frame_type == packet_tunnel::kFramePeerAck ||
+                                                 frame_type == packet_tunnel::kFramePeerKeepalive
+                                                     ? PeerEndpointState::Active
+                                                     : PeerEndpointState::OfferPending);
+                    Logger::debug("[IP Tunnel|" + session_uuid + "] peer control " +
+                                  packet_tunnel_frame_name(frame_type) +
+                                  ": peer=" + ipv4_be_to_string(signal.peer_virtual_ip_be) +
+                                  " version=" + to_string(signal.endpoint_version) +
+                                  " nonce=" + to_string(signal.nonce));
                     continue;
                 }
 

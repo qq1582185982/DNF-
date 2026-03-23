@@ -107,6 +107,98 @@ bool TryDescribeUdpPacket(const uint8_t* packet, size_t packet_len, std::string*
     return true;
 }
 
+struct ParsedPeerOffer {
+    std::string peer_virtual_ip;
+    uint64_t endpoint_version;
+    uint8_t endpoint_family;
+    uint16_t endpoint_port;
+    std::string endpoint;
+};
+
+struct ParsedPeerSignal {
+    std::string peer_virtual_ip;
+    uint64_t endpoint_version;
+    uint32_t nonce;
+};
+
+struct ParsedPeerDisable {
+    std::string peer_virtual_ip;
+    uint64_t endpoint_version;
+    uint8_t reason;
+};
+
+std::string PacketTunnelFrameName(uint8_t frame_type) {
+    switch (frame_type) {
+    case packet_tunnel::kFrameHeartbeat:
+        return "heartbeat";
+    case packet_tunnel::kFrameHeartbeatAck:
+        return "heartbeat_ack";
+    case packet_tunnel::kFrameIpv4Packet:
+        return "ipv4_packet";
+    case packet_tunnel::kFramePeerOffer:
+        return "peer_offer";
+    case packet_tunnel::kFramePeerHello:
+        return "peer_hello";
+    case packet_tunnel::kFramePeerAck:
+        return "peer_ack";
+    case packet_tunnel::kFramePeerKeepalive:
+        return "peer_keepalive";
+    case packet_tunnel::kFramePeerDisable:
+        return "peer_disable";
+    default:
+        return "unknown";
+    }
+}
+
+std::string PeerEndpointToString(uint8_t family, const uint8_t* addr, uint16_t port) {
+    char buffer[INET6_ADDRSTRLEN] = {};
+    if (family == packet_tunnel::kPeerEndpointFamilyIpv4) {
+        if (InetNtopA(AF_INET, const_cast<uint8_t*>(addr), buffer, sizeof(buffer)) != NULL) {
+            return std::string(buffer) + ":" + std::to_string(port);
+        }
+    } else if (family == packet_tunnel::kPeerEndpointFamilyIpv6) {
+        if (InetNtopA(AF_INET6, const_cast<uint8_t*>(addr), buffer, sizeof(buffer)) != NULL) {
+            return "[" + std::string(buffer) + "]:" + std::to_string(port);
+        }
+    }
+    return "unknown";
+}
+
+bool ParsePeerOfferPayload(const uint8_t* payload, size_t length, ParsedPeerOffer* out_offer) {
+    if (payload == NULL || out_offer == NULL || length != packet_tunnel::kPeerOfferPayloadSize) {
+        return false;
+    }
+
+    out_offer->peer_virtual_ip = Ipv4ToString(payload);
+    out_offer->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
+    out_offer->endpoint_family = payload[12];
+    out_offer->endpoint_port = packet_tunnel::read_u16_be(payload + 14);
+    out_offer->endpoint = PeerEndpointToString(out_offer->endpoint_family, payload + 16, out_offer->endpoint_port);
+    return true;
+}
+
+bool ParsePeerSignalPayload(const uint8_t* payload, size_t length, ParsedPeerSignal* out_signal) {
+    if (payload == NULL || out_signal == NULL || length != packet_tunnel::kPeerSignalPayloadSize) {
+        return false;
+    }
+
+    out_signal->peer_virtual_ip = Ipv4ToString(payload);
+    out_signal->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
+    out_signal->nonce = packet_tunnel::read_u32_be(payload + 12);
+    return true;
+}
+
+bool ParsePeerDisablePayload(const uint8_t* payload, size_t length, ParsedPeerDisable* out_disable) {
+    if (payload == NULL || out_disable == NULL || length != packet_tunnel::kPeerDisablePayloadSize) {
+        return false;
+    }
+
+    out_disable->peer_virtual_ip = Ipv4ToString(payload);
+    out_disable->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
+    out_disable->reason = payload[12];
+    return true;
+}
+
 }  // namespace
 
 PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
@@ -361,6 +453,12 @@ void PacketTunnelClient::SocketReadLoop() {
             continue;
         }
 
+        if (HandlePeerControlFrame(frame_type,
+                                   buffer.data() + packet_tunnel::kFrameHeaderSize,
+                                   payload_len)) {
+            continue;
+        }
+
         if (frame_type == packet_tunnel::kFrameIpv4Packet && wintun_manager_ != NULL) {
             std::string desc;
             if (!IsNoisyUdpForLogging(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len) &&
@@ -451,6 +549,74 @@ void PacketTunnelClient::HeartbeatLoop() {
 
     connected_ = false;
     stop_requested_ = true;
+}
+
+bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
+                                                const uint8_t* payload,
+                                                size_t length) {
+    if (frame_type == packet_tunnel::kFramePeerOffer) {
+        ParsedPeerOffer offer = {};
+        if (!ParsePeerOfferPayload(payload, length, &offer)) {
+            PacketTunnelDebugLog("ignore invalid peer_offer frame len=" + std::to_string(length));
+            return true;
+        }
+        if (peer_link_manager_ != NULL) {
+            peer_link_manager_->ObservePeerFrame(offer.peer_virtual_ip,
+                                                 offer.endpoint_version,
+                                                 PeerRouteState::OfferReceived);
+        }
+        PacketTunnelDebugLog("peer control peer_offer: peer=" + offer.peer_virtual_ip +
+                             " version=" + std::to_string(offer.endpoint_version) +
+                             " endpoint=" + offer.endpoint);
+        return true;
+    }
+
+    if (frame_type == packet_tunnel::kFramePeerHello ||
+        frame_type == packet_tunnel::kFramePeerAck ||
+        frame_type == packet_tunnel::kFramePeerKeepalive) {
+        ParsedPeerSignal signal = {};
+        if (!ParsePeerSignalPayload(payload, length, &signal)) {
+            PacketTunnelDebugLog("ignore invalid " + PacketTunnelFrameName(frame_type) +
+                                 " frame len=" + std::to_string(length));
+            return true;
+        }
+
+        if (peer_link_manager_ != NULL) {
+            PeerRouteState state = PeerRouteState::Probing;
+            if (frame_type == packet_tunnel::kFramePeerAck ||
+                frame_type == packet_tunnel::kFramePeerKeepalive) {
+                state = PeerRouteState::DirectReady;
+            }
+            peer_link_manager_->ObservePeerFrame(signal.peer_virtual_ip,
+                                                 signal.endpoint_version,
+                                                 state);
+        }
+
+        PacketTunnelDebugLog("peer control " + PacketTunnelFrameName(frame_type) +
+                             ": peer=" + signal.peer_virtual_ip +
+                             " version=" + std::to_string(signal.endpoint_version) +
+                             " nonce=" + std::to_string(signal.nonce));
+        return true;
+    }
+
+    if (frame_type == packet_tunnel::kFramePeerDisable) {
+        ParsedPeerDisable disable = {};
+        if (!ParsePeerDisablePayload(payload, length, &disable)) {
+            PacketTunnelDebugLog("ignore invalid peer_disable frame len=" + std::to_string(length));
+            return true;
+        }
+        if (peer_link_manager_ != NULL) {
+            peer_link_manager_->ObservePeerFrame(disable.peer_virtual_ip,
+                                                 disable.endpoint_version,
+                                                 PeerRouteState::Cooldown);
+        }
+        PacketTunnelDebugLog("peer control peer_disable: peer=" + disable.peer_virtual_ip +
+                             " version=" + std::to_string(disable.endpoint_version) +
+                             " reason=" + std::to_string(disable.reason));
+        return true;
+    }
+
+    return false;
 }
 
 bool PacketTunnelClient::SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg) {

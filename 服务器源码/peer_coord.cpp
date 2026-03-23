@@ -15,6 +15,17 @@ uint64_t PeerCoord::BumpEndpointVersion(const std::string& peer_virtual_ip) {
     return entry.endpoint_version;
 }
 
+void PeerCoord::ObservePeerFrame(const std::string& peer_virtual_ip,
+                                 uint64_t endpoint_version,
+                                 PeerEndpointState state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Entry& entry = peers_[peer_virtual_ip];
+    if (endpoint_version > entry.endpoint_version) {
+        entry.endpoint_version = endpoint_version;
+    }
+    entry.state = state;
+}
+
 void PeerCoord::SetState(const std::string& peer_virtual_ip, PeerEndpointState state) {
     std::lock_guard<std::mutex> lock(mutex_);
     peers_[peer_virtual_ip].state = state;

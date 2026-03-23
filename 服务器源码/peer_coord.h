@@ -26,6 +26,9 @@ public:
 
     void Reset();
     uint64_t BumpEndpointVersion(const std::string& peer_virtual_ip);
+    void ObservePeerFrame(const std::string& peer_virtual_ip,
+                          uint64_t endpoint_version,
+                          PeerEndpointState state);
     void SetState(const std::string& peer_virtual_ip, PeerEndpointState state);
     uint64_t GetEndpointVersion(const std::string& peer_virtual_ip) const;
     std::vector<PeerCoordStatus> Snapshot() const;
