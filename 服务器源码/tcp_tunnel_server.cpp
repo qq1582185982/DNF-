@@ -1098,6 +1098,38 @@ static bool parse_peer_disable_frame(const uint8_t* payload,
     return true;
 }
 
+static bool encode_peer_offer_payload(uint32_t peer_virtual_ip_be,
+                                      uint64_t endpoint_version,
+                                      const sockaddr_storage& endpoint_addr,
+                                      socklen_t endpoint_addr_len,
+                                      vector<uint8_t>* out_payload) {
+    (void)endpoint_addr_len;
+    if (out_payload == nullptr) {
+        return false;
+    }
+
+    vector<uint8_t> payload(packet_tunnel::kPeerOfferPayloadSize, 0);
+    packet_tunnel::write_u32_be(payload.data(), ntohl(peer_virtual_ip_be));
+    packet_tunnel::write_u64_be(payload.data() + 4, endpoint_version);
+
+    if (endpoint_addr.ss_family == AF_INET) {
+        const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(&endpoint_addr);
+        payload[12] = packet_tunnel::kPeerEndpointFamilyIpv4;
+        packet_tunnel::write_u16_be(payload.data() + 14, ntohs(addr4->sin_port));
+        memcpy(payload.data() + 16, &addr4->sin_addr, 4);
+    } else if (endpoint_addr.ss_family == AF_INET6) {
+        const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(&endpoint_addr);
+        payload[12] = packet_tunnel::kPeerEndpointFamilyIpv6;
+        packet_tunnel::write_u16_be(payload.data() + 14, ntohs(addr6->sin6_port));
+        memcpy(payload.data() + 16, &addr6->sin6_addr, 16);
+    } else {
+        return false;
+    }
+
+    *out_payload = payload;
+    return true;
+}
+
 // ==================== IP替换辅助函数 ====================
 // 在payload中查找并替换IP地址(支持大端序和小端序)
 // payload: 数据载荷
@@ -2209,6 +2241,85 @@ private:
         return true;
     }
 
+    void announce_peer_offers_for_session(const shared_ptr<PacketTunnelSession>& session) {
+        if (!session || !session->active || !session->use_udp) {
+            return;
+        }
+
+        const string local_virtual_ip = ipv4_be_to_string(session->virtual_ip_be);
+        const uint64_t local_version = peer_coord_.BumpEndpointVersion(local_virtual_ip);
+        peer_coord_.SetState(local_virtual_ip, PeerEndpointState::OfferPending);
+
+        vector<shared_ptr<PacketTunnelSession>> peers;
+        {
+            lock_guard<mutex> lock(packet_tunnel_mutex);
+            for (map<uint32_t, shared_ptr<PacketTunnelSession>>::const_iterator it = packet_tunnel_sessions.begin();
+                 it != packet_tunnel_sessions.end(); ++it) {
+                const shared_ptr<PacketTunnelSession>& peer = it->second;
+                if (!peer || peer == session || !peer->active || !peer->use_udp) {
+                    continue;
+                }
+                peers.push_back(peer);
+            }
+        }
+
+        vector<uint8_t> local_offer_payload;
+        if (!encode_peer_offer_payload(session->virtual_ip_be,
+                                       local_version,
+                                       session->udp_addr,
+                                       session->udp_addr_len,
+                                       &local_offer_payload)) {
+            Logger::warning("[" + server_name + "|IP Tunnel] failed to encode peer offer for " +
+                            local_virtual_ip);
+            return;
+        }
+
+        for (size_t i = 0; i < peers.size(); ++i) {
+            const shared_ptr<PacketTunnelSession>& peer = peers[i];
+            const string peer_virtual_ip = ipv4_be_to_string(peer->virtual_ip_be);
+            uint64_t peer_version = peer_coord_.GetEndpointVersion(peer_virtual_ip);
+            if (peer_version == 0) {
+                peer_version = peer_coord_.BumpEndpointVersion(peer_virtual_ip);
+                peer_coord_.SetState(peer_virtual_ip, PeerEndpointState::OfferPending);
+            }
+
+            vector<uint8_t> peer_offer_payload;
+            if (!encode_peer_offer_payload(peer->virtual_ip_be,
+                                           peer_version,
+                                           peer->udp_addr,
+                                           peer->udp_addr_len,
+                                           &peer_offer_payload)) {
+                Logger::warning("[" + server_name + "|IP Tunnel] failed to encode peer offer for " +
+                                peer_virtual_ip);
+                continue;
+            }
+
+            if (send_packet_tunnel_frame(peer,
+                                         packet_tunnel::kFramePeerOffer,
+                                         local_offer_payload.data(),
+                                         local_offer_payload.size())) {
+                Logger::info("[" + server_name + "|IP Tunnel] announce peer offer " +
+                             local_virtual_ip + " -> " + peer_virtual_ip +
+                             " version=" + to_string(local_version));
+            } else {
+                Logger::warning("[" + server_name + "|IP Tunnel] failed to send peer offer " +
+                                local_virtual_ip + " -> " + peer_virtual_ip);
+            }
+
+            if (send_packet_tunnel_frame(session,
+                                         packet_tunnel::kFramePeerOffer,
+                                         peer_offer_payload.data(),
+                                         peer_offer_payload.size())) {
+                Logger::info("[" + server_name + "|IP Tunnel] announce peer offer " +
+                             peer_virtual_ip + " -> " + local_virtual_ip +
+                             " version=" + to_string(peer_version));
+            } else {
+                Logger::warning("[" + server_name + "|IP Tunnel] failed to send peer offer " +
+                                peer_virtual_ip + " -> " + local_virtual_ip);
+            }
+        }
+    }
+
     void packet_tunnel_tun_loop() {
         while (running && tun_manager.IsActive()) {
             vector<uint8_t> packet;
@@ -2601,6 +2712,7 @@ private:
 
                     Logger::info("[IP Tunnel|" + session_uuid + "] UDP session established: client=" +
                                  client_str + ", virtual_ip=" + virtual_ip);
+                    announce_peer_offers_for_session(session);
                     continue;
                 }
             }
