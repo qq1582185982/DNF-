@@ -398,11 +398,6 @@ void PacketTunnelClient::WintunReadLoop() {
 
         if (virtual_ip_be != 0 && packet.size() >= 20 &&
             memcmp(packet.data() + 12, leased_src_ip, sizeof(leased_src_ip)) != 0) {
-            std::string desc;
-            if (TryDescribeUdpPacket(packet.data(), packet.size(), &desc)) {
-                PacketTunnelDebugLog("drop foreign-source udp before tunnel " + desc +
-                                     " expected_src=" + virtual_ip_);
-            }
             continue;
         }
 
