@@ -3,17 +3,29 @@
 #include "packet_tunnel_protocol.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netdb.h>
-#include <netinet/tcp.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <chrono>
+#include <vector>
+
 namespace {
 
-const int kHeartbeatIntervalMs = 15000;
+const int kHeartbeatIntervalMs = 3000;
+const int kHeartbeatTimeoutMs = 12000;
+const int kSocketReadTimeoutMs = 1000;
 const int kTunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
+
+unsigned long long now_ms() {
+    return static_cast<unsigned long long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 
 }  // namespace
 
@@ -31,7 +43,8 @@ LinuxPacketTunnelClient::LinuxPacketTunnelClient(const std::string& tunnel_host,
       tun_manager_(tun_manager),
       sock_(-1),
       connected_(false),
-      stop_requested_(false) {}
+      stop_requested_(false),
+      last_receive_ms_(0) {}
 
 LinuxPacketTunnelClient::~LinuxPacketTunnelClient() {
     Stop();
@@ -66,7 +79,6 @@ void LinuxPacketTunnelClient::Stop() {
     connected_ = false;
 
     if (sock_ >= 0) {
-        shutdown(sock_, SHUT_RDWR);
         close(sock_);
         sock_ = -1;
     }
@@ -85,8 +97,8 @@ void LinuxPacketTunnelClient::Stop() {
 bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
     addrinfo hints = {};
     hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
 
     addrinfo* result = NULL;
     const std::string port_str = std::to_string(tunnel_port_);
@@ -105,27 +117,17 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
             continue;
         }
 
-        int flag = 1;
-        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-        setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &kSocketBufferBytes, sizeof(kSocketBufferBytes));
         setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &kSocketBufferBytes, sizeof(kSocketBufferBytes));
-#ifdef TCP_KEEPIDLE
-        int keepidle = 30;
-        setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
-#endif
-#ifdef TCP_KEEPINTVL
-        int keepintvl = 5;
-        setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
-#endif
-#ifdef TCP_KEEPCNT
-        int keepcnt = 3;
-        setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
-#endif
 
         timeval send_timeout = {};
         send_timeout.tv_sec = 5;
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
+
+        timeval recv_timeout = {};
+        recv_timeout.tv_sec = kSocketReadTimeoutMs / 1000;
+        recv_timeout.tv_usec = (kSocketReadTimeoutMs % 1000) * 1000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
 
         if (connect(sock, rp->ai_addr, rp->ai_addrlen) == 0) {
             sock_ = sock;
@@ -148,7 +150,7 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
 }
 
 bool LinuxPacketTunnelClient::SendHandshake(std::string* error) {
-    const uint8_t session_uuid_len = (uint8_t)session_uuid_.size();
+    const uint8_t session_uuid_len = static_cast<uint8_t>(session_uuid_.size());
     std::vector<uint8_t> handshake(7 + session_uuid_len + packet_tunnel::kHandshakeTailSize, 0);
 
     uint32_t conn_id_be = htonl(packet_tunnel::kHandshakeConnId);
@@ -172,12 +174,16 @@ bool LinuxPacketTunnelClient::SendHandshake(std::string* error) {
     memcpy(&handshake[tail + 2], &mtu_be, sizeof(mtu_be));
     memcpy(&handshake[tail + 4], &virtual_ip_be, sizeof(virtual_ip_be));
 
-    return SendAll(handshake.data(), handshake.size(), error);
+    return SendDatagram(handshake.data(), handshake.size(), error);
 }
 
 bool LinuxPacketTunnelClient::ReceiveHandshakeAck(std::string* error) {
     uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
-    if (!RecvAll(ack, sizeof(ack), error)) {
+    int received = RecvDatagram(ack, sizeof(ack), error);
+    if (received != static_cast<int>(sizeof(ack))) {
+        if (received >= 0 && error != NULL) {
+            *error = "packet tunnel ack size mismatch";
+        }
         return false;
     }
 
@@ -193,6 +199,8 @@ bool LinuxPacketTunnelClient::ReceiveHandshakeAck(std::string* error) {
         }
         return false;
     }
+
+    last_receive_ms_ = now_ms();
     return true;
 }
 
@@ -211,18 +219,27 @@ bool LinuxPacketTunnelClient::StartThreads(std::string* error) {
 }
 
 void LinuxPacketTunnelClient::SocketReadLoop() {
+    std::vector<uint8_t> buffer(65535);
     while (!stop_requested_) {
-        uint8_t header[packet_tunnel::kFrameHeaderSize] = {};
         std::string error;
-        if (!RecvAll(header, sizeof(header), &error)) {
+        int received = RecvDatagram(buffer.data(), buffer.size(), &error);
+        if (received < 0) {
             break;
         }
+        if (received == 0) {
+            continue;
+        }
 
-        const uint8_t frame_type = header[0];
-        const uint16_t payload_len = ntohs(*(uint16_t*)(&header[1]));
-        std::vector<uint8_t> payload(payload_len);
-        if (payload_len > 0 && !RecvAll(payload.data(), payload.size(), &error)) {
-            break;
+        last_receive_ms_ = now_ms();
+
+        if (received < static_cast<int>(packet_tunnel::kFrameHeaderSize)) {
+            continue;
+        }
+
+        const uint8_t frame_type = buffer[0];
+        const uint16_t payload_len = ntohs(*(uint16_t*)(&buffer[1]));
+        if (received != static_cast<int>(packet_tunnel::kFrameHeaderSize + payload_len)) {
+            continue;
         }
 
         if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
@@ -230,7 +247,7 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
         }
 
         if (frame_type == packet_tunnel::kFrameIpv4Packet && tun_manager_ != NULL) {
-            tun_manager_->WritePacket(payload.data(), payload.size(), NULL);
+            tun_manager_->WritePacket(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len, NULL);
         }
     }
 
@@ -283,7 +300,16 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
         if (!SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
             break;
         }
+
+        const unsigned long long last_ms = last_receive_ms_.load();
+        const unsigned long long current_ms = now_ms();
+        if (last_ms != 0 && current_ms > last_ms && (current_ms - last_ms) > kHeartbeatTimeoutMs) {
+            break;
+        }
     }
+
+    connected_ = false;
+    stop_requested_ = true;
 }
 
 bool LinuxPacketTunnelClient::SendFrame(uint8_t frame_type,
@@ -292,43 +318,44 @@ bool LinuxPacketTunnelClient::SendFrame(uint8_t frame_type,
                                         std::string* error) {
     std::vector<uint8_t> frame(packet_tunnel::kFrameHeaderSize + length, 0);
     frame[0] = frame_type;
-    *(uint16_t*)(&frame[1]) = htons((uint16_t)length);
+    *(uint16_t*)(&frame[1]) = htons(static_cast<uint16_t>(length));
     if (length > 0 && data != NULL) {
         memcpy(&frame[packet_tunnel::kFrameHeaderSize], data, length);
     }
 
     std::lock_guard<std::mutex> lock(send_mutex_);
-    return SendAll(frame.data(), frame.size(), error);
+    return SendDatagram(frame.data(), frame.size(), error);
 }
 
-bool LinuxPacketTunnelClient::SendAll(const uint8_t* data, size_t length, std::string* error) {
-    size_t sent = 0;
-    while (sent < length) {
-        ssize_t n = send(sock_, data + sent, length - sent, 0);
-        if (n <= 0) {
-            if (error != NULL) {
-                *error = std::string("packet tunnel send failed: ") + strerror(errno);
-            }
-            return false;
+bool LinuxPacketTunnelClient::SendDatagram(const uint8_t* data, size_t length, std::string* error) {
+    ssize_t n = send(sock_, data, length, 0);
+    if (n != static_cast<ssize_t>(length)) {
+        if (error != NULL) {
+            *error = std::string("packet tunnel send failed: ") + strerror(errno);
         }
-        sent += (size_t)n;
+        return false;
     }
     return true;
 }
 
-bool LinuxPacketTunnelClient::RecvAll(uint8_t* data, size_t length, std::string* error) {
-    size_t received = 0;
-    while (received < length) {
-        ssize_t n = recv(sock_, data + received, length - received, 0);
-        if (n <= 0) {
-            if (error != NULL) {
-                *error = std::string("packet tunnel recv failed: ") + strerror(errno);
-            }
-            return false;
+int LinuxPacketTunnelClient::RecvDatagram(uint8_t* data, size_t length, std::string* error) {
+    ssize_t n = recv(sock_, data, length, 0);
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return 0;
         }
-        received += (size_t)n;
+        if (error != NULL) {
+            *error = std::string("packet tunnel recv failed: ") + strerror(errno);
+        }
+        return -1;
     }
-    return true;
+    if (n == 0) {
+        if (error != NULL) {
+            *error = "packet tunnel peer closed";
+        }
+        return -1;
+    }
+    return static_cast<int>(n);
 }
 
 uint32_t LinuxPacketTunnelClient::ParseVirtualIp(std::string* error) const {

@@ -30,8 +30,8 @@ private:
     void TunReadLoop();
     void HeartbeatLoop();
     bool SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::string* error);
-    bool SendAll(const uint8_t* data, size_t length, std::string* error);
-    bool RecvAll(uint8_t* data, size_t length, std::string* error);
+    bool SendDatagram(const uint8_t* data, size_t length, std::string* error);
+    int RecvDatagram(uint8_t* data, size_t length, std::string* error);
     uint32_t ParseVirtualIp(std::string* error) const;
 
     std::string tunnel_host_;
@@ -43,6 +43,7 @@ private:
     int sock_;
     std::atomic<bool> connected_;
     std::atomic<bool> stop_requested_;
+    std::atomic<unsigned long long> last_receive_ms_;
     std::thread socket_thread_;
     std::thread tun_thread_;
     std::thread heartbeat_thread_;

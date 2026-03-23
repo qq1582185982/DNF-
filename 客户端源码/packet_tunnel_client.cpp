@@ -5,15 +5,17 @@
 
 #include <windows.h>
 #include <ws2tcpip.h>
-#include <mstcpip.h>
 
+#include <algorithm>
 #include <cstring>
-#include <vector>
 #include <sstream>
+#include <vector>
 
 namespace {
 
-const DWORD kHeartbeatIntervalMs = 15000;
+const DWORD kHeartbeatIntervalMs = 3000;
+const DWORD kHeartbeatTimeoutMs = 12000;
+const DWORD kSocketReadTimeoutMs = 1000;
 const DWORD kWintunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
 
@@ -39,7 +41,8 @@ PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
       wintun_manager_(wintun_manager),
       sock_(INVALID_SOCKET),
       connected_(false),
-      stop_requested_(false) {
+      stop_requested_(false),
+      last_receive_tick_(0) {
     InitializeCriticalSection(&send_lock_);
 }
 
@@ -77,7 +80,6 @@ void PacketTunnelClient::Stop() {
     connected_ = false;
 
     if (sock_ != INVALID_SOCKET) {
-        shutdown(sock_, SD_BOTH);
         closesocket(sock_);
         sock_ = INVALID_SOCKET;
     }
@@ -97,8 +99,8 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
     struct addrinfo hints = {};
     struct addrinfo* result = NULL;
     hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
 
     std::string port_str = std::to_string(tunnel_port_);
     int ret = getaddrinfo(tunnel_server_ip_.c_str(), port_str.c_str(), &hints, &result);
@@ -116,23 +118,13 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
             continue;
         }
 
-        int flag = 1;
-        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
-        int keepalive = 1;
-        setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&keepalive, sizeof(keepalive));
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&kSocketBufferBytes, sizeof(kSocketBufferBytes));
         setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&kSocketBufferBytes, sizeof(kSocketBufferBytes));
 
-        tcp_keepalive ka_settings = {};
-        ka_settings.onoff = 1;
-        ka_settings.keepalivetime = 30000;
-        ka_settings.keepaliveinterval = 5000;
-        DWORD bytes_returned = 0;
-        WSAIoctl(sock, SIO_KEEPALIVE_VALS, &ka_settings, sizeof(ka_settings),
-                 NULL, 0, &bytes_returned, NULL, NULL);
-
         DWORD send_timeout = 5000;
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&send_timeout, sizeof(send_timeout));
+        DWORD recv_timeout = kSocketReadTimeoutMs;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&recv_timeout, sizeof(recv_timeout));
 
         if (connect(sock, rp->ai_addr, (int)rp->ai_addrlen) != SOCKET_ERROR) {
             sock_ = sock;
@@ -180,12 +172,16 @@ bool PacketTunnelClient::SendHandshake(std::wstring* error_msg) {
     memcpy(&handshake[tail + 2], &mtu_be, sizeof(mtu_be));
     memcpy(&handshake[tail + 4], &virtual_ip_be, sizeof(virtual_ip_be));
 
-    return SendAll(handshake.data(), handshake.size(), error_msg);
+    return SendDatagram(handshake.data(), handshake.size(), error_msg);
 }
 
 bool PacketTunnelClient::ReceiveHandshakeAck(std::wstring* error_msg) {
     uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
-    if (!RecvAll(ack, sizeof(ack), error_msg)) {
+    int received = RecvDatagram(ack, sizeof(ack), error_msg);
+    if (received != (int)sizeof(ack)) {
+        if (received >= 0 && error_msg != NULL) {
+            *error_msg = L"IP Tunnel ack size mismatch";
+        }
         return false;
     }
 
@@ -203,6 +199,7 @@ bool PacketTunnelClient::ReceiveHandshakeAck(std::wstring* error_msg) {
         return false;
     }
 
+    last_receive_tick_ = GetTickCount64();
     return true;
 }
 
@@ -221,29 +218,35 @@ bool PacketTunnelClient::StartThreads(std::wstring* error_msg) {
 }
 
 void PacketTunnelClient::SocketReadLoop() {
+    std::vector<uint8_t> buffer(65535);
     while (!stop_requested_) {
-        uint8_t header[packet_tunnel::kFrameHeaderSize] = {};
         std::wstring err;
-        if (!RecvAll(header, sizeof(header), &err)) {
+        int received = RecvDatagram(buffer.data(), buffer.size(), &err);
+        if (received < 0) {
             break;
         }
+        if (received == 0) {
+            continue;
+        }
 
-        uint8_t frame_type = header[0];
-        uint16_t payload_len = ntohs(*(uint16_t*)(header + 1));
-        std::vector<uint8_t> payload(payload_len);
-        if (payload_len > 0 && !RecvAll(payload.data(), payload.size(), &err)) {
-            break;
+        last_receive_tick_ = GetTickCount64();
+
+        if (received < (int)packet_tunnel::kFrameHeaderSize) {
+            continue;
+        }
+
+        uint8_t frame_type = buffer[0];
+        uint16_t payload_len = ntohs(*(uint16_t*)(buffer.data() + 1));
+        if (received != (int)(packet_tunnel::kFrameHeaderSize + payload_len)) {
+            continue;
         }
 
         if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
             continue;
         }
 
-        if (frame_type == packet_tunnel::kFrameIpv4Packet) {
-            if (wintun_manager_ != NULL) {
-                wintun_manager_->WritePacket(payload.data(), payload.size(), NULL);
-            }
-            continue;
+        if (frame_type == packet_tunnel::kFrameIpv4Packet && wintun_manager_ != NULL) {
+            wintun_manager_->WritePacket(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len, NULL);
         }
     }
 
@@ -297,7 +300,16 @@ void PacketTunnelClient::HeartbeatLoop() {
         if (!SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
             break;
         }
+
+        unsigned long long last_tick = last_receive_tick_.load();
+        unsigned long long now_tick = GetTickCount64();
+        if (last_tick != 0 && now_tick > last_tick && (now_tick - last_tick) > kHeartbeatTimeoutMs) {
+            break;
+        }
     }
+
+    connected_ = false;
+    stop_requested_ = true;
 }
 
 bool PacketTunnelClient::SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg) {
@@ -309,39 +321,41 @@ bool PacketTunnelClient::SendFrame(uint8_t frame_type, const uint8_t* data, size
     }
 
     EnterCriticalSection(&send_lock_);
-    bool ok = SendAll(frame.data(), frame.size(), error_msg);
+    bool ok = SendDatagram(frame.data(), frame.size(), error_msg);
     LeaveCriticalSection(&send_lock_);
     return ok;
 }
 
-bool PacketTunnelClient::SendAll(const uint8_t* data, size_t length, std::wstring* error_msg) {
-    size_t sent = 0;
-    while (sent < length) {
-        int n = send(sock_, reinterpret_cast<const char*>(data + sent), static_cast<int>(length - sent), 0);
-        if (n <= 0) {
-            if (error_msg != NULL) {
-                *error_msg = BuildSocketError(L"IP Tunnel send failed", WSAGetLastError());
-            }
-            return false;
+bool PacketTunnelClient::SendDatagram(const uint8_t* data, size_t length, std::wstring* error_msg) {
+    int n = send(sock_, reinterpret_cast<const char*>(data), static_cast<int>(length), 0);
+    if (n != (int)length) {
+        if (error_msg != NULL) {
+            *error_msg = BuildSocketError(L"IP Tunnel send failed", WSAGetLastError());
         }
-        sent += static_cast<size_t>(n);
+        return false;
     }
     return true;
 }
 
-bool PacketTunnelClient::RecvAll(uint8_t* data, size_t length, std::wstring* error_msg) {
-    size_t received = 0;
-    while (received < length) {
-        int n = recv(sock_, reinterpret_cast<char*>(data + received), static_cast<int>(length - received), 0);
-        if (n <= 0) {
-            if (error_msg != NULL) {
-                *error_msg = BuildSocketError(L"IP Tunnel recv failed", WSAGetLastError());
-            }
-            return false;
+int PacketTunnelClient::RecvDatagram(uint8_t* data, size_t length, std::wstring* error_msg) {
+    int n = recv(sock_, reinterpret_cast<char*>(data), static_cast<int>(length), 0);
+    if (n == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        if (err == WSAETIMEDOUT) {
+            return 0;
         }
-        received += static_cast<size_t>(n);
+        if (error_msg != NULL) {
+            *error_msg = BuildSocketError(L"IP Tunnel recv failed", err);
+        }
+        return -1;
     }
-    return true;
+    if (n == 0) {
+        if (error_msg != NULL) {
+            *error_msg = L"IP Tunnel peer closed";
+        }
+        return -1;
+    }
+    return n;
 }
 
 uint32_t PacketTunnelClient::ParseVirtualIp(std::wstring* error_msg) const {

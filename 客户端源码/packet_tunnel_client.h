@@ -34,8 +34,8 @@ private:
     void WintunReadLoop();
     void HeartbeatLoop();
     bool SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg);
-    bool SendAll(const uint8_t* data, size_t length, std::wstring* error_msg);
-    bool RecvAll(uint8_t* data, size_t length, std::wstring* error_msg);
+    bool SendDatagram(const uint8_t* data, size_t length, std::wstring* error_msg);
+    int RecvDatagram(uint8_t* data, size_t length, std::wstring* error_msg);
     uint32_t ParseVirtualIp(std::wstring* error_msg) const;
     static std::wstring Utf8ToWide(const std::string& value);
 
@@ -48,6 +48,7 @@ private:
     SOCKET sock_;
     std::atomic<bool> connected_;
     std::atomic<bool> stop_requested_;
+    std::atomic<unsigned long long> last_receive_tick_;
     std::thread socket_read_thread_;
     std::thread wintun_read_thread_;
     std::thread heartbeat_thread_;

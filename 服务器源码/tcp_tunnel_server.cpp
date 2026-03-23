@@ -1811,6 +1811,10 @@ private:
         string session_uuid;
         uint32_t virtual_ip_be;
         uint16_t mtu;
+        bool use_udp;
+        sockaddr_storage udp_addr;
+        socklen_t udp_addr_len;
+        string udp_endpoint_key;
         atomic<bool> active;
         mutex send_mutex;
 
@@ -1824,6 +1828,8 @@ private:
               session_uuid(session),
               virtual_ip_be(virtual_ip),
               mtu(session_mtu),
+              use_udp(false),
+              udp_addr_len(0),
               active(true) {}
     };
 
@@ -1839,8 +1845,12 @@ private:
     mutex ip_map_mutex;
     TunManager tun_manager;
     shared_ptr<thread> tun_read_thread;
+    shared_ptr<thread> udp_read_thread;
     map<uint32_t, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions;
+    map<string, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions_by_endpoint;
+
     mutex packet_tunnel_mutex;
+    int udp_fd;
     uint32_t game_server_ip_be;
     bool has_game_server_ip_be;
     uint32_t gateway_ip_be;
@@ -1872,6 +1882,28 @@ private:
         return ip_part;  // 返回完整IP（IPv6或其他格式）
     }
 
+    static string build_endpoint_key(const sockaddr_storage& addr, socklen_t addr_len) {
+        (void)addr_len;
+        char client_ip[INET6_ADDRSTRLEN] = {0};
+        int client_port = 0;
+
+        if (addr.ss_family == AF_INET) {
+            const sockaddr_in* addr_in = (const sockaddr_in*)&addr;
+            inet_ntop(AF_INET, &addr_in->sin_addr, client_ip, sizeof(client_ip));
+            client_port = ntohs(addr_in->sin_port);
+            return string(client_ip) + ":" + to_string(client_port);
+        }
+
+        if (addr.ss_family == AF_INET6) {
+            const sockaddr_in6* addr_in6 = (const sockaddr_in6*)&addr;
+            inet_ntop(AF_INET6, &addr_in6->sin6_addr, client_ip, sizeof(client_ip));
+            client_port = ntohs(addr_in6->sin6_port);
+            return "[" + string(client_ip) + "]:" + to_string(client_port);
+        }
+
+        return "unknown";
+    }
+
     bool send_packet_tunnel_frame(const shared_ptr<PacketTunnelSession>& session,
                                   uint8_t frame_type,
                                   const uint8_t* payload,
@@ -1888,6 +1920,19 @@ private:
         }
 
         lock_guard<mutex> lock(session->send_mutex);
+        if (session->use_udp) {
+            if (udp_fd < 0 || session->udp_addr_len == 0) {
+                return false;
+            }
+            int n = sendto(udp_fd,
+                           (const char*)frame.data(),
+                           frame.size(),
+                           MSG_NOSIGNAL,
+                           (const sockaddr*)&session->udp_addr,
+                           session->udp_addr_len);
+            return n == (int)frame.size();
+        }
+
         size_t sent = 0;
         while (sent < frame.size()) {
             int n = send(session->client_fd,
@@ -1970,7 +2015,9 @@ private:
                 Logger::warning("[" + server_name + "|IP Tunnel|" + session->session_uuid +
                                 "] send TUN packet to client failed");
                 session->active = false;
-                shutdown(session->client_fd, SHUT_RDWR);
+                if (!session->use_udp && session->client_fd >= 0) {
+                    shutdown(session->client_fd, SHUT_RDWR);
+                }
             }
         }
     }
@@ -1982,6 +2029,8 @@ public:
           listen_fd(-1),
           running(false),
           tun_read_thread(nullptr),
+          udp_read_thread(nullptr),
+          udp_fd(-1),
           game_server_ip_be(0),
           has_game_server_ip_be(parse_ipv4_be(cfg.game_server_ip, &game_server_ip_be)),
           gateway_ip_be(0),
@@ -1999,10 +2048,36 @@ public:
     }
 
     bool start() {
+        udp_fd = socket(AF_INET6, SOCK_DGRAM, 0);
+        if (udp_fd < 0) {
+            Logger::error("[" + server_name + "] create UDP socket failed");
+            return false;
+        }
+
+        int udp_opt = 1;
+        setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &udp_opt, sizeof(udp_opt));
+
+        int udp_v6only = 0;
+        setsockopt(udp_fd, IPPROTO_IPV6, IPV6_V6ONLY, &udp_v6only, sizeof(udp_v6only));
+
+        sockaddr_in6 udp_addr{};
+        udp_addr.sin6_family = AF_INET6;
+        udp_addr.sin6_addr = in6addr_any;
+        udp_addr.sin6_port = htons(config.listen_port);
+
+        if (bind(udp_fd, (sockaddr*)&udp_addr, sizeof(udp_addr)) < 0) {
+            Logger::error("[" + server_name + "] bind UDP port failed: " + to_string(config.listen_port));
+            close(udp_fd);
+            udp_fd = -1;
+            return false;
+        }
+
         // 创建IPv6 socket（支持双栈：同时接受IPv4和IPv6连接）
         listen_fd = socket(AF_INET6, SOCK_STREAM, 0);
         if (listen_fd < 0) {
             Logger::error("[" + server_name + "] 创建socket失败");
+            close(udp_fd);
+            udp_fd = -1;
             return false;
         }
 
@@ -2025,12 +2100,18 @@ public:
         if (bind(listen_fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
             Logger::error("[" + server_name + "] 绑定端口失败: " + to_string(config.listen_port));
             close(listen_fd);
+            listen_fd = -1;
+            close(udp_fd);
+            udp_fd = -1;
             return false;
         }
 
         if (listen(listen_fd, config.max_connections) < 0) {
             Logger::error("[" + server_name + "] 监听失败");
             close(listen_fd);
+            listen_fd = -1;
+            close(udp_fd);
+            udp_fd = -1;
             return false;
         }
 
@@ -2063,6 +2144,9 @@ public:
             tun_read_thread = make_shared<thread>([this]() {
                 packet_tunnel_tun_loop();
             });
+            udp_read_thread = make_shared<thread>([this]() {
+                packet_tunnel_udp_loop();
+            });
         } else {
             Logger::warning("[" + server_name + "] IP Tunnel TUN init failed: " + tun_error);
         }
@@ -2076,6 +2160,10 @@ public:
 
     void stop() {
         running = false;
+        if (udp_fd >= 0) {
+            close(udp_fd);
+            udp_fd = -1;
+        }
         if (listen_fd >= 0) {
             close(listen_fd);
             listen_fd = -1;
@@ -2089,13 +2177,20 @@ public:
                 packet_fds.push_back(it->second->client_fd);
             }
             packet_tunnel_sessions.clear();
+            packet_tunnel_sessions_by_endpoint.clear();
         }
 
         for (size_t i = 0; i < packet_fds.size(); ++i) {
-            shutdown(packet_fds[i], SHUT_RDWR);
+            if (packet_fds[i] >= 0) {
+                shutdown(packet_fds[i], SHUT_RDWR);
+            }
         }
 
         tun_manager.Cleanup();
+        if (udp_read_thread && udp_read_thread->joinable()) {
+            udp_read_thread->join();
+        }
+        udp_read_thread.reset();
         if (tun_read_thread && tun_read_thread->joinable()) {
             tun_read_thread->join();
         }
@@ -2107,6 +2202,203 @@ public:
     }
 
 private:
+    void packet_tunnel_udp_loop() {
+        while (running && udp_fd >= 0) {
+            uint8_t buffer[65535];
+            sockaddr_storage client_addr{};
+            socklen_t client_addr_len = sizeof(client_addr);
+            int n = recvfrom(udp_fd, (char*)buffer, sizeof(buffer), 0,
+                             (sockaddr*)&client_addr, &client_addr_len);
+            if (n <= 0) {
+                if (!running) {
+                    break;
+                }
+                if (errno == EINTR) {
+                    continue;
+                }
+                if (errno != EBADF && errno != EINVAL) {
+                    Logger::warning("[" + server_name + "|IP Tunnel] recvfrom failed: " + string(strerror(errno)));
+                }
+                break;
+            }
+
+            string client_str = build_endpoint_key(client_addr, client_addr_len);
+
+            if ((size_t)n >= 7) {
+                uint32_t conn_id = ntohl(*(uint32_t*)buffer);
+                uint16_t dst_port = ntohs(*(uint16_t*)(buffer + 4));
+                uint8_t session_uuid_len = buffer[6];
+                size_t expected_handshake_size = 7 + (size_t)session_uuid_len + packet_tunnel::kHandshakeTailSize;
+
+                if (conn_id == packet_tunnel::kHandshakeConnId &&
+                    dst_port == packet_tunnel::kHandshakePortMarker &&
+                    session_uuid_len < 255 &&
+                    (size_t)n == expected_handshake_size) {
+                    string session_uuid;
+                    if (session_uuid_len > 0) {
+                        session_uuid.assign((const char*)(buffer + 7), session_uuid_len);
+                    }
+
+                    const uint8_t* tail = buffer + 7 + session_uuid_len;
+                    uint8_t version = tail[0];
+                    uint8_t flags = tail[1];
+                    uint16_t mtu = ntohs(*(uint16_t*)(tail + 2));
+                    uint32_t virtual_ip_be = 0;
+                    memcpy(&virtual_ip_be, tail + 4, sizeof(virtual_ip_be));
+                    string virtual_ip = ipv4_be_to_string(virtual_ip_be);
+
+                    Logger::info("[IP Tunnel|" + session_uuid + "] UDP handshake: client=" + client_str +
+                                 ", version=" + to_string((int)version) +
+                                 ", mtu=" + to_string(mtu) +
+                                 ", virtual_ip=" + virtual_ip +
+                                 ", flags=" + to_string((int)flags));
+
+                    IPPoolManager::LeaseRecord active_lease;
+                    string lease_error;
+                    bool has_active_lease = false;
+                    if (!session_uuid.empty()) {
+                        has_active_lease = query_active_tcp_config_lease(to_string(config.listen_port),
+                                                                         session_uuid,
+                                                                         &active_lease,
+                                                                         &lease_error);
+                    } else {
+                        lease_error = "missing session_uuid";
+                    }
+
+                    uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
+                    ack[0] = packet_tunnel::kProtocolVersion;
+                    ack[1] = packet_tunnel::kStatusOk;
+                    if (version != packet_tunnel::kProtocolVersion) {
+                        ack[1] = packet_tunnel::kStatusUnsupportedVersion;
+                    } else if (!tun_manager.IsActive()) {
+                        ack[1] = packet_tunnel::kStatusInvalidRequest;
+                        lease_error = "tun_manager is not active";
+                    } else if (!has_active_lease) {
+                        ack[1] = packet_tunnel::kStatusInvalidRequest;
+                    } else if (active_lease.virtual_ip != virtual_ip) {
+                        ack[1] = packet_tunnel::kStatusInvalidRequest;
+                        lease_error = "lease virtual_ip mismatch";
+                    }
+                    *(uint16_t*)(ack + 2) = htons(mtu);
+                    memcpy(ack + 4, &virtual_ip_be, sizeof(virtual_ip_be));
+
+                    int ack_sent = sendto(udp_fd, (const char*)ack, sizeof(ack), MSG_NOSIGNAL,
+                                          (const sockaddr*)&client_addr, client_addr_len);
+                    if (ack_sent != (int)sizeof(ack)) {
+                        Logger::warning("[IP Tunnel|" + session_uuid + "] send UDP handshake ack failed");
+                        continue;
+                    }
+
+                    if (ack[1] != packet_tunnel::kStatusOk) {
+                        Logger::warning("[IP Tunnel|" + session_uuid + "] UDP handshake rejected: status=" +
+                                        to_string((int)ack[1]) +
+                                        (lease_error.empty() ? "" : ", reason=" + lease_error));
+                        continue;
+                    }
+
+                    shared_ptr<PacketTunnelSession> session =
+                        make_shared<PacketTunnelSession>(-1, client_str, session_uuid, virtual_ip_be, mtu);
+                    session->use_udp = true;
+                    session->udp_addr = client_addr;
+                    session->udp_addr_len = client_addr_len;
+                    session->udp_endpoint_key = client_str;
+
+                    shared_ptr<PacketTunnelSession> replaced_session;
+                    {
+                        lock_guard<mutex> lock(packet_tunnel_mutex);
+                        auto it = packet_tunnel_sessions.find(virtual_ip_be);
+                        if (it != packet_tunnel_sessions.end()) {
+                            replaced_session = it->second;
+                            if (!replaced_session->udp_endpoint_key.empty()) {
+                                packet_tunnel_sessions_by_endpoint.erase(replaced_session->udp_endpoint_key);
+                            }
+                        }
+                        packet_tunnel_sessions[virtual_ip_be] = session;
+                        packet_tunnel_sessions_by_endpoint[client_str] = session;
+                    }
+
+                    if (replaced_session && !replaced_session->use_udp && replaced_session->client_fd >= 0) {
+                        replaced_session->active = false;
+                        shutdown(replaced_session->client_fd, SHUT_RDWR);
+                    }
+
+                    Logger::info("[IP Tunnel|" + session_uuid + "] UDP session established: client=" +
+                                 client_str + ", virtual_ip=" + virtual_ip);
+                    continue;
+                }
+            }
+
+            shared_ptr<PacketTunnelSession> session;
+            {
+                lock_guard<mutex> lock(packet_tunnel_mutex);
+                auto it = packet_tunnel_sessions_by_endpoint.find(client_str);
+                if (it != packet_tunnel_sessions_by_endpoint.end()) {
+                    session = it->second;
+                }
+            }
+
+            if (!session || !session->active) {
+                continue;
+            }
+
+            if ((size_t)n < packet_tunnel::kFrameHeaderSize) {
+                continue;
+            }
+
+            uint8_t frame_type = buffer[0];
+            uint16_t payload_len = ntohs(*(uint16_t*)(buffer + 1));
+            if ((size_t)n != packet_tunnel::kFrameHeaderSize + payload_len) {
+                continue;
+            }
+
+            const uint8_t* payload = buffer + packet_tunnel::kFrameHeaderSize;
+            if (frame_type == packet_tunnel::kFrameHeartbeat && payload_len == 0) {
+                if (!send_packet_tunnel_frame(session, packet_tunnel::kFrameHeartbeatAck, nullptr, 0)) {
+                    session->active = false;
+                }
+                continue;
+            }
+
+            if (frame_type != packet_tunnel::kFrameIpv4Packet) {
+                continue;
+            }
+
+            if (payload_len < 20) {
+                continue;
+            }
+
+            uint8_t ip_version = (payload[0] >> 4) & 0x0F;
+            if (ip_version != 4) {
+                continue;
+            }
+
+            uint32_t src_ip_be = 0;
+            uint32_t dst_ip_be = 0;
+            memcpy(&src_ip_be, payload + 12, sizeof(src_ip_be));
+            memcpy(&dst_ip_be, payload + 16, sizeof(dst_ip_be));
+
+            if (src_ip_be != session->virtual_ip_be) {
+                Logger::warning("[IP Tunnel|" + session->session_uuid + "] source IP mismatch: src=" +
+                                ipv4_be_to_string(src_ip_be) + ", lease=" +
+                                ipv4_be_to_string(session->virtual_ip_be));
+                continue;
+            }
+
+            const bool dst_is_game_server = has_game_server_ip_be && dst_ip_be == game_server_ip_be;
+            const bool dst_is_virtual_peer = has_virtual_subnet_be &&
+                                             ipv4_in_subnet_be(dst_ip_be, virtual_network_ip_be, virtual_subnet_mask_be);
+            if (!dst_is_game_server && !dst_is_virtual_peer) {
+                continue;
+            }
+
+            string tun_error;
+            if (!tun_manager.WritePacket(payload, payload_len, &tun_error)) {
+                Logger::warning("[IP Tunnel|" + session->session_uuid + "] write TUN failed: " + tun_error);
+                session->active = false;
+            }
+        }
+    }
+
     void accept_loop() {
         while (running) {
             sockaddr_storage client_addr{};  // 使用sockaddr_storage支持IPv4/IPv6
