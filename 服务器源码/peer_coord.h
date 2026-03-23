@@ -18,6 +18,8 @@ struct PeerCoordStatus {
     std::string peer_virtual_ip;
     uint64_t endpoint_version;
     PeerEndpointState state;
+    uint64_t last_observed_ms;
+    uint64_t last_state_change_ms;
 };
 
 class PeerCoord {
@@ -26,6 +28,7 @@ public:
 
     void Reset();
     uint64_t BumpEndpointVersion(const std::string& peer_virtual_ip);
+    void TouchPeer(const std::string& peer_virtual_ip, uint64_t endpoint_version);
     void ObservePeerFrame(const std::string& peer_virtual_ip,
                           uint64_t endpoint_version,
                           PeerEndpointState state);
@@ -37,10 +40,14 @@ private:
     struct Entry {
         Entry()
             : endpoint_version(0),
-              state(PeerEndpointState::Unknown) {}
+              state(PeerEndpointState::Unknown),
+              last_observed_ms(0),
+              last_state_change_ms(0) {}
 
         uint64_t endpoint_version;
         PeerEndpointState state;
+        uint64_t last_observed_ms;
+        uint64_t last_state_change_ms;
     };
 
     mutable std::mutex mutex_;

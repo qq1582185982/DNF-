@@ -1,5 +1,17 @@
 #include "peer_coord.h"
 
+#include <chrono>
+
+namespace {
+
+uint64_t peer_coord_now_ms() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+}
+
 PeerCoord::PeerCoord() {
 }
 
@@ -12,7 +24,17 @@ uint64_t PeerCoord::BumpEndpointVersion(const std::string& peer_virtual_ip) {
     std::lock_guard<std::mutex> lock(mutex_);
     Entry& entry = peers_[peer_virtual_ip];
     ++entry.endpoint_version;
+    entry.last_observed_ms = peer_coord_now_ms();
     return entry.endpoint_version;
+}
+
+void PeerCoord::TouchPeer(const std::string& peer_virtual_ip, uint64_t endpoint_version) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Entry& entry = peers_[peer_virtual_ip];
+    if (endpoint_version > entry.endpoint_version) {
+        entry.endpoint_version = endpoint_version;
+    }
+    entry.last_observed_ms = peer_coord_now_ms();
 }
 
 void PeerCoord::ObservePeerFrame(const std::string& peer_virtual_ip,
@@ -20,15 +42,25 @@ void PeerCoord::ObservePeerFrame(const std::string& peer_virtual_ip,
                                  PeerEndpointState state) {
     std::lock_guard<std::mutex> lock(mutex_);
     Entry& entry = peers_[peer_virtual_ip];
+    const uint64_t now = peer_coord_now_ms();
     if (endpoint_version > entry.endpoint_version) {
         entry.endpoint_version = endpoint_version;
     }
-    entry.state = state;
+    entry.last_observed_ms = now;
+    if (entry.state != state) {
+        entry.state = state;
+        entry.last_state_change_ms = now;
+    }
 }
 
 void PeerCoord::SetState(const std::string& peer_virtual_ip, PeerEndpointState state) {
     std::lock_guard<std::mutex> lock(mutex_);
-    peers_[peer_virtual_ip].state = state;
+    Entry& entry = peers_[peer_virtual_ip];
+    entry.last_observed_ms = peer_coord_now_ms();
+    if (entry.state != state) {
+        entry.state = state;
+        entry.last_state_change_ms = entry.last_observed_ms;
+    }
 }
 
 uint64_t PeerCoord::GetEndpointVersion(const std::string& peer_virtual_ip) const {
@@ -48,6 +80,8 @@ std::vector<PeerCoordStatus> PeerCoord::Snapshot() const {
         status.peer_virtual_ip = it->first;
         status.endpoint_version = it->second.endpoint_version;
         status.state = it->second.state;
+        status.last_observed_ms = it->second.last_observed_ms;
+        status.last_state_change_ms = it->second.last_state_change_ms;
         snapshot.push_back(status);
     }
     return snapshot;

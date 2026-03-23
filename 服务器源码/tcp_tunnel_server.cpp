@@ -2380,6 +2380,9 @@ private:
                                      frame_type == packet_tunnel::kFramePeerAck
                                          ? PeerEndpointState::Active
                                          : PeerEndpointState::OfferPending);
+        if (frame_type == packet_tunnel::kFramePeerKeepalive) {
+            peer_coord_.TouchPeer(sender_virtual_ip, sender_version);
+        }
 
         Logger::info("[IP Tunnel|" + sender_session->session_uuid + "] relay " +
                      packet_tunnel_frame_name(frame_type) + " " +
@@ -2916,12 +2919,16 @@ private:
                                     " payload_len=" + to_string(payload_len));
                     continue;
                 }
-                peer_coord_.ObservePeerFrame(ipv4_be_to_string(signal.peer_virtual_ip_be),
-                                             signal.endpoint_version,
-                                             frame_type == packet_tunnel::kFramePeerAck ||
-                                             frame_type == packet_tunnel::kFramePeerKeepalive
-                                                 ? PeerEndpointState::Active
-                                                 : PeerEndpointState::OfferPending);
+                if (frame_type == packet_tunnel::kFramePeerKeepalive) {
+                    peer_coord_.TouchPeer(ipv4_be_to_string(signal.peer_virtual_ip_be),
+                                          signal.endpoint_version);
+                } else {
+                    peer_coord_.ObservePeerFrame(ipv4_be_to_string(signal.peer_virtual_ip_be),
+                                                 signal.endpoint_version,
+                                                 frame_type == packet_tunnel::kFramePeerAck
+                                                     ? PeerEndpointState::Active
+                                                     : PeerEndpointState::OfferPending);
+                }
                 Logger::debug("[IP Tunnel|" + session->session_uuid + "] peer control " +
                               packet_tunnel_frame_name(frame_type) +
                               ": peer=" + ipv4_be_to_string(signal.peer_virtual_ip_be) +
@@ -3286,12 +3293,16 @@ private:
                                         " payload_len=" + to_string(payload_len));
                         continue;
                     }
-                    peer_coord_.ObservePeerFrame(ipv4_be_to_string(signal.peer_virtual_ip_be),
-                                                 signal.endpoint_version,
-                                                 frame_type == packet_tunnel::kFramePeerAck ||
-                                                 frame_type == packet_tunnel::kFramePeerKeepalive
-                                                     ? PeerEndpointState::Active
-                                                 : PeerEndpointState::OfferPending);
+                    if (frame_type == packet_tunnel::kFramePeerKeepalive) {
+                        peer_coord_.TouchPeer(ipv4_be_to_string(signal.peer_virtual_ip_be),
+                                              signal.endpoint_version);
+                    } else {
+                        peer_coord_.ObservePeerFrame(ipv4_be_to_string(signal.peer_virtual_ip_be),
+                                                     signal.endpoint_version,
+                                                     frame_type == packet_tunnel::kFramePeerAck
+                                                         ? PeerEndpointState::Active
+                                                         : PeerEndpointState::OfferPending);
+                    }
                     Logger::debug("[IP Tunnel|" + session_uuid + "] peer control " +
                                   packet_tunnel_frame_name(frame_type) +
                                   ": peer=" + ipv4_be_to_string(signal.peer_virtual_ip_be) +

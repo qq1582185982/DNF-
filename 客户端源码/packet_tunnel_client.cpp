@@ -643,14 +643,13 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
         }
 
         if (peer_link_manager_ != NULL) {
-            PeerRouteState state = PeerRouteState::Probing;
-            if (frame_type == packet_tunnel::kFramePeerAck ||
-                frame_type == packet_tunnel::kFramePeerKeepalive) {
-                state = PeerRouteState::DirectReady;
+            if (frame_type == packet_tunnel::kFramePeerHello) {
+                peer_link_manager_->MarkPeerProbing(signal.peer_virtual_ip, signal.endpoint_version);
+            } else if (frame_type == packet_tunnel::kFramePeerAck) {
+                peer_link_manager_->MarkPeerDirectReady(signal.peer_virtual_ip, signal.endpoint_version);
+            } else {
+                peer_link_manager_->TouchPeer(signal.peer_virtual_ip, signal.endpoint_version);
             }
-            peer_link_manager_->ObservePeerFrame(signal.peer_virtual_ip,
-                                                 signal.endpoint_version,
-                                                 state);
         }
 
         PacketTunnelDebugLog("peer control " + PacketTunnelFrameName(frame_type) +
@@ -682,9 +681,8 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             return true;
         }
         if (peer_link_manager_ != NULL) {
-            peer_link_manager_->ObservePeerFrame(disable.peer_virtual_ip,
-                                                 disable.endpoint_version,
-                                                 PeerRouteState::Cooldown);
+            peer_link_manager_->MarkPeerCooldown(disable.peer_virtual_ip,
+                                                 disable.endpoint_version);
         }
         PacketTunnelDebugLog("peer control peer_disable: peer=" + disable.peer_virtual_ip +
                              " version=" + std::to_string(disable.endpoint_version) +
