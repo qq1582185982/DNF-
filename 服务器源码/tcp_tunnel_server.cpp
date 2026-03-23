@@ -668,6 +668,117 @@ static bool ipv4_udp_ports(const vector<uint8_t>& packet, uint16_t* out_src_port
     return ipv4_udp_ports(packet.data(), packet.size(), out_src_port, out_dst_port);
 }
 
+static uint16_t internet_checksum(const uint8_t* data, size_t len) {
+    uint32_t sum = 0;
+
+    while (len >= 2) {
+        sum += (static_cast<uint32_t>(data[0]) << 8) | static_cast<uint32_t>(data[1]);
+        data += 2;
+        len -= 2;
+    }
+
+    if (len == 1) {
+        sum += static_cast<uint32_t>(data[0]) << 8;
+    }
+
+    while ((sum >> 16) != 0) {
+        sum = (sum & 0xFFFFU) + (sum >> 16);
+    }
+
+    return static_cast<uint16_t>(~sum & 0xFFFFU);
+}
+
+static uint16_t ipv4_transport_checksum(const uint8_t* packet, size_t packet_len) {
+    if (packet == nullptr || packet_len < 20) {
+        return 0;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len) {
+        return 0;
+    }
+
+    const uint16_t total_len = (static_cast<uint16_t>(packet[2]) << 8) | static_cast<uint16_t>(packet[3]);
+    if (total_len < ip_header_len || packet_len < total_len) {
+        return 0;
+    }
+
+    const uint8_t protocol = packet[9];
+    const size_t transport_len = static_cast<size_t>(total_len - ip_header_len);
+    const uint8_t* transport = packet + ip_header_len;
+
+    uint32_t sum = 0;
+    for (int i = 12; i < 20; i += 2) {
+        sum += (static_cast<uint32_t>(packet[i]) << 8) | static_cast<uint32_t>(packet[i + 1]);
+    }
+    sum += static_cast<uint32_t>(protocol);
+    sum += static_cast<uint32_t>(transport_len);
+
+    size_t remaining = transport_len;
+    while (remaining >= 2) {
+        sum += (static_cast<uint32_t>(transport[0]) << 8) | static_cast<uint32_t>(transport[1]);
+        transport += 2;
+        remaining -= 2;
+    }
+
+    if (remaining == 1) {
+        sum += static_cast<uint32_t>(transport[0]) << 8;
+    }
+
+    while ((sum >> 16) != 0) {
+        sum = (sum & 0xFFFFU) + (sum >> 16);
+    }
+
+    uint16_t checksum = static_cast<uint16_t>(~sum & 0xFFFFU);
+    if (checksum == 0) {
+        checksum = 0xFFFF;
+    }
+    return checksum;
+}
+
+static bool rewrite_client_bound_udp_source_ip(vector<uint8_t>* packet,
+                                               uint32_t from_ip_be,
+                                               uint32_t to_ip_be) {
+    if (packet == nullptr || packet->size() < 20) {
+        return false;
+    }
+
+    vector<uint8_t>& bytes = *packet;
+    if (((bytes[0] >> 4) & 0x0F) != 4) {
+        return false;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(bytes[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || bytes.size() < ip_header_len + sizeof(udphdr)) {
+        return false;
+    }
+
+    if (bytes[9] != IPPROTO_UDP) {
+        return false;
+    }
+
+    uint32_t current_src_ip_be = 0;
+    memcpy(&current_src_ip_be, &bytes[12], sizeof(current_src_ip_be));
+    if (current_src_ip_be != from_ip_be || current_src_ip_be == to_ip_be) {
+        return false;
+    }
+
+    memcpy(&bytes[12], &to_ip_be, sizeof(to_ip_be));
+
+    bytes[10] = 0;
+    bytes[11] = 0;
+    const uint16_t ip_checksum = internet_checksum(bytes.data(), ip_header_len);
+    bytes[10] = static_cast<uint8_t>((ip_checksum >> 8) & 0xFF);
+    bytes[11] = static_cast<uint8_t>(ip_checksum & 0xFF);
+
+    bytes[ip_header_len + 6] = 0;
+    bytes[ip_header_len + 7] = 0;
+    const uint16_t udp_checksum = ipv4_transport_checksum(bytes.data(), bytes.size());
+    bytes[ip_header_len + 6] = static_cast<uint8_t>((udp_checksum >> 8) & 0xFF);
+    bytes[ip_header_len + 7] = static_cast<uint8_t>(udp_checksum & 0xFF);
+    return true;
+}
+
 static bool ipv4_is_noisy_udp_for_logging(uint32_t dst_ip_be, uint16_t src_port, uint16_t dst_port) {
     const uint8_t* dst = reinterpret_cast<const uint8_t*>(&dst_ip_be);
     const bool is_multicast = (dst[0] >= 224 && dst[0] <= 239);
@@ -2050,6 +2161,19 @@ private:
             }
 
             const uint8_t protocol = ipv4_protocol(packet);
+            if (protocol == IPPROTO_UDP &&
+                has_gateway_ip_be &&
+                has_server_virtual_ip_be &&
+                src_ip_be == gateway_ip_be &&
+                server_virtual_ip_be != gateway_ip_be) {
+                if (rewrite_client_bound_udp_source_ip(&packet, gateway_ip_be, server_virtual_ip_be)) {
+                    Logger::info("[IP Tunnel|" + session->session_uuid + "] rewrite UDP reply src " +
+                                 ipv4_be_to_string(gateway_ip_be) + " -> " +
+                                 ipv4_be_to_string(server_virtual_ip_be));
+                    src_ip_be = server_virtual_ip_be;
+                }
+            }
+
             if (protocol == IPPROTO_ICMP || protocol == IPPROTO_UDP ||
                 src_ip_be == game_server_ip_be || src_ip_be == server_virtual_ip_be ||
                 src_ip_be == gateway_ip_be) {
