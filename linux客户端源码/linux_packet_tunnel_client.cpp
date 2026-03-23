@@ -80,6 +80,20 @@ std::string LinuxIpv4ToString(const uint8_t* addr) {
     return std::string(buffer);
 }
 
+bool ParseLinuxIpv4StringToBe(const std::string& value, uint32_t* out_ip_be) {
+    if (out_ip_be == NULL || value.empty()) {
+        return false;
+    }
+
+    in_addr addr = {};
+    if (inet_pton(AF_INET, value.c_str(), &addr) != 1) {
+        return false;
+    }
+
+    *out_ip_be = addr.s_addr;
+    return true;
+}
+
 std::string LinuxPeerEndpointToString(uint8_t family, const uint8_t* addr, uint16_t port) {
     char buffer[INET6_ADDRSTRLEN] = {};
     if (family == packet_tunnel::kPeerEndpointFamilyIpv4) {
@@ -147,7 +161,8 @@ LinuxPacketTunnelClient::LinuxPacketTunnelClient(const std::string& tunnel_host,
       connected_(false),
       stop_requested_(false),
       last_receive_ms_(0),
-      peer_link_manager_(new LinuxPeerLinkManager()) {}
+      peer_link_manager_(new LinuxPeerLinkManager()),
+      peer_signal_nonce_(1) {}
 
 LinuxPacketTunnelClient::~LinuxPacketTunnelClient() {
     Stop();
@@ -389,6 +404,22 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
         LogInfo("peer control peer_offer: peer=" + offer.peer_virtual_ip +
                 " version=" + std::to_string(offer.endpoint_version) +
                 " endpoint=" + offer.endpoint);
+        const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
+        if (SendPeerSignalFrame(packet_tunnel::kFramePeerHello,
+                                offer.peer_virtual_ip,
+                                offer.endpoint_version,
+                                nonce)) {
+            if (peer_link_manager_ != NULL) {
+                peer_link_manager_->MarkPeerProbing(offer.peer_virtual_ip);
+            }
+            LogInfo("peer control send peer_hello: peer=" + offer.peer_virtual_ip +
+                    " version=" + std::to_string(offer.endpoint_version) +
+                    " nonce=" + std::to_string(nonce));
+        } else {
+            LogWarn("peer control send peer_hello failed: peer=" + offer.peer_virtual_ip +
+                    " version=" + std::to_string(offer.endpoint_version) +
+                    " nonce=" + std::to_string(nonce));
+        }
         return true;
     }
 
@@ -417,6 +448,20 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                 ": peer=" + signal.peer_virtual_ip +
                 " version=" + std::to_string(signal.endpoint_version) +
                 " nonce=" + std::to_string(signal.nonce));
+        if (frame_type == packet_tunnel::kFramePeerHello) {
+            if (SendPeerSignalFrame(packet_tunnel::kFramePeerAck,
+                                    signal.peer_virtual_ip,
+                                    signal.endpoint_version,
+                                    signal.nonce)) {
+                LogInfo("peer control send peer_ack: peer=" + signal.peer_virtual_ip +
+                        " version=" + std::to_string(signal.endpoint_version) +
+                        " nonce=" + std::to_string(signal.nonce));
+            } else {
+                LogWarn("peer control send peer_ack failed: peer=" + signal.peer_virtual_ip +
+                        " version=" + std::to_string(signal.endpoint_version) +
+                        " nonce=" + std::to_string(signal.nonce));
+            }
+        }
         return true;
     }
 
@@ -438,6 +483,22 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
     }
 
     return false;
+}
+
+bool LinuxPacketTunnelClient::SendPeerSignalFrame(uint8_t frame_type,
+                                                  const std::string& target_peer_virtual_ip,
+                                                  uint64_t endpoint_version,
+                                                  uint32_t nonce) {
+    uint32_t peer_virtual_ip_be = 0;
+    if (!ParseLinuxIpv4StringToBe(target_peer_virtual_ip, &peer_virtual_ip_be)) {
+        return false;
+    }
+
+    std::vector<uint8_t> payload(packet_tunnel::kPeerSignalPayloadSize, 0);
+    packet_tunnel::write_u32_be(payload.data(), ntohl(peer_virtual_ip_be));
+    packet_tunnel::write_u64_be(payload.data() + 4, endpoint_version);
+    packet_tunnel::write_u32_be(payload.data() + 12, nonce);
+    return SendFrame(frame_type, payload.data(), payload.size(), NULL);
 }
 
 void LinuxPacketTunnelClient::TunReadLoop() {

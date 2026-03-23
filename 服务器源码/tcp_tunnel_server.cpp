@@ -1130,6 +1130,22 @@ static bool encode_peer_offer_payload(uint32_t peer_virtual_ip_be,
     return true;
 }
 
+static bool encode_peer_signal_payload(uint32_t peer_virtual_ip_be,
+                                       uint64_t endpoint_version,
+                                       uint32_t nonce,
+                                       vector<uint8_t>* out_payload) {
+    if (out_payload == nullptr) {
+        return false;
+    }
+
+    vector<uint8_t> payload(packet_tunnel::kPeerSignalPayloadSize, 0);
+    packet_tunnel::write_u32_be(payload.data(), ntohl(peer_virtual_ip_be));
+    packet_tunnel::write_u64_be(payload.data() + 4, endpoint_version);
+    packet_tunnel::write_u32_be(payload.data() + 12, nonce);
+    *out_payload = payload;
+    return true;
+}
+
 // ==================== IP替换辅助函数 ====================
 // 在payload中查找并替换IP地址(支持大端序和小端序)
 // payload: 数据载荷
@@ -2320,6 +2336,60 @@ private:
         }
     }
 
+    bool route_peer_signal_frame(const shared_ptr<PacketTunnelSession>& sender_session,
+                                 uint8_t frame_type,
+                                 const ParsedPeerSignalFrame& signal) {
+        if (!sender_session || !sender_session->active || !sender_session->use_udp) {
+            return false;
+        }
+
+        shared_ptr<PacketTunnelSession> target_session;
+        {
+            lock_guard<mutex> lock(packet_tunnel_mutex);
+            map<uint32_t, shared_ptr<PacketTunnelSession>>::const_iterator it =
+                packet_tunnel_sessions.find(signal.peer_virtual_ip_be);
+            if (it != packet_tunnel_sessions.end()) {
+                target_session = it->second;
+            }
+        }
+
+        if (!target_session || !target_session->active || !target_session->use_udp) {
+            return false;
+        }
+
+        const string sender_virtual_ip = ipv4_be_to_string(sender_session->virtual_ip_be);
+        uint64_t sender_version = peer_coord_.GetEndpointVersion(sender_virtual_ip);
+        if (sender_version == 0) {
+            sender_version = peer_coord_.BumpEndpointVersion(sender_virtual_ip);
+        }
+
+        vector<uint8_t> payload;
+        if (!encode_peer_signal_payload(sender_session->virtual_ip_be,
+                                        sender_version,
+                                        signal.nonce,
+                                        &payload)) {
+            return false;
+        }
+
+        if (!send_packet_tunnel_frame(target_session, frame_type, payload.data(), payload.size())) {
+            return false;
+        }
+
+        peer_coord_.ObservePeerFrame(sender_virtual_ip,
+                                     sender_version,
+                                     frame_type == packet_tunnel::kFramePeerAck
+                                         ? PeerEndpointState::Active
+                                         : PeerEndpointState::OfferPending);
+
+        Logger::info("[IP Tunnel|" + sender_session->session_uuid + "] relay " +
+                     packet_tunnel_frame_name(frame_type) + " " +
+                     sender_virtual_ip + " -> " +
+                     ipv4_be_to_string(target_session->virtual_ip_be) +
+                     " nonce=" + to_string(signal.nonce) +
+                     " version=" + to_string(sender_version));
+        return true;
+    }
+
     void packet_tunnel_tun_loop() {
         while (running && tun_manager.IsActive()) {
             vector<uint8_t> packet;
@@ -2806,6 +2876,13 @@ private:
                               ": peer=" + ipv4_be_to_string(signal.peer_virtual_ip_be) +
                               " version=" + to_string(signal.endpoint_version) +
                               " nonce=" + to_string(signal.nonce));
+                if ((frame_type == packet_tunnel::kFramePeerHello ||
+                     frame_type == packet_tunnel::kFramePeerAck) &&
+                    !route_peer_signal_frame(session, frame_type, signal)) {
+                    Logger::warning("[IP Tunnel|" + session->session_uuid + "] failed to relay " +
+                                    packet_tunnel_frame_name(frame_type) +
+                                    " to peer=" + ipv4_be_to_string(signal.peer_virtual_ip_be));
+                }
                 continue;
             }
 
@@ -3158,12 +3235,19 @@ private:
                                                  frame_type == packet_tunnel::kFramePeerAck ||
                                                  frame_type == packet_tunnel::kFramePeerKeepalive
                                                      ? PeerEndpointState::Active
-                                                     : PeerEndpointState::OfferPending);
+                                                 : PeerEndpointState::OfferPending);
                     Logger::debug("[IP Tunnel|" + session_uuid + "] peer control " +
                                   packet_tunnel_frame_name(frame_type) +
                                   ": peer=" + ipv4_be_to_string(signal.peer_virtual_ip_be) +
                                   " version=" + to_string(signal.endpoint_version) +
                                   " nonce=" + to_string(signal.nonce));
+                    if ((frame_type == packet_tunnel::kFramePeerHello ||
+                         frame_type == packet_tunnel::kFramePeerAck) &&
+                        !route_peer_signal_frame(session, frame_type, signal)) {
+                        Logger::warning("[IP Tunnel|" + session_uuid + "] failed to relay " +
+                                        packet_tunnel_frame_name(frame_type) +
+                                        " to peer=" + ipv4_be_to_string(signal.peer_virtual_ip_be));
+                    }
                     continue;
                 }
 

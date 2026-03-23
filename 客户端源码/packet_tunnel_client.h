@@ -36,6 +36,10 @@ private:
     void WintunReadLoop();
     void HeartbeatLoop();
     bool HandlePeerControlFrame(uint8_t frame_type, const uint8_t* payload, size_t length);
+    bool SendPeerSignalFrame(uint8_t frame_type,
+                             const std::string& target_peer_virtual_ip,
+                             uint64_t endpoint_version,
+                             uint32_t nonce);
     bool SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg);
     bool SendDatagram(const uint8_t* data, size_t length, std::wstring* error_msg);
     int RecvDatagram(uint8_t* data, size_t length, std::wstring* error_msg);
@@ -57,4 +61,5 @@ private:
     std::thread heartbeat_thread_;
     CRITICAL_SECTION send_lock_;
     PeerLinkManager* peer_link_manager_;
+    std::atomic<uint32_t> peer_signal_nonce_;
 };

@@ -54,6 +54,20 @@ std::string Ipv4ToString(const uint8_t* addr) {
     return std::string(ip_buf);
 }
 
+bool ParseIpv4StringToBe(const std::string& value, uint32_t* out_ip_be) {
+    if (out_ip_be == NULL || value.empty()) {
+        return false;
+    }
+
+    IN_ADDR addr = {};
+    if (InetPtonA(AF_INET, value.c_str(), &addr) != 1) {
+        return false;
+    }
+
+    *out_ip_be = addr.S_un.S_addr;
+    return true;
+}
+
 bool IsNoisyUdpForLogging(const uint8_t* packet, size_t packet_len) {
     if (packet == NULL || packet_len < 20) {
         return true;
@@ -217,7 +231,8 @@ PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
       connected_(false),
       stop_requested_(false),
       last_receive_tick_(0),
-      peer_link_manager_(new PeerLinkManager()) {
+      peer_link_manager_(new PeerLinkManager()),
+      peer_signal_nonce_(1) {
     InitializeCriticalSection(&send_lock_);
 }
 
@@ -568,6 +583,22 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
         PacketTunnelDebugLog("peer control peer_offer: peer=" + offer.peer_virtual_ip +
                              " version=" + std::to_string(offer.endpoint_version) +
                              " endpoint=" + offer.endpoint);
+        const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
+        if (SendPeerSignalFrame(packet_tunnel::kFramePeerHello,
+                                offer.peer_virtual_ip,
+                                offer.endpoint_version,
+                                nonce)) {
+            if (peer_link_manager_ != NULL) {
+                peer_link_manager_->MarkPeerProbing(offer.peer_virtual_ip);
+            }
+            PacketTunnelDebugLog("peer control send peer_hello: peer=" + offer.peer_virtual_ip +
+                                 " version=" + std::to_string(offer.endpoint_version) +
+                                 " nonce=" + std::to_string(nonce));
+        } else {
+            PacketTunnelDebugLog("peer control send peer_hello failed: peer=" + offer.peer_virtual_ip +
+                                 " version=" + std::to_string(offer.endpoint_version) +
+                                 " nonce=" + std::to_string(nonce));
+        }
         return true;
     }
 
@@ -596,6 +627,21 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                              ": peer=" + signal.peer_virtual_ip +
                              " version=" + std::to_string(signal.endpoint_version) +
                              " nonce=" + std::to_string(signal.nonce));
+
+        if (frame_type == packet_tunnel::kFramePeerHello) {
+            if (SendPeerSignalFrame(packet_tunnel::kFramePeerAck,
+                                    signal.peer_virtual_ip,
+                                    signal.endpoint_version,
+                                    signal.nonce)) {
+                PacketTunnelDebugLog("peer control send peer_ack: peer=" + signal.peer_virtual_ip +
+                                     " version=" + std::to_string(signal.endpoint_version) +
+                                     " nonce=" + std::to_string(signal.nonce));
+            } else {
+                PacketTunnelDebugLog("peer control send peer_ack failed: peer=" + signal.peer_virtual_ip +
+                                     " version=" + std::to_string(signal.endpoint_version) +
+                                     " nonce=" + std::to_string(signal.nonce));
+            }
+        }
         return true;
     }
 
@@ -617,6 +663,22 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
     }
 
     return false;
+}
+
+bool PacketTunnelClient::SendPeerSignalFrame(uint8_t frame_type,
+                                             const std::string& target_peer_virtual_ip,
+                                             uint64_t endpoint_version,
+                                             uint32_t nonce) {
+    uint32_t peer_virtual_ip_be = 0;
+    if (!ParseIpv4StringToBe(target_peer_virtual_ip, &peer_virtual_ip_be)) {
+        return false;
+    }
+
+    std::vector<uint8_t> payload(packet_tunnel::kPeerSignalPayloadSize, 0);
+    packet_tunnel::write_u32_be(payload.data(), ntohl(peer_virtual_ip_be));
+    packet_tunnel::write_u64_be(payload.data() + 4, endpoint_version);
+    packet_tunnel::write_u32_be(payload.data() + 12, nonce);
+    return SendFrame(frame_type, payload.data(), payload.size(), NULL);
 }
 
 bool PacketTunnelClient::SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg) {

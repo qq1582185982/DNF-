@@ -29,6 +29,10 @@ private:
     bool ReceiveHandshakeAck(std::string* error);
     bool StartThreads(std::string* error);
     bool HandlePeerControlFrame(uint8_t frame_type, const uint8_t* payload, size_t length);
+    bool SendPeerSignalFrame(uint8_t frame_type,
+                             const std::string& target_peer_virtual_ip,
+                             uint64_t endpoint_version,
+                             uint32_t nonce);
     void SocketReadLoop();
     void TunReadLoop();
     void HeartbeatLoop();
@@ -52,4 +56,5 @@ private:
     std::thread heartbeat_thread_;
     std::mutex send_mutex_;
     LinuxPeerLinkManager* peer_link_manager_;
+    std::atomic<uint32_t> peer_signal_nonce_;
 };
