@@ -366,6 +366,12 @@ void PacketTunnelClient::SocketReadLoop() {
 }
 
 void PacketTunnelClient::WintunReadLoop() {
+    uint32_t virtual_ip_be = ParseVirtualIp(NULL);
+    uint8_t leased_src_ip[4] = {};
+    if (virtual_ip_be != 0) {
+        memcpy(leased_src_ip, &virtual_ip_be, sizeof(leased_src_ip));
+    }
+
     while (!stop_requested_) {
         std::vector<uint8_t> packet;
         std::wstring err;
@@ -388,6 +394,16 @@ void PacketTunnelClient::WintunReadLoop() {
                 (packet[16] == 255 && packet[17] == 255 && packet[18] == 255 && packet[19] == 255)) {
                 continue;
             }
+        }
+
+        if (virtual_ip_be != 0 && packet.size() >= 20 &&
+            memcmp(packet.data() + 12, leased_src_ip, sizeof(leased_src_ip)) != 0) {
+            std::string desc;
+            if (TryDescribeUdpPacket(packet.data(), packet.size(), &desc)) {
+                PacketTunnelDebugLog("drop foreign-source udp before tunnel " + desc +
+                                     " expected_src=" + virtual_ip_);
+            }
+            continue;
         }
 
         if (!SendFrame(packet_tunnel::kFrameIpv4Packet, packet.data(), packet.size(), NULL)) {
