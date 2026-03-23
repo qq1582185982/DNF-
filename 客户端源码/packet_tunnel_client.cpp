@@ -1,6 +1,7 @@
 #include "packet_tunnel_client.h"
 
 #include "packet_tunnel_protocol.h"
+#include "peer_link_manager.h"
 #include "wintun_manager.h"
 
 #include <windows.h>
@@ -123,18 +124,24 @@ PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
       sock_(INVALID_SOCKET),
       connected_(false),
       stop_requested_(false),
-      last_receive_tick_(0) {
+      last_receive_tick_(0),
+      peer_link_manager_(new PeerLinkManager()) {
     InitializeCriticalSection(&send_lock_);
 }
 
 PacketTunnelClient::~PacketTunnelClient() {
     Stop();
+    delete peer_link_manager_;
+    peer_link_manager_ = NULL;
     DeleteCriticalSection(&send_lock_);
 }
 
 bool PacketTunnelClient::Start(std::wstring* error_msg) {
     Stop();
     stop_requested_ = false;
+    if (peer_link_manager_ != NULL) {
+        peer_link_manager_->SetLocalVirtualIp(virtual_ip_);
+    }
     PacketTunnelDebugLog("packet tunnel start: server=" + tunnel_server_ip_ +
                          ":" + std::to_string(tunnel_port_) +
                          " virtual_ip=" + virtual_ip_);
@@ -172,6 +179,9 @@ bool PacketTunnelClient::Start(std::wstring* error_msg) {
 void PacketTunnelClient::Stop() {
     stop_requested_ = true;
     connected_ = false;
+    if (peer_link_manager_ != NULL) {
+        peer_link_manager_->ResetAll();
+    }
 
     if (sock_ != INVALID_SOCKET) {
         closesocket(sock_);

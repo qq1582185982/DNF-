@@ -7,6 +7,8 @@
 #include <string>
 #include <thread>
 
+class LinuxPeerLinkManager;
+
 class LinuxPacketTunnelClient {
 public:
     LinuxPacketTunnelClient(const std::string& tunnel_host,
@@ -48,4 +50,5 @@ private:
     std::thread tun_thread_;
     std::thread heartbeat_thread_;
     std::mutex send_mutex_;
+    LinuxPeerLinkManager* peer_link_manager_;
 };

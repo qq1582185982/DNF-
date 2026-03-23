@@ -10,6 +10,7 @@
 #include <string>
 #include <thread>
 
+class PeerLinkManager;
 class WintunManager;
 
 class PacketTunnelClient {
@@ -54,4 +55,5 @@ private:
     std::thread wintun_read_thread_;
     std::thread heartbeat_thread_;
     CRITICAL_SECTION send_lock_;
+    PeerLinkManager* peer_link_manager_;
 };

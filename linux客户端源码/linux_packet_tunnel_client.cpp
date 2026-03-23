@@ -1,5 +1,6 @@
 #include "linux_packet_tunnel_client.h"
 
+#include "linux_peer_link_manager.h"
 #include "packet_tunnel_protocol.h"
 
 #include <arpa/inet.h>
@@ -44,15 +45,21 @@ LinuxPacketTunnelClient::LinuxPacketTunnelClient(const std::string& tunnel_host,
       sock_(-1),
       connected_(false),
       stop_requested_(false),
-      last_receive_ms_(0) {}
+      last_receive_ms_(0),
+      peer_link_manager_(new LinuxPeerLinkManager()) {}
 
 LinuxPacketTunnelClient::~LinuxPacketTunnelClient() {
     Stop();
+    delete peer_link_manager_;
+    peer_link_manager_ = NULL;
 }
 
 bool LinuxPacketTunnelClient::Start(std::string* error) {
     Stop();
     stop_requested_ = false;
+    if (peer_link_manager_ != NULL) {
+        peer_link_manager_->SetLocalVirtualIp(virtual_ip_);
+    }
 
     if (!ConnectSocket(error)) {
         return false;
@@ -77,6 +84,9 @@ bool LinuxPacketTunnelClient::Start(std::string* error) {
 void LinuxPacketTunnelClient::Stop() {
     stop_requested_ = true;
     connected_ = false;
+    if (peer_link_manager_ != NULL) {
+        peer_link_manager_->ResetAll();
+    }
 
     if (sock_ >= 0) {
         close(sock_);

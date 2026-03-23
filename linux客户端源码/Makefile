@@ -12,7 +12,8 @@ SOURCES := \
     linux_config_client.cpp \
     linux_lease_client.cpp \
     linux_tun_manager.cpp \
-    linux_packet_tunnel_client.cpp
+    linux_packet_tunnel_client.cpp \
+    linux_peer_link_manager.cpp
 
 OBJECTS := $(SOURCES:.cpp=.o)
 

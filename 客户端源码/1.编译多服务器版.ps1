@@ -33,7 +33,7 @@ $batchContent = @(
     ('call "{0}" >nul 2>&1' -f $vsPath),
     'if errorlevel 1 exit /b 1',
     'rc /fo app.res app.rc || exit /b 1',
-    'cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe"DNF_Proxy_Client_MultiServer_v12.4.0.exe" tcp_proxy_client_no_config.cpp tcp_config_client.cpp ip_lease_client.cpp wintun_manager.cpp packet_tunnel_client.cpp server_selector_gui.cpp config_manager.cpp auto_updater.cpp app.res /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup ws2_32.lib advapi32.lib iphlpapi.lib shell32.lib comctl32.lib user32.lib gdi32.lib gdiplus.lib ole32.lib',
+    'cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe"DNF_Proxy_Client_MultiServer_v12.4.0.exe" tcp_proxy_client_no_config.cpp tcp_config_client.cpp ip_lease_client.cpp wintun_manager.cpp packet_tunnel_client.cpp peer_link_manager.cpp server_selector_gui.cpp config_manager.cpp auto_updater.cpp app.res /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup ws2_32.lib advapi32.lib iphlpapi.lib shell32.lib comctl32.lib user32.lib gdi32.lib gdiplus.lib ole32.lib',
     'if errorlevel 1 exit /b 1',
     'exit /b 0'
 )
@@ -48,6 +48,7 @@ Write-Host "  - TCP Config: tcp_config_client.cpp" -ForegroundColor Gray
 Write-Host "  - IP Lease: ip_lease_client.cpp" -ForegroundColor Gray
 Write-Host "  - Wintun Runtime: wintun_manager.cpp + wintun.dll" -ForegroundColor Gray
 Write-Host "  - IP Tunnel Session: packet_tunnel_client.cpp" -ForegroundColor Gray
+Write-Host "  - Peer Control Skeleton: peer_link_manager.cpp" -ForegroundColor Gray
 Write-Host "  - GUI: server_selector_gui.cpp" -ForegroundColor Gray
 Write-Host "  - Config: config_manager.cpp" -ForegroundColor Gray
 Write-Host "  - Auto Update: auto_updater.cpp" -ForegroundColor Gray
@@ -100,6 +101,7 @@ Remove-Item "tcp_config_client.obj" -ErrorAction SilentlyContinue
 Remove-Item "ip_lease_client.obj" -ErrorAction SilentlyContinue
 Remove-Item "wintun_manager.obj" -ErrorAction SilentlyContinue
 Remove-Item "packet_tunnel_client.obj" -ErrorAction SilentlyContinue
+Remove-Item "peer_link_manager.obj" -ErrorAction SilentlyContinue
 Remove-Item "server_selector_gui.obj" -ErrorAction SilentlyContinue
 Remove-Item "config_manager.obj" -ErrorAction SilentlyContinue
 Remove-Item "auto_updater.obj" -ErrorAction SilentlyContinue
