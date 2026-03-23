@@ -33,6 +33,9 @@ private:
                              const std::string& target_peer_virtual_ip,
                              uint64_t endpoint_version,
                              uint32_t nonce);
+    bool SendPeerDisableFrame(const std::string& target_peer_virtual_ip,
+                              uint64_t endpoint_version,
+                              uint8_t reason);
     void SocketReadLoop();
     void TunReadLoop();
     void HeartbeatLoop();

@@ -2390,6 +2390,53 @@ private:
         return true;
     }
 
+    bool route_peer_disable_frame(const shared_ptr<PacketTunnelSession>& sender_session,
+                                  const ParsedPeerDisableFrame& disable) {
+        if (!sender_session || !sender_session->active || !sender_session->use_udp) {
+            return false;
+        }
+
+        shared_ptr<PacketTunnelSession> target_session;
+        {
+            lock_guard<mutex> lock(packet_tunnel_mutex);
+            map<uint32_t, shared_ptr<PacketTunnelSession>>::const_iterator it =
+                packet_tunnel_sessions.find(disable.peer_virtual_ip_be);
+            if (it != packet_tunnel_sessions.end()) {
+                target_session = it->second;
+            }
+        }
+
+        if (!target_session || !target_session->active || !target_session->use_udp) {
+            return false;
+        }
+
+        const string sender_virtual_ip = ipv4_be_to_string(sender_session->virtual_ip_be);
+        uint64_t sender_version = peer_coord_.GetEndpointVersion(sender_virtual_ip);
+        if (sender_version == 0) {
+            sender_version = peer_coord_.BumpEndpointVersion(sender_virtual_ip);
+        }
+
+        vector<uint8_t> payload(packet_tunnel::kPeerDisablePayloadSize, 0);
+        packet_tunnel::write_u32_be(payload.data(), ntohl(sender_session->virtual_ip_be));
+        packet_tunnel::write_u64_be(payload.data() + 4, sender_version);
+        payload[12] = disable.reason;
+
+        if (!send_packet_tunnel_frame(target_session,
+                                      packet_tunnel::kFramePeerDisable,
+                                      payload.data(),
+                                      payload.size())) {
+            return false;
+        }
+
+        peer_coord_.ObservePeerFrame(sender_virtual_ip, sender_version, PeerEndpointState::RelayOnly);
+        Logger::info("[IP Tunnel|" + sender_session->session_uuid + "] relay peer_disable " +
+                     sender_virtual_ip + " -> " +
+                     ipv4_be_to_string(target_session->virtual_ip_be) +
+                     " reason=" + to_string((int)disable.reason) +
+                     " version=" + to_string(sender_version));
+        return true;
+    }
+
     void packet_tunnel_tun_loop() {
         while (running && tun_manager.IsActive()) {
             vector<uint8_t> packet;
@@ -2855,6 +2902,10 @@ private:
                                   ": peer=" + ipv4_be_to_string(disable.peer_virtual_ip_be) +
                                   " version=" + to_string(disable.endpoint_version) +
                                   " reason=" + to_string((int)disable.reason));
+                    if (!route_peer_disable_frame(session, disable)) {
+                        Logger::warning("[IP Tunnel|" + session->session_uuid + "] failed to relay peer_disable to peer=" +
+                                        ipv4_be_to_string(disable.peer_virtual_ip_be));
+                    }
                     continue;
                 }
 
@@ -2877,7 +2928,8 @@ private:
                               " version=" + to_string(signal.endpoint_version) +
                               " nonce=" + to_string(signal.nonce));
                 if ((frame_type == packet_tunnel::kFramePeerHello ||
-                     frame_type == packet_tunnel::kFramePeerAck) &&
+                     frame_type == packet_tunnel::kFramePeerAck ||
+                     frame_type == packet_tunnel::kFramePeerKeepalive) &&
                     !route_peer_signal_frame(session, frame_type, signal)) {
                     Logger::warning("[IP Tunnel|" + session->session_uuid + "] failed to relay " +
                                     packet_tunnel_frame_name(frame_type) +
@@ -3220,6 +3272,10 @@ private:
                                       ": peer=" + ipv4_be_to_string(disable.peer_virtual_ip_be) +
                                       " version=" + to_string(disable.endpoint_version) +
                                       " reason=" + to_string((int)disable.reason));
+                        if (!route_peer_disable_frame(session, disable)) {
+                            Logger::warning("[IP Tunnel|" + session_uuid + "] failed to relay peer_disable to peer=" +
+                                            ipv4_be_to_string(disable.peer_virtual_ip_be));
+                        }
                         continue;
                     }
 
@@ -3242,7 +3298,8 @@ private:
                                   " version=" + to_string(signal.endpoint_version) +
                                   " nonce=" + to_string(signal.nonce));
                     if ((frame_type == packet_tunnel::kFramePeerHello ||
-                         frame_type == packet_tunnel::kFramePeerAck) &&
+                         frame_type == packet_tunnel::kFramePeerAck ||
+                         frame_type == packet_tunnel::kFramePeerKeepalive) &&
                         !route_peer_signal_frame(session, frame_type, signal)) {
                         Logger::warning("[IP Tunnel|" + session_uuid + "] failed to relay " +
                                         packet_tunnel_frame_name(frame_type) +

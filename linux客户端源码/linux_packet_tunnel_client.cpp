@@ -200,6 +200,17 @@ bool LinuxPacketTunnelClient::Start(std::string* error) {
 void LinuxPacketTunnelClient::Stop() {
     stop_requested_ = true;
     connected_ = false;
+    if (sock_ >= 0 && peer_link_manager_ != NULL) {
+        std::vector<LinuxPeerRouteStatus> peers = peer_link_manager_->Snapshot();
+        for (size_t i = 0; i < peers.size(); ++i) {
+            if (peers[i].endpoint_version == 0) {
+                continue;
+            }
+            SendPeerDisableFrame(peers[i].peer_virtual_ip,
+                                 peers[i].endpoint_version,
+                                 packet_tunnel::kPeerDisableReasonCooldown);
+        }
+    }
     if (peer_link_manager_ != NULL) {
         peer_link_manager_->ResetAll();
     }
@@ -501,6 +512,21 @@ bool LinuxPacketTunnelClient::SendPeerSignalFrame(uint8_t frame_type,
     return SendFrame(frame_type, payload.data(), payload.size(), NULL);
 }
 
+bool LinuxPacketTunnelClient::SendPeerDisableFrame(const std::string& target_peer_virtual_ip,
+                                                   uint64_t endpoint_version,
+                                                   uint8_t reason) {
+    uint32_t peer_virtual_ip_be = 0;
+    if (!ParseLinuxIpv4StringToBe(target_peer_virtual_ip, &peer_virtual_ip_be)) {
+        return false;
+    }
+
+    std::vector<uint8_t> payload(packet_tunnel::kPeerDisablePayloadSize, 0);
+    packet_tunnel::write_u32_be(payload.data(), ntohl(peer_virtual_ip_be));
+    packet_tunnel::write_u64_be(payload.data() + 4, endpoint_version);
+    payload[12] = reason;
+    return SendFrame(packet_tunnel::kFramePeerDisable, payload.data(), payload.size(), NULL);
+}
+
 void LinuxPacketTunnelClient::TunReadLoop() {
     while (!stop_requested_) {
         std::vector<uint8_t> packet;
@@ -545,6 +571,24 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
 
         if (!SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
             break;
+        }
+
+        if (peer_link_manager_ != NULL) {
+            std::vector<LinuxPeerRouteStatus> peers = peer_link_manager_->Snapshot();
+            for (size_t i = 0; i < peers.size(); ++i) {
+                if (!peers[i].direct_ready || peers[i].endpoint_version == 0) {
+                    continue;
+                }
+                const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
+                if (SendPeerSignalFrame(packet_tunnel::kFramePeerKeepalive,
+                                        peers[i].peer_virtual_ip,
+                                        peers[i].endpoint_version,
+                                        nonce)) {
+                    LogInfo("peer control send peer_keepalive: peer=" + peers[i].peer_virtual_ip +
+                            " version=" + std::to_string(peers[i].endpoint_version) +
+                            " nonce=" + std::to_string(nonce));
+                }
+            }
         }
 
         const unsigned long long last_ms = last_receive_ms_.load();

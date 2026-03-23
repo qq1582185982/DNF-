@@ -40,6 +40,9 @@ private:
                              const std::string& target_peer_virtual_ip,
                              uint64_t endpoint_version,
                              uint32_t nonce);
+    bool SendPeerDisableFrame(const std::string& target_peer_virtual_ip,
+                              uint64_t endpoint_version,
+                              uint8_t reason);
     bool SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg);
     bool SendDatagram(const uint8_t* data, size_t length, std::wstring* error_msg);
     int RecvDatagram(uint8_t* data, size_t length, std::wstring* error_msg);

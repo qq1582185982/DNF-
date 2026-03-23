@@ -286,6 +286,17 @@ bool PacketTunnelClient::Start(std::wstring* error_msg) {
 void PacketTunnelClient::Stop() {
     stop_requested_ = true;
     connected_ = false;
+    if (sock_ != INVALID_SOCKET && peer_link_manager_ != NULL) {
+        std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
+        for (size_t i = 0; i < peers.size(); ++i) {
+            if (peers[i].endpoint_version == 0) {
+                continue;
+            }
+            SendPeerDisableFrame(peers[i].peer_virtual_ip,
+                                 peers[i].endpoint_version,
+                                 packet_tunnel::kPeerDisableReasonCooldown);
+        }
+    }
     if (peer_link_manager_ != NULL) {
         peer_link_manager_->ResetAll();
     }
@@ -554,6 +565,25 @@ void PacketTunnelClient::HeartbeatLoop() {
             break;
         }
 
+        if (peer_link_manager_ != NULL) {
+            std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
+            for (size_t i = 0; i < peers.size(); ++i) {
+                if (!peers[i].direct_ready || peers[i].endpoint_version == 0) {
+                    continue;
+                }
+                const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
+                if (SendPeerSignalFrame(packet_tunnel::kFramePeerKeepalive,
+                                        peers[i].peer_virtual_ip,
+                                        peers[i].endpoint_version,
+                                        nonce)) {
+                    PacketTunnelDebugLog("peer control send peer_keepalive: peer=" +
+                                         peers[i].peer_virtual_ip +
+                                         " version=" + std::to_string(peers[i].endpoint_version) +
+                                         " nonce=" + std::to_string(nonce));
+                }
+            }
+        }
+
         unsigned long long last_tick = last_receive_tick_.load();
         unsigned long long now_tick = GetTickCount64();
         if (last_tick != 0 && now_tick > last_tick && (now_tick - last_tick) > kHeartbeatTimeoutMs) {
@@ -679,6 +709,21 @@ bool PacketTunnelClient::SendPeerSignalFrame(uint8_t frame_type,
     packet_tunnel::write_u64_be(payload.data() + 4, endpoint_version);
     packet_tunnel::write_u32_be(payload.data() + 12, nonce);
     return SendFrame(frame_type, payload.data(), payload.size(), NULL);
+}
+
+bool PacketTunnelClient::SendPeerDisableFrame(const std::string& target_peer_virtual_ip,
+                                              uint64_t endpoint_version,
+                                              uint8_t reason) {
+    uint32_t peer_virtual_ip_be = 0;
+    if (!ParseIpv4StringToBe(target_peer_virtual_ip, &peer_virtual_ip_be)) {
+        return false;
+    }
+
+    std::vector<uint8_t> payload(packet_tunnel::kPeerDisablePayloadSize, 0);
+    packet_tunnel::write_u32_be(payload.data(), ntohl(peer_virtual_ip_be));
+    packet_tunnel::write_u64_be(payload.data() + 4, endpoint_version);
+    payload[12] = reason;
+    return SendFrame(packet_tunnel::kFramePeerDisable, payload.data(), payload.size(), NULL);
 }
 
 bool PacketTunnelClient::SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg) {
