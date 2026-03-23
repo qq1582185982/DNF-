@@ -233,6 +233,10 @@ string Logger::current_log_level = "INFO";
 mutex Logger::log_mutex;
 DWORD Logger::last_flush_tick = 0;
 
+void PacketTunnelDebugLog(const string& msg) {
+    Logger::debug("[PacketTunnel] " + msg);
+}
+
 string g_session_uuid;
 
 bool read_api_config_from_self(string& api_url, int& api_port, string& version_name, string& data_plane_mode) {
@@ -801,6 +805,8 @@ int main(int argc, char* argv[]) {
 
     // 初始化日志系统
     Logger::init(log_filename);
+    Logger::set_log_level("DEBUG");
+    Logger::info("[日志] 当前调试版本默认启用 DEBUG 日志");
 
     // 生成会话UUID
     g_session_uuid = generate_session_uuid();

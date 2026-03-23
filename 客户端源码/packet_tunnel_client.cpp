@@ -7,9 +7,12 @@
 #include <ws2tcpip.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <sstream>
 #include <vector>
+
+void PacketTunnelDebugLog(const std::string& msg);
 
 namespace {
 
@@ -23,6 +26,84 @@ std::wstring BuildSocketError(const wchar_t* prefix, int error_code) {
     std::wstringstream stream;
     stream << prefix << L" (WSA=" << error_code << L")";
     return stream.str();
+}
+
+std::string WideToUtf8(const std::wstring& value) {
+    if (value.empty()) {
+        return std::string();
+    }
+
+    int required = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, NULL, 0, NULL, NULL);
+    if (required <= 1) {
+        return std::string();
+    }
+
+    std::string utf8(required - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, &utf8[0], required, NULL, NULL);
+    return utf8;
+}
+
+std::string Ipv4ToString(const uint8_t* addr) {
+    IN_ADDR in_addr = {};
+    memcpy(&in_addr, addr, sizeof(in_addr));
+    char ip_buf[INET_ADDRSTRLEN] = {};
+    if (InetNtopA(AF_INET, &in_addr, ip_buf, sizeof(ip_buf)) == NULL) {
+        return std::string("?");
+    }
+    return std::string(ip_buf);
+}
+
+bool IsNoisyUdpForLogging(const uint8_t* packet, size_t packet_len) {
+    if (packet == NULL || packet_len < 20) {
+        return true;
+    }
+    if (((packet[0] >> 4) & 0x0F) != 4 || packet[9] != IPPROTO_UDP) {
+        return true;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len + 8) {
+        return true;
+    }
+
+    const uint16_t src_port = ntohs(*(const uint16_t*)(packet + ip_header_len));
+    const uint16_t dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
+    const uint8_t* dst_ip = packet + 16;
+
+    const bool is_multicast = (dst_ip[0] >= 224 && dst_ip[0] <= 239);
+    const bool is_limited_broadcast =
+        (dst_ip[0] == 255 && dst_ip[1] == 255 && dst_ip[2] == 255 && dst_ip[3] == 255);
+    const bool is_likely_subnet_broadcast = (dst_ip[3] == 255);
+    const bool is_common_noise_port =
+        (src_port == 137 || dst_port == 137 ||
+         src_port == 138 || dst_port == 138 ||
+         src_port == 1900 || dst_port == 1900 ||
+         src_port == 5355 || dst_port == 5355);
+
+    return is_multicast || is_limited_broadcast || is_likely_subnet_broadcast || is_common_noise_port;
+}
+
+bool TryDescribeUdpPacket(const uint8_t* packet, size_t packet_len, std::string* out_desc) {
+    if (out_desc == NULL || packet == NULL || packet_len < 20) {
+        return false;
+    }
+    if (((packet[0] >> 4) & 0x0F) != 4 || packet[9] != IPPROTO_UDP) {
+        return false;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len + 8) {
+        return false;
+    }
+
+    uint16_t src_port = ntohs(*(const uint16_t*)(packet + ip_header_len));
+    uint16_t dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
+    std::ostringstream ss;
+    ss << "src=" << Ipv4ToString(packet + 12) << ":" << src_port
+       << " dst=" << Ipv4ToString(packet + 16) << ":" << dst_port
+       << " len=" << packet_len;
+    *out_desc = ss.str();
+    return true;
 }
 
 }  // namespace
@@ -54,15 +135,27 @@ PacketTunnelClient::~PacketTunnelClient() {
 bool PacketTunnelClient::Start(std::wstring* error_msg) {
     Stop();
     stop_requested_ = false;
+    PacketTunnelDebugLog("packet tunnel start: server=" + tunnel_server_ip_ +
+                         ":" + std::to_string(tunnel_port_) +
+                         " virtual_ip=" + virtual_ip_);
 
     if (!ConnectSocket(error_msg)) {
+        if (error_msg != NULL) {
+            PacketTunnelDebugLog("connect failed: " + WideToUtf8(*error_msg));
+        }
         return false;
     }
     if (!SendHandshake(error_msg)) {
+        if (error_msg != NULL) {
+            PacketTunnelDebugLog("handshake send failed: " + WideToUtf8(*error_msg));
+        }
         Stop();
         return false;
     }
     if (!ReceiveHandshakeAck(error_msg)) {
+        if (error_msg != NULL) {
+            PacketTunnelDebugLog("handshake ack failed: " + WideToUtf8(*error_msg));
+        }
         Stop();
         return false;
     }
@@ -72,6 +165,7 @@ bool PacketTunnelClient::Start(std::wstring* error_msg) {
     }
 
     connected_ = true;
+    PacketTunnelDebugLog("packet tunnel ready");
     return true;
 }
 
@@ -93,6 +187,8 @@ void PacketTunnelClient::Stop() {
     if (heartbeat_thread_.joinable()) {
         heartbeat_thread_.join();
     }
+
+    PacketTunnelDebugLog("packet tunnel stopped");
 }
 
 bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
@@ -129,6 +225,8 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         if (connect(sock, rp->ai_addr, (int)rp->ai_addrlen) != SOCKET_ERROR) {
             sock_ = sock;
             connected = true;
+            PacketTunnelDebugLog("udp socket connected to " + tunnel_server_ip_ +
+                                 ":" + std::to_string(tunnel_port_));
             break;
         }
 
@@ -172,6 +270,9 @@ bool PacketTunnelClient::SendHandshake(std::wstring* error_msg) {
     memcpy(&handshake[tail + 2], &mtu_be, sizeof(mtu_be));
     memcpy(&handshake[tail + 4], &virtual_ip_be, sizeof(virtual_ip_be));
 
+    PacketTunnelDebugLog("sending handshake: session=" + session_uuid_ +
+                         " mtu=" + std::to_string(mtu_) +
+                         " virtual_ip=" + virtual_ip_);
     return SendDatagram(handshake.data(), handshake.size(), error_msg);
 }
 
@@ -200,6 +301,8 @@ bool PacketTunnelClient::ReceiveHandshakeAck(std::wstring* error_msg) {
     }
 
     last_receive_tick_ = GetTickCount64();
+    PacketTunnelDebugLog("received handshake ack: mtu=" + std::to_string(mtu_) +
+                         " virtual_ip=" + virtual_ip_);
     return true;
 }
 
@@ -223,6 +326,9 @@ void PacketTunnelClient::SocketReadLoop() {
         std::wstring err;
         int received = RecvDatagram(buffer.data(), buffer.size(), &err);
         if (received < 0) {
+            if (!err.empty()) {
+                PacketTunnelDebugLog("socket read loop stopped: " + WideToUtf8(err));
+            }
             break;
         }
         if (received == 0) {
@@ -246,6 +352,11 @@ void PacketTunnelClient::SocketReadLoop() {
         }
 
         if (frame_type == packet_tunnel::kFrameIpv4Packet && wintun_manager_ != NULL) {
+            std::string desc;
+            if (!IsNoisyUdpForLogging(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len) &&
+                TryDescribeUdpPacket(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len, &desc)) {
+                PacketTunnelDebugLog("udp tunnel->wintun " + desc);
+            }
             wintun_manager_->WritePacket(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len, NULL);
         }
     }
@@ -280,7 +391,14 @@ void PacketTunnelClient::WintunReadLoop() {
         }
 
         if (!SendFrame(packet_tunnel::kFrameIpv4Packet, packet.data(), packet.size(), NULL)) {
+            PacketTunnelDebugLog("wintun read loop send failed");
             break;
+        }
+
+        std::string desc;
+        if (!IsNoisyUdpForLogging(packet.data(), packet.size()) &&
+            TryDescribeUdpPacket(packet.data(), packet.size(), &desc)) {
+            PacketTunnelDebugLog("udp wintun->tunnel " + desc);
         }
     }
 
@@ -298,12 +416,14 @@ void PacketTunnelClient::HeartbeatLoop() {
         }
 
         if (!SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
+            PacketTunnelDebugLog("heartbeat send failed");
             break;
         }
 
         unsigned long long last_tick = last_receive_tick_.load();
         unsigned long long now_tick = GetTickCount64();
         if (last_tick != 0 && now_tick > last_tick && (now_tick - last_tick) > kHeartbeatTimeoutMs) {
+            PacketTunnelDebugLog("heartbeat timeout: idle_ms=" + std::to_string(now_tick - last_tick));
             break;
         }
     }

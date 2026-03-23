@@ -6,6 +6,7 @@
 #include <winsock2.h>
 
 #include <atomic>
+#include <cstdint>
 #include <string>
 #include <thread>
 

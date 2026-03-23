@@ -668,6 +668,21 @@ static bool ipv4_udp_ports(const vector<uint8_t>& packet, uint16_t* out_src_port
     return ipv4_udp_ports(packet.data(), packet.size(), out_src_port, out_dst_port);
 }
 
+static bool ipv4_is_noisy_udp_for_logging(uint32_t dst_ip_be, uint16_t src_port, uint16_t dst_port) {
+    const uint8_t* dst = reinterpret_cast<const uint8_t*>(&dst_ip_be);
+    const bool is_multicast = (dst[0] >= 224 && dst[0] <= 239);
+    const bool is_limited_broadcast =
+        (dst[0] == 255 && dst[1] == 255 && dst[2] == 255 && dst[3] == 255);
+    const bool is_likely_subnet_broadcast = (dst[3] == 255);
+    const bool is_common_noise_port =
+        (src_port == 137 || dst_port == 137 ||
+         src_port == 138 || dst_port == 138 ||
+         src_port == 1900 || dst_port == 1900 ||
+         src_port == 5355 || dst_port == 5355);
+
+    return is_multicast || is_limited_broadcast || is_likely_subnet_broadcast || is_common_noise_port;
+}
+
 static uint64_t monotonic_millis() {
     return static_cast<uint64_t>(
         chrono::duration_cast<chrono::milliseconds>(
@@ -1827,8 +1842,6 @@ private:
         string udp_endpoint_key;
         atomic<bool> active;
         uint64_t established_ms;
-        atomic<uint32_t> udp_client_to_tun_log_count;
-        atomic<uint32_t> udp_tun_to_client_log_count;
         mutex send_mutex;
 
         PacketTunnelSession(int fd,
@@ -1844,9 +1857,7 @@ private:
               use_udp(false),
               udp_addr_len(0),
               active(true),
-              established_ms(monotonic_millis()),
-              udp_client_to_tun_log_count(0),
-              udp_tun_to_client_log_count(0) {}
+              established_ms(monotonic_millis()) {}
     };
 
     ServerConfig config;
@@ -1931,11 +1942,7 @@ private:
             return;
         }
 
-        atomic<uint32_t>& counter = client_to_tun
-            ? session->udp_client_to_tun_log_count
-            : session->udp_tun_to_client_log_count;
-        uint32_t index = counter.fetch_add(1);
-        if (index >= 8) {
+        if (ipv4_is_noisy_udp_for_logging(dst_ip_be, src_port, dst_port)) {
             return;
         }
 
@@ -1947,7 +1954,6 @@ private:
 
         Logger::info("[IP Tunnel|" + session->session_uuid + "] UDP " +
                      string(client_to_tun ? "client->TUN" : "TUN->client") +
-                     " #" + to_string(index + 1) +
                      " +" + to_string(elapsed_ms) + "ms src=" +
                      ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
                      " dst=" + ipv4_be_to_string(dst_ip_be) + ":" + to_string(dst_port) +
