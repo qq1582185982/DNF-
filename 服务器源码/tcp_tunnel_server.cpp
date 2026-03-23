@@ -643,11 +643,11 @@ static uint8_t ipv4_protocol(const vector<uint8_t>& packet) {
     return packet[9];
 }
 
-static bool ipv4_udp_ports(const vector<uint8_t>& packet, uint16_t* out_src_port, uint16_t* out_dst_port) {
+static bool ipv4_udp_ports(const uint8_t* packet, size_t packet_len, uint16_t* out_src_port, uint16_t* out_dst_port) {
     if (out_src_port == nullptr || out_dst_port == nullptr) {
         return false;
     }
-    if (packet.size() < 20) {
+    if (packet == nullptr || packet_len < 20) {
         return false;
     }
     if (((packet[0] >> 4) & 0x0F) != 4 || packet[9] != IPPROTO_UDP) {
@@ -655,13 +655,23 @@ static bool ipv4_udp_ports(const vector<uint8_t>& packet, uint16_t* out_src_port
     }
 
     const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
-    if (ip_header_len < 20 || packet.size() < ip_header_len + 8) {
+    if (ip_header_len < 20 || packet_len < ip_header_len + 8) {
         return false;
     }
 
-    *out_src_port = ntohs(*(const uint16_t*)(&packet[ip_header_len]));
-    *out_dst_port = ntohs(*(const uint16_t*)(&packet[ip_header_len + 2]));
+    *out_src_port = ntohs(*(const uint16_t*)(packet + ip_header_len));
+    *out_dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
     return true;
+}
+
+static bool ipv4_udp_ports(const vector<uint8_t>& packet, uint16_t* out_src_port, uint16_t* out_dst_port) {
+    return ipv4_udp_ports(packet.data(), packet.size(), out_src_port, out_dst_port);
+}
+
+static uint64_t monotonic_millis() {
+    return static_cast<uint64_t>(
+        chrono::duration_cast<chrono::milliseconds>(
+            chrono::steady_clock::now().time_since_epoch()).count());
 }
 
 // ==================== 日志工具 ====================
@@ -1816,6 +1826,9 @@ private:
         socklen_t udp_addr_len;
         string udp_endpoint_key;
         atomic<bool> active;
+        uint64_t established_ms;
+        atomic<uint32_t> udp_client_to_tun_log_count;
+        atomic<uint32_t> udp_tun_to_client_log_count;
         mutex send_mutex;
 
         PacketTunnelSession(int fd,
@@ -1830,7 +1843,10 @@ private:
               mtu(session_mtu),
               use_udp(false),
               udp_addr_len(0),
-              active(true) {}
+              active(true),
+              established_ms(monotonic_millis()),
+              udp_client_to_tun_log_count(0),
+              udp_tun_to_client_log_count(0) {}
     };
 
     ServerConfig config;
@@ -1902,6 +1918,40 @@ private:
         }
 
         return "unknown";
+    }
+
+    void maybe_log_udp_flow_info(const shared_ptr<PacketTunnelSession>& session,
+                                 bool client_to_tun,
+                                 uint32_t src_ip_be,
+                                 uint32_t dst_ip_be,
+                                 uint16_t src_port,
+                                 uint16_t dst_port,
+                                 size_t payload_len) {
+        if (!session) {
+            return;
+        }
+
+        atomic<uint32_t>& counter = client_to_tun
+            ? session->udp_client_to_tun_log_count
+            : session->udp_tun_to_client_log_count;
+        uint32_t index = counter.fetch_add(1);
+        if (index >= 8) {
+            return;
+        }
+
+        uint64_t elapsed_ms = 0;
+        uint64_t now_ms = monotonic_millis();
+        if (now_ms >= session->established_ms) {
+            elapsed_ms = now_ms - session->established_ms;
+        }
+
+        Logger::info("[IP Tunnel|" + session->session_uuid + "] UDP " +
+                     string(client_to_tun ? "client->TUN" : "TUN->client") +
+                     " #" + to_string(index + 1) +
+                     " +" + to_string(elapsed_ms) + "ms src=" +
+                     ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
+                     " dst=" + ipv4_be_to_string(dst_ip_be) + ":" + to_string(dst_port) +
+                     " len=" + to_string(payload_len));
     }
 
     bool send_packet_tunnel_frame(const shared_ptr<PacketTunnelSession>& session,
@@ -1998,11 +2048,12 @@ private:
                 src_ip_be == game_server_ip_be || src_ip_be == server_virtual_ip_be ||
                 src_ip_be == gateway_ip_be) {
                 string extra;
+                uint16_t src_port = 0;
+                uint16_t dst_port = 0;
                 if (protocol == IPPROTO_UDP) {
-                    uint16_t src_port = 0;
-                    uint16_t dst_port = 0;
                     if (ipv4_udp_ports(packet, &src_port, &dst_port)) {
                         extra = " udp=" + to_string(src_port) + "->" + to_string(dst_port);
+                        maybe_log_udp_flow_info(session, false, src_ip_be, dst_ip_be, src_port, dst_port, packet.size());
                     }
                 }
                 Logger::debug("[IP Tunnel|" + session->session_uuid + "] TUN->client src=" +
@@ -2389,6 +2440,14 @@ private:
                                              ipv4_in_subnet_be(dst_ip_be, virtual_network_ip_be, virtual_subnet_mask_be);
             if (!dst_is_game_server && !dst_is_virtual_peer) {
                 continue;
+            }
+
+            if (payload[9] == IPPROTO_UDP) {
+                uint16_t src_port = 0;
+                uint16_t dst_port = 0;
+                if (ipv4_udp_ports(payload, payload_len, &src_port, &dst_port)) {
+                    maybe_log_udp_flow_info(session, true, src_ip_be, dst_ip_be, src_port, dst_port, payload_len);
+                }
             }
 
             string tun_error;
