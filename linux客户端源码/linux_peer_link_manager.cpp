@@ -26,7 +26,7 @@ void LinuxPeerLinkManager::ResetAll() {
     peers_.clear();
 }
 
-void LinuxPeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
+bool LinuxPeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
                                            uint64_t endpoint_version,
                                            uint8_t endpoint_family,
                                            const uint8_t* endpoint_addr,
@@ -34,6 +34,28 @@ void LinuxPeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
     std::lock_guard<std::mutex> lock(mutex_);
     Entry& entry = peers_[peer_virtual_ip];
     const uint64_t now = linux_peer_now_ms();
+    const bool same_endpoint =
+        entry.endpoint_family == endpoint_family &&
+        entry.endpoint_port == endpoint_port &&
+        memcmp(entry.endpoint_addr, endpoint_addr, sizeof(entry.endpoint_addr)) == 0;
+    const bool same_version = (entry.endpoint_version != 0 && endpoint_version == entry.endpoint_version);
+
+    if (entry.endpoint_version != 0 && endpoint_version < entry.endpoint_version) {
+        return false;
+    }
+
+    if (same_version && same_endpoint) {
+        entry.last_observed_ms = now;
+        if (entry.state == LinuxPeerRouteState::DirectReady) {
+            return false;
+        }
+        if (entry.state == LinuxPeerRouteState::Probing &&
+            entry.pending_hello_version == endpoint_version &&
+            entry.pending_hello_nonce != 0) {
+            return false;
+        }
+    }
+
     if (endpoint_version > entry.endpoint_version) {
         entry.endpoint_version = endpoint_version;
     }
@@ -48,6 +70,7 @@ void LinuxPeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
         entry.state = LinuxPeerRouteState::OfferReceived;
         entry.last_state_change_ms = now;
     }
+    return true;
 }
 
 void LinuxPeerLinkManager::TouchPeer(const std::string& peer_virtual_ip, uint64_t endpoint_version) {

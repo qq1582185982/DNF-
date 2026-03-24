@@ -35,7 +35,7 @@ public:
     void SetLocalVirtualIp(const std::string& virtual_ip);
     void ResetAll();
 
-    void UpdatePeerOffer(const std::string& peer_virtual_ip,
+    bool UpdatePeerOffer(const std::string& peer_virtual_ip,
                          uint64_t endpoint_version,
                          uint8_t endpoint_family,
                          const uint8_t* endpoint_addr,

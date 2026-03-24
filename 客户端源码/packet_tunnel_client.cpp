@@ -938,16 +938,22 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             PacketTunnelDebugLog("ignore invalid peer_offer frame len=" + std::to_string(length));
             return true;
         }
+        bool should_send_hello = true;
         if (peer_link_manager_ != NULL) {
-            peer_link_manager_->UpdatePeerOffer(offer.peer_virtual_ip,
-                                                offer.endpoint_version,
-                                                offer.endpoint_family,
-                                                offer.endpoint_addr,
-                                                offer.endpoint_port);
+            should_send_hello = peer_link_manager_->UpdatePeerOffer(offer.peer_virtual_ip,
+                                                                    offer.endpoint_version,
+                                                                    offer.endpoint_family,
+                                                                    offer.endpoint_addr,
+                                                                    offer.endpoint_port);
         }
         PacketTunnelDebugLog("peer control peer_offer: peer=" + offer.peer_virtual_ip +
                              " version=" + std::to_string(offer.endpoint_version) +
                              " endpoint=" + offer.endpoint);
+        if (!should_send_hello) {
+            PacketTunnelDebugLog("peer control ignore stable peer_offer: peer=" + offer.peer_virtual_ip +
+                                 " version=" + std::to_string(offer.endpoint_version));
+            return true;
+        }
         const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
         if (SendPeerSignalFrame(packet_tunnel::kFramePeerHello,
                                 offer.peer_virtual_ip,
