@@ -609,6 +609,10 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
         }
 
         if (frame_type == packet_tunnel::kFrameIpv4Packet && tun_manager_ != NULL) {
+            if (!from_server && !from_known_peer) {
+                LogWarn("ignore ipv4 packet from unknown endpoint");
+                continue;
+            }
             if (from_known_peer &&
                 (payload_len < 20 ||
                  LinuxIpv4ToString(buffer.data() + packet_tunnel::kFrameHeaderSize + 12) != peer_virtual_ip)) {

@@ -718,6 +718,10 @@ void PacketTunnelClient::SocketReadLoop() {
         }
 
         if (frame_type == packet_tunnel::kFrameIpv4Packet && wintun_manager_ != NULL) {
+            if (!from_server && !from_known_peer) {
+                PacketTunnelDebugLog("ignore ipv4 packet from unknown endpoint");
+                continue;
+            }
             if (from_known_peer &&
                 (payload_len < 20 ||
                  Ipv4ToString(buffer.data() + packet_tunnel::kFrameHeaderSize + 12) != peer_virtual_ip)) {
