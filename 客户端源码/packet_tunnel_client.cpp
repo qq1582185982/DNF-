@@ -28,6 +28,7 @@ const DWORD kPeerOfferTimeoutMs = 9000;
 const DWORD kPeerDirectReadyTimeoutMs = 15000;
 const DWORD kPeerCooldownTimeoutMs = 12000;
 const DWORD kPeerSnapshotLogIntervalMs = 15000;
+const DWORD kPeerRouteDebugLogIntervalMs = 2000;
 const DWORD kSocketReadTimeoutMs = 1000;
 const DWORD kWintunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
@@ -120,6 +121,37 @@ std::string BuildPeerRouteSnapshotSummary(const std::vector<PeerRouteStatus>& pe
            << " state=" << state_age << "ms]";
     }
     return ss.str();
+}
+
+std::string DescribeSinglePeerRoute(const std::vector<PeerRouteStatus>& peers,
+                                    const std::string& peer_virtual_ip,
+                                    unsigned long long now_tick) {
+    for (size_t i = 0; i < peers.size(); ++i) {
+        if (peers[i].peer_virtual_ip != peer_virtual_ip) {
+            continue;
+        }
+
+        const unsigned long long observed_age =
+            (peers[i].last_observed_ms != 0 && now_tick > peers[i].last_observed_ms)
+                ? (now_tick - peers[i].last_observed_ms)
+                : 0;
+        const unsigned long long state_age =
+            (peers[i].last_state_change_ms != 0 && now_tick > peers[i].last_state_change_ms)
+                ? (now_tick - peers[i].last_state_change_ms)
+                : 0;
+
+        std::ostringstream ss;
+        ss << peers[i].peer_virtual_ip
+           << "[" << PeerRouteStateName(peers[i].state)
+           << " v=" << peers[i].endpoint_version
+           << " family=" << static_cast<int>(peers[i].endpoint_family)
+           << " port=" << peers[i].endpoint_port
+           << " obs=" << observed_age << "ms"
+           << " state=" << state_age << "ms]";
+        return ss.str();
+    }
+
+    return std::string();
 }
 
 bool IsNoisyUdpForLogging(const uint8_t* packet, size_t packet_len) {
@@ -700,6 +732,8 @@ void PacketTunnelClient::WintunReadLoop() {
                         continue;
                     }
                     PacketTunnelDebugLog("udp peer send failed, fallback to relay " + desc);
+                } else {
+                    MaybeLogDirectRouteFallback(dst_virtual_ip, "route_unavailable");
                 }
             }
         }
@@ -790,6 +824,30 @@ void PacketTunnelClient::HeartbeatLoop() {
 
     connected_ = false;
     stop_requested_ = true;
+}
+
+void PacketTunnelClient::MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip,
+                                                     const std::string& reason) {
+    if (peer_link_manager_ == NULL || peer_virtual_ip.empty()) {
+        return;
+    }
+
+    const unsigned long long now_tick = GetTickCount64();
+    std::map<std::string, unsigned long long>::iterator it = peer_route_debug_log_tick_.find(peer_virtual_ip);
+    if (it != peer_route_debug_log_tick_.end() &&
+        now_tick >= it->second &&
+        (now_tick - it->second) < kPeerRouteDebugLogIntervalMs) {
+        return;
+    }
+
+    const std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
+    const std::string detail = DescribeSinglePeerRoute(peers, peer_virtual_ip, now_tick);
+    if (detail.empty()) {
+        return;
+    }
+
+    peer_route_debug_log_tick_[peer_virtual_ip] = now_tick;
+    PacketTunnelDebugLog("udp direct route fallback: reason=" + reason + " peer=" + detail);
 }
 
 bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,

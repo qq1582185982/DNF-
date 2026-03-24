@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <thread>
 
@@ -80,6 +81,8 @@ private:
     int RecvDatagram(uint8_t* data, size_t length, std::wstring* error_msg);
     uint32_t ParseVirtualIp(std::wstring* error_msg) const;
     static std::wstring Utf8ToWide(const std::string& value);
+    void MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip,
+                                     const std::string& reason);
 
     std::string tunnel_server_ip_;
     uint16_t tunnel_port_;
@@ -99,4 +102,5 @@ private:
     CRITICAL_SECTION send_lock_;
     PeerLinkManager* peer_link_manager_;
     std::atomic<uint32_t> peer_signal_nonce_;
+    std::map<std::string, unsigned long long> peer_route_debug_log_tick_;
 };

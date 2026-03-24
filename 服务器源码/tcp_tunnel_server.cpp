@@ -2451,13 +2451,14 @@ private:
             return false;
         }
 
-        peer_coord_.ObservePeerFrame(sender_virtual_ip,
-                                     sender_version,
-                                     frame_type == packet_tunnel::kFramePeerAck
-                                         ? PeerEndpointState::Active
-                                         : PeerEndpointState::OfferPending);
         if (frame_type == packet_tunnel::kFramePeerKeepalive) {
             peer_coord_.TouchPeer(sender_virtual_ip, sender_version);
+        } else {
+            peer_coord_.ObservePeerFrame(sender_virtual_ip,
+                                         sender_version,
+                                         frame_type == packet_tunnel::kFramePeerAck
+                                             ? PeerEndpointState::Active
+                                             : PeerEndpointState::OfferPending);
         }
 
         Logger::info("[IP Tunnel|" + sender_session->session_uuid + "] relay " +

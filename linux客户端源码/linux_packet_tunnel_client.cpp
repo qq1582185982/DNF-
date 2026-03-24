@@ -24,6 +24,7 @@ const int kPeerOfferTimeoutMs = 9000;
 const int kPeerDirectReadyTimeoutMs = 15000;
 const int kPeerCooldownTimeoutMs = 12000;
 const int kPeerSnapshotLogIntervalMs = 15000;
+const int kPeerRouteDebugLogIntervalMs = 2000;
 const int kSocketReadTimeoutMs = 1000;
 const int kTunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
@@ -121,6 +122,37 @@ std::string BuildLinuxPeerRouteSnapshotSummary(const std::vector<LinuxPeerRouteS
            << " state=" << state_age << "ms]";
     }
     return ss.str();
+}
+
+std::string DescribeSingleLinuxPeerRoute(const std::vector<LinuxPeerRouteStatus>& peers,
+                                         const std::string& peer_virtual_ip,
+                                         unsigned long long now_ms_value) {
+    for (size_t i = 0; i < peers.size(); ++i) {
+        if (peers[i].peer_virtual_ip != peer_virtual_ip) {
+            continue;
+        }
+
+        const unsigned long long observed_age =
+            (peers[i].last_observed_ms != 0 && now_ms_value > peers[i].last_observed_ms)
+                ? (now_ms_value - peers[i].last_observed_ms)
+                : 0;
+        const unsigned long long state_age =
+            (peers[i].last_state_change_ms != 0 && now_ms_value > peers[i].last_state_change_ms)
+                ? (now_ms_value - peers[i].last_state_change_ms)
+                : 0;
+
+        std::ostringstream ss;
+        ss << peers[i].peer_virtual_ip
+           << "[" << LinuxPeerRouteStateName(peers[i].state)
+           << " v=" << peers[i].endpoint_version
+           << " family=" << static_cast<int>(peers[i].endpoint_family)
+           << " port=" << peers[i].endpoint_port
+           << " obs=" << observed_age << "ms"
+           << " state=" << state_age << "ms]";
+        return ss.str();
+    }
+
+    return std::string();
 }
 
 std::string LinuxIpv4ToString(const uint8_t* addr) {
@@ -884,6 +916,8 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                         NULL)) {
                     continue;
                 }
+            } else {
+                MaybeLogDirectRouteFallback(dst_virtual_ip, "route_unavailable");
             }
         }
 
@@ -894,6 +928,30 @@ void LinuxPacketTunnelClient::TunReadLoop() {
 
     connected_ = false;
     stop_requested_ = true;
+}
+
+void LinuxPacketTunnelClient::MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip,
+                                                          const std::string& reason) {
+    if (peer_link_manager_ == NULL || peer_virtual_ip.empty()) {
+        return;
+    }
+
+    const unsigned long long tick = now_ms();
+    std::map<std::string, unsigned long long>::iterator it = peer_route_debug_log_tick_.find(peer_virtual_ip);
+    if (it != peer_route_debug_log_tick_.end() &&
+        tick >= it->second &&
+        (tick - it->second) < static_cast<unsigned long long>(kPeerRouteDebugLogIntervalMs)) {
+        return;
+    }
+
+    const std::vector<LinuxPeerRouteStatus> peers = peer_link_manager_->Snapshot();
+    const std::string detail = DescribeSingleLinuxPeerRoute(peers, peer_virtual_ip, tick);
+    if (detail.empty()) {
+        return;
+    }
+
+    peer_route_debug_log_tick_[peer_virtual_ip] = tick;
+    LogInfo("udp direct route fallback: reason=" + reason + " peer=" + detail);
 }
 
 void LinuxPacketTunnelClient::HeartbeatLoop() {

@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <netinet/in.h>
 #include <string>
@@ -76,6 +77,7 @@ private:
     bool SendDatagram(const uint8_t* data, size_t length, std::string* error);
     int RecvDatagram(uint8_t* data, size_t length, std::string* error);
     uint32_t ParseVirtualIp(std::string* error) const;
+    void MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip, const std::string& reason);
 
     std::string tunnel_host_;
     uint16_t tunnel_port_;
@@ -95,4 +97,5 @@ private:
     std::mutex send_mutex_;
     LinuxPeerLinkManager* peer_link_manager_;
     std::atomic<uint32_t> peer_signal_nonce_;
+    std::map<std::string, unsigned long long> peer_route_debug_log_tick_;
 };
