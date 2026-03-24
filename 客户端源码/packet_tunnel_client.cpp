@@ -5,12 +5,10 @@
 #include "wintun_manager.h"
 
 #include <windows.h>
-#include <iphlpapi.h>
 #include <mstcpip.h>
 #include <ws2tcpip.h>
 
 #include <algorithm>
-#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <sstream>
@@ -64,95 +62,6 @@ std::string Ipv4ToString(const uint8_t* addr) {
         return std::string("?");
     }
     return std::string(ip_buf);
-}
-
-std::string ToLowerAscii(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return value;
-}
-
-bool ContainsAdapterHint(const std::string& text_utf8) {
-    const std::string lowered = ToLowerAscii(text_utf8);
-    static const char* kHints[] = {
-        "vpn", "meta tunnel", "tunnel", "tap", "tun", "wintun",
-        "wireguard", "zerotier", "openvpn", "virtual", "vmware",
-        "hyper-v", "vbox", "host-only"
-    };
-    for (size_t i = 0; i < sizeof(kHints) / sizeof(kHints[0]); ++i) {
-        if (lowered.find(kHints[i]) != std::string::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool ShouldIgnoreAdapterForP2pGuard(const std::string& friendly_name,
-                                    const std::string& description) {
-    const std::string friendly = ToLowerAscii(friendly_name);
-    const std::string desc = ToLowerAscii(description);
-    return friendly.find("dnfproxy") != std::string::npos ||
-           desc.find("dnfproxy") != std::string::npos;
-}
-
-void DetectPeerDirectConflictingAdapters(std::vector<std::string>* out_adapters) {
-    if (out_adapters == NULL) {
-        return;
-    }
-    out_adapters->clear();
-
-    ULONG buffer_len = 16384;
-    std::vector<unsigned char> buffer(buffer_len);
-    IP_ADAPTER_ADDRESSES* addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
-    DWORD ret = GetAdaptersAddresses(AF_UNSPEC, 0, NULL, addresses, &buffer_len);
-    if (ret == ERROR_BUFFER_OVERFLOW) {
-        buffer.resize(buffer_len);
-        addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
-        ret = GetAdaptersAddresses(AF_UNSPEC, 0, NULL, addresses, &buffer_len);
-    }
-    if (ret != NO_ERROR) {
-        return;
-    }
-
-    for (IP_ADAPTER_ADDRESSES* adapter = addresses; adapter != NULL; adapter = adapter->Next) {
-        if (adapter->OperStatus != IfOperStatusUp) {
-            continue;
-        }
-        if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK) {
-            continue;
-        }
-
-        const std::string friendly = WideToUtf8(adapter->FriendlyName != NULL ? adapter->FriendlyName : L"");
-        const std::string description = WideToUtf8(adapter->Description != NULL ? adapter->Description : L"");
-        if (ShouldIgnoreAdapterForP2pGuard(friendly, description)) {
-            continue;
-        }
-
-        const bool hinted = ContainsAdapterHint(friendly) || ContainsAdapterHint(description);
-        const bool tunnel_type = (adapter->IfType == IF_TYPE_TUNNEL);
-        if (!hinted && !tunnel_type) {
-            continue;
-        }
-
-        bool has_unicast = false;
-        for (IP_ADAPTER_UNICAST_ADDRESS* unicast = adapter->FirstUnicastAddress;
-             unicast != NULL;
-             unicast = unicast->Next) {
-            if (unicast->Address.lpSockaddr == NULL) {
-                continue;
-            }
-            if (unicast->Address.lpSockaddr->sa_family == AF_INET ||
-                unicast->Address.lpSockaddr->sa_family == AF_INET6) {
-                has_unicast = true;
-                break;
-            }
-        }
-        if (!has_unicast) {
-            continue;
-        }
-
-        out_adapters->push_back(friendly.empty() ? description : friendly);
-    }
 }
 
 bool ParseIpv4StringToBe(const std::string& value, uint32_t* out_ip_be) {
@@ -483,9 +392,7 @@ PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
       last_receive_tick_(0),
       last_network_activity_tick_(0),
       peer_link_manager_(new PeerLinkManager()),
-      peer_signal_nonce_(1),
-      p2p_disabled_(false),
-      p2p_disable_logged_(false) {
+      peer_signal_nonce_(1) {
     InitializeCriticalSection(&send_lock_);
 }
 
@@ -499,7 +406,6 @@ PacketTunnelClient::~PacketTunnelClient() {
 bool PacketTunnelClient::Start(std::wstring* error_msg) {
     Stop();
     stop_requested_ = false;
-    RefreshPeerDirectPolicy();
     if (peer_link_manager_ != NULL) {
         peer_link_manager_->SetLocalVirtualIp(virtual_ip_);
     }
@@ -703,32 +609,6 @@ bool PacketTunnelClient::SendHandshake(std::wstring* error_msg) {
 
 void PacketTunnelClient::MarkNetworkActivity() {
     last_network_activity_tick_ = GetTickCount64();
-}
-
-void PacketTunnelClient::RefreshPeerDirectPolicy() {
-    p2p_disable_logged_ = false;
-    p2p_disable_reason_.clear();
-    p2p_disable_adapters_.clear();
-    DetectPeerDirectConflictingAdapters(&p2p_disable_adapters_);
-    p2p_disabled_ = !p2p_disable_adapters_.empty();
-    if (!p2p_disabled_) {
-        return;
-    }
-
-    std::ostringstream ss;
-    for (size_t i = 0; i < p2p_disable_adapters_.size(); ++i) {
-        if (i != 0) {
-            ss << ", ";
-        }
-        ss << p2p_disable_adapters_[i];
-    }
-    p2p_disable_reason_ = ss.str();
-    if (peer_link_manager_ != NULL) {
-        peer_link_manager_->ResetAll();
-        peer_link_manager_->SetLocalVirtualIp(virtual_ip_);
-    }
-    PacketTunnelDebugLog("peer direct disabled: detected active virtual/VPN adapters: " +
-                         p2p_disable_reason_);
 }
 
 bool PacketTunnelClient::ReceiveHandshakeAck(std::wstring* error_msg) {
@@ -1001,9 +881,6 @@ void PacketTunnelClient::HeartbeatLoop() {
                 if (!peers[i].direct_ready || peers[i].endpoint_version == 0) {
                     continue;
                 }
-                if (p2p_disabled_) {
-                    continue;
-                }
                 const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
                 if (SendPeerSignalFrame(packet_tunnel::kFramePeerKeepalive,
                                         peers[i].peer_virtual_ip,
@@ -1055,20 +932,6 @@ void PacketTunnelClient::MaybeLogDirectRouteFallback(const std::string& peer_vir
 bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                                                 const uint8_t* payload,
                                                 size_t length) {
-    if (p2p_disabled_ &&
-        (frame_type == packet_tunnel::kFramePeerOffer ||
-         frame_type == packet_tunnel::kFramePeerHello ||
-         frame_type == packet_tunnel::kFramePeerAck ||
-         frame_type == packet_tunnel::kFramePeerKeepalive ||
-         frame_type == packet_tunnel::kFramePeerDisable)) {
-        if (!p2p_disable_logged_) {
-            PacketTunnelDebugLog("peer control ignored while direct mode is disabled: adapters=" +
-                                 p2p_disable_reason_);
-            p2p_disable_logged_ = true;
-        }
-        return true;
-    }
-
     if (frame_type == packet_tunnel::kFramePeerOffer) {
         ParsedPeerOffer offer = {};
         if (!ParsePeerOfferPayload(payload, length, &offer)) {
@@ -1214,7 +1077,7 @@ bool PacketTunnelClient::SendPeerDisableFrame(const std::string& target_peer_vir
 
 bool PacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtual_ip,
                                               UdpEndpoint* endpoint) const {
-    if (endpoint == NULL || peer_link_manager_ == NULL || p2p_disabled_) {
+    if (endpoint == NULL || peer_link_manager_ == NULL) {
         return false;
     }
 

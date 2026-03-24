@@ -7,7 +7,6 @@
 #include <ws2tcpip.h>
 
 #include <atomic>
-#include <vector>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -85,7 +84,6 @@ private:
     void MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip,
                                      const std::string& reason);
     void MarkNetworkActivity();
-    void RefreshPeerDirectPolicy();
 
     std::string tunnel_server_ip_;
     uint16_t tunnel_port_;
@@ -107,8 +105,4 @@ private:
     PeerLinkManager* peer_link_manager_;
     std::atomic<uint32_t> peer_signal_nonce_;
     std::map<std::string, unsigned long long> peer_route_debug_log_tick_;
-    bool p2p_disabled_;
-    bool p2p_disable_logged_;
-    std::string p2p_disable_reason_;
-    std::vector<std::string> p2p_disable_adapters_;
 };
