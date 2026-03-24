@@ -2208,12 +2208,12 @@ private:
             elapsed_ms = now_ms - session->established_ms;
         }
 
-        Logger::info("[IP Tunnel|" + session->session_uuid + "] UDP " +
-                     string(client_to_tun ? "client->TUN" : "TUN->client") +
-                     " +" + to_string(elapsed_ms) + "ms src=" +
-                     ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
-                     " dst=" + ipv4_be_to_string(dst_ip_be) + ":" + to_string(dst_port) +
-                     " len=" + to_string(payload_len));
+        Logger::debug("[IP Tunnel|" + session->session_uuid + "] UDP " +
+                      string(client_to_tun ? "client->TUN" : "TUN->client") +
+                      " +" + to_string(elapsed_ms) + "ms src=" +
+                      ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
+                      " dst=" + ipv4_be_to_string(dst_ip_be) + ":" + to_string(dst_port) +
+                      " len=" + to_string(payload_len));
     }
 
     const uint64_t kPeerOfferTimeoutMs = 9000;
@@ -2244,10 +2244,10 @@ private:
             kPeerOfferTimeoutMs,
             kPeerActiveTimeoutMs);
         for (size_t i = 0; i < changed.size(); ++i) {
-            Logger::info("[" + server_name + "|IP Tunnel] peer coord state transition " +
-                         changed[i].peer_virtual_ip +
-                         " -> " + peer_endpoint_state_name(changed[i].state) +
-                         " version=" + to_string(changed[i].endpoint_version));
+            Logger::debug("[" + server_name + "|IP Tunnel] peer coord state transition " +
+                          changed[i].peer_virtual_ip +
+                          " -> " + peer_endpoint_state_name(changed[i].state) +
+                          " version=" + to_string(changed[i].endpoint_version));
         }
         if (!changed.empty()) {
             ostringstream ss;
@@ -2270,8 +2270,8 @@ private:
                    << " obs=" << observed_age << "ms"
                    << " state=" << state_age << "ms]";
             }
-            Logger::info("[" + server_name + "|IP Tunnel] peer coord snapshot: " +
-                         (peers.empty() ? string("none") : ss.str()));
+            Logger::debug("[" + server_name + "|IP Tunnel] peer coord snapshot: " +
+                          (peers.empty() ? string("none") : ss.str()));
         }
     }
 
@@ -2382,9 +2382,9 @@ private:
                                          packet_tunnel::kFramePeerOffer,
                                          local_offer_payload.data(),
                                          local_offer_payload.size())) {
-                Logger::info("[" + server_name + "|IP Tunnel] announce peer offer " +
-                             local_virtual_ip + " -> " + peer_virtual_ip +
-                             " version=" + to_string(local_version));
+                Logger::debug("[" + server_name + "|IP Tunnel] announce peer offer " +
+                              local_virtual_ip + " -> " + peer_virtual_ip +
+                              " version=" + to_string(local_version));
             } else {
                 Logger::warning("[" + server_name + "|IP Tunnel] failed to send peer offer " +
                                 local_virtual_ip + " -> " + peer_virtual_ip);
@@ -2394,9 +2394,9 @@ private:
                                          packet_tunnel::kFramePeerOffer,
                                          peer_offer_payload.data(),
                                          peer_offer_payload.size())) {
-                Logger::info("[" + server_name + "|IP Tunnel] announce peer offer " +
-                             peer_virtual_ip + " -> " + local_virtual_ip +
-                             " version=" + to_string(peer_version));
+                Logger::debug("[" + server_name + "|IP Tunnel] announce peer offer " +
+                              peer_virtual_ip + " -> " + local_virtual_ip +
+                              " version=" + to_string(peer_version));
             } else {
                 Logger::warning("[" + server_name + "|IP Tunnel] failed to send peer offer " +
                                 peer_virtual_ip + " -> " + local_virtual_ip);
@@ -2413,8 +2413,8 @@ private:
                << "[" << peer_endpoint_state_name(snapshot[i].state)
                << " v=" << snapshot[i].endpoint_version << "]";
         }
-        Logger::info("[" + server_name + "|IP Tunnel] peer coord snapshot: " +
-                     (snapshot.empty() ? string("none") : ss.str()));
+        Logger::debug("[" + server_name + "|IP Tunnel] peer coord snapshot: " +
+                      (snapshot.empty() ? string("none") : ss.str()));
     }
 
     void announce_peer_offers_if_due(const shared_ptr<PacketTunnelSession>& session) {
@@ -2484,12 +2484,12 @@ private:
                                              : PeerEndpointState::OfferPending);
         }
 
-        Logger::info("[IP Tunnel|" + sender_session->session_uuid + "] relay " +
-                     packet_tunnel_frame_name(frame_type) + " " +
-                     sender_virtual_ip + " -> " +
-                     ipv4_be_to_string(target_session->virtual_ip_be) +
-                     " nonce=" + to_string(signal.nonce) +
-                     " version=" + to_string(sender_version));
+        Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] relay " +
+                      packet_tunnel_frame_name(frame_type) + " " +
+                      sender_virtual_ip + " -> " +
+                      ipv4_be_to_string(target_session->virtual_ip_be) +
+                      " nonce=" + to_string(signal.nonce) +
+                      " version=" + to_string(sender_version));
         {
             ostringstream ss;
             vector<PeerCoordStatus> snapshot = peer_coord_.Snapshot();
@@ -2501,8 +2501,8 @@ private:
                    << "[" << peer_endpoint_state_name(snapshot[i].state)
                    << " v=" << snapshot[i].endpoint_version << "]";
             }
-            Logger::info("[" + server_name + "|IP Tunnel] peer coord snapshot: " +
-                         (snapshot.empty() ? string("none") : ss.str()));
+            Logger::debug("[" + server_name + "|IP Tunnel] peer coord snapshot: " +
+                          (snapshot.empty() ? string("none") : ss.str()));
         }
         return true;
     }
@@ -2548,11 +2548,11 @@ private:
         }
 
         peer_coord_.ObservePeerFrame(sender_virtual_ip, sender_version, PeerEndpointState::RelayOnly);
-        Logger::info("[IP Tunnel|" + sender_session->session_uuid + "] relay peer_disable " +
-                     sender_virtual_ip + " -> " +
-                     ipv4_be_to_string(target_session->virtual_ip_be) +
-                     " reason=" + to_string((int)disable.reason) +
-                     " version=" + to_string(sender_version));
+        Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] relay peer_disable " +
+                      sender_virtual_ip + " -> " +
+                      ipv4_be_to_string(target_session->virtual_ip_be) +
+                      " reason=" + to_string((int)disable.reason) +
+                      " version=" + to_string(sender_version));
         {
             ostringstream ss;
             vector<PeerCoordStatus> snapshot = peer_coord_.Snapshot();
@@ -2564,8 +2564,8 @@ private:
                    << "[" << peer_endpoint_state_name(snapshot[i].state)
                    << " v=" << snapshot[i].endpoint_version << "]";
             }
-            Logger::info("[" + server_name + "|IP Tunnel] peer coord snapshot: " +
-                         (snapshot.empty() ? string("none") : ss.str()));
+            Logger::debug("[" + server_name + "|IP Tunnel] peer coord snapshot: " +
+                          (snapshot.empty() ? string("none") : ss.str()));
         }
         return true;
     }
@@ -2623,9 +2623,9 @@ private:
                 src_ip_be == gateway_ip_be &&
                 server_virtual_ip_be != gateway_ip_be) {
                 if (rewrite_client_bound_udp_source_ip(&packet, gateway_ip_be, server_virtual_ip_be)) {
-                    Logger::info("[IP Tunnel|" + session->session_uuid + "] rewrite UDP reply src " +
-                                 ipv4_be_to_string(gateway_ip_be) + " -> " +
-                                 ipv4_be_to_string(server_virtual_ip_be));
+                    Logger::debug("[IP Tunnel|" + session->session_uuid + "] rewrite UDP reply src " +
+                                  ipv4_be_to_string(gateway_ip_be) + " -> " +
+                                  ipv4_be_to_string(server_virtual_ip_be));
                     src_ip_be = server_virtual_ip_be;
                 }
             }
