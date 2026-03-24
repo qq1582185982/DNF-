@@ -80,6 +80,17 @@ void PeerLinkManager::TouchPeer(const std::string& peer_virtual_ip, uint64_t end
     entry.last_observed_ms = peer_now_ms();
 }
 
+void PeerLinkManager::TouchPeerDirectData(const std::string& peer_virtual_ip, uint64_t endpoint_version) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Entry& entry = peers_[peer_virtual_ip];
+    const uint64_t now = peer_now_ms();
+    if (endpoint_version > entry.endpoint_version) {
+        entry.endpoint_version = endpoint_version;
+    }
+    entry.last_observed_ms = now;
+    entry.last_direct_data_ms = now;
+}
+
 void PeerLinkManager::ObservePeerFrame(const std::string& peer_virtual_ip,
                                        uint64_t endpoint_version,
                                        PeerRouteState state) {
@@ -201,6 +212,7 @@ std::vector<PeerRouteStatus> PeerLinkManager::ExpireStalePeers(uint64_t now_ms,
             memcpy(status.endpoint_addr, entry.endpoint_addr, sizeof(status.endpoint_addr));
             status.direct_ready = (entry.state == PeerRouteState::DirectReady);
             status.last_observed_ms = entry.last_observed_ms;
+            status.last_direct_data_ms = entry.last_direct_data_ms;
             status.last_state_change_ms = entry.last_state_change_ms;
             changed.push_back(status);
         }
@@ -218,6 +230,9 @@ bool PeerLinkManager::CanRouteDirect(const std::string& peer_virtual_ip) const {
 }
 
 bool PeerLinkManager::TryGetDirectRoute(const std::string& peer_virtual_ip,
+                                        uint64_t now_ms,
+                                        uint64_t direct_data_timeout_ms,
+                                        uint64_t direct_probe_grace_ms,
                                         PeerRouteStatus* out_status) const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::map<std::string, Entry>::const_iterator it = peers_.find(peer_virtual_ip);
@@ -225,6 +240,18 @@ bool PeerLinkManager::TryGetDirectRoute(const std::string& peer_virtual_ip,
         it->second.state != PeerRouteState::DirectReady ||
         it->second.endpoint_family == 0 ||
         it->second.endpoint_port == 0) {
+        return false;
+    }
+
+    const bool has_fresh_direct_data =
+        it->second.last_direct_data_ms != 0 &&
+        now_ms >= it->second.last_direct_data_ms &&
+        (now_ms - it->second.last_direct_data_ms) <= direct_data_timeout_ms;
+    const bool in_probe_grace =
+        it->second.last_state_change_ms != 0 &&
+        now_ms >= it->second.last_state_change_ms &&
+        (now_ms - it->second.last_state_change_ms) <= direct_probe_grace_ms;
+    if (!has_fresh_direct_data && !in_probe_grace) {
         return false;
     }
 
@@ -237,6 +264,7 @@ bool PeerLinkManager::TryGetDirectRoute(const std::string& peer_virtual_ip,
         memcpy(out_status->endpoint_addr, it->second.endpoint_addr, sizeof(out_status->endpoint_addr));
         out_status->direct_ready = true;
         out_status->last_observed_ms = it->second.last_observed_ms;
+        out_status->last_direct_data_ms = it->second.last_direct_data_ms;
         out_status->last_state_change_ms = it->second.last_state_change_ms;
     }
     return true;
@@ -268,6 +296,7 @@ bool PeerLinkManager::TryResolveByEndpoint(uint8_t endpoint_family,
             memcpy(out_status->endpoint_addr, it->second.endpoint_addr, sizeof(out_status->endpoint_addr));
             out_status->direct_ready = true;
             out_status->last_observed_ms = it->second.last_observed_ms;
+            out_status->last_direct_data_ms = it->second.last_direct_data_ms;
             out_status->last_state_change_ms = it->second.last_state_change_ms;
         }
         return true;
@@ -289,6 +318,7 @@ std::vector<PeerRouteStatus> PeerLinkManager::Snapshot() const {
         memcpy(status.endpoint_addr, it->second.endpoint_addr, sizeof(status.endpoint_addr));
         status.direct_ready = (it->second.state == PeerRouteState::DirectReady);
         status.last_observed_ms = it->second.last_observed_ms;
+        status.last_direct_data_ms = it->second.last_direct_data_ms;
         status.last_state_change_ms = it->second.last_state_change_ms;
         snapshot.push_back(status);
     }

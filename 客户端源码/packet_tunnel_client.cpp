@@ -27,6 +27,8 @@ const DWORD kHeartbeatTimeoutMs = 12000;
 const DWORD kPeerOfferTimeoutMs = 9000;
 const DWORD kPeerDirectReadyTimeoutMs = 15000;
 const DWORD kPeerCooldownTimeoutMs = 12000;
+const DWORD kPeerDirectProbeGraceMs = 3000;
+const DWORD kPeerDirectDataTimeoutMs = 5000;
 const DWORD kPeerSnapshotLogIntervalMs = 15000;
 const DWORD kPeerRouteDebugLogIntervalMs = 2000;
 const DWORD kSocketReadTimeoutMs = 1000;
@@ -118,6 +120,9 @@ std::string BuildPeerRouteSnapshotSummary(const std::vector<PeerRouteStatus>& pe
            << "[" << PeerRouteStateName(peers[i].state)
            << " v=" << peers[i].endpoint_version
            << " obs=" << observed_age << "ms"
+           << " direct=" << ((peers[i].last_direct_data_ms != 0 && now_tick > peers[i].last_direct_data_ms)
+                                ? (now_tick - peers[i].last_direct_data_ms)
+                                : 0) << "ms"
            << " state=" << state_age << "ms]";
     }
     return ss.str();
@@ -147,6 +152,9 @@ std::string DescribeSinglePeerRoute(const std::vector<PeerRouteStatus>& peers,
            << " family=" << static_cast<int>(peers[i].endpoint_family)
            << " port=" << peers[i].endpoint_port
            << " obs=" << observed_age << "ms"
+           << " direct=" << ((peers[i].last_direct_data_ms != 0 && now_tick > peers[i].last_direct_data_ms)
+                                ? (now_tick - peers[i].last_direct_data_ms)
+                                : 0) << "ms"
            << " state=" << state_age << "ms]";
         return ss.str();
     }
@@ -732,7 +740,7 @@ void PacketTunnelClient::SocketReadLoop() {
             if (from_known_peer) {
                 MarkNetworkActivity();
                 if (peer_link_manager_ != NULL) {
-                    peer_link_manager_->TouchPeer(peer_virtual_ip, 0);
+                    peer_link_manager_->TouchPeerDirectData(peer_virtual_ip, 0);
                 }
             }
             if (from_known_peer &&
@@ -810,9 +818,6 @@ void PacketTunnelClient::WintunReadLoop() {
                                             packet.data(),
                                             packet.size(),
                                             NULL)) {
-                        if (peer_link_manager_ != NULL) {
-                            peer_link_manager_->TouchPeer(dst_virtual_ip, 0);
-                        }
                         PacketTunnelDebugLog("udp wintun->peer " + desc);
                         continue;
                     }
@@ -1082,7 +1087,11 @@ bool PacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtual_ip
     }
 
     PeerRouteStatus route = {};
-    if (!peer_link_manager_->TryGetDirectRoute(peer_virtual_ip, &route)) {
+    if (!peer_link_manager_->TryGetDirectRoute(peer_virtual_ip,
+                                               GetTickCount64(),
+                                               kPeerDirectDataTimeoutMs,
+                                               kPeerDirectProbeGraceMs,
+                                               &route)) {
         return false;
     }
 

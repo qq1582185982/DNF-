@@ -25,6 +25,7 @@ struct PeerRouteStatus {
     uint8_t endpoint_addr[16];
     bool direct_ready;
     uint64_t last_observed_ms;
+    uint64_t last_direct_data_ms;
     uint64_t last_state_change_ms;
 };
 
@@ -41,6 +42,7 @@ public:
                          const uint8_t* endpoint_addr,
                          uint16_t endpoint_port);
     void TouchPeer(const std::string& peer_virtual_ip, uint64_t endpoint_version);
+    void TouchPeerDirectData(const std::string& peer_virtual_ip, uint64_t endpoint_version);
     void ObservePeerFrame(const std::string& peer_virtual_ip,
                           uint64_t endpoint_version,
                           PeerRouteState state);
@@ -59,7 +61,11 @@ public:
                                                   uint64_t cooldown_timeout_ms);
 
     bool CanRouteDirect(const std::string& peer_virtual_ip) const;
-    bool TryGetDirectRoute(const std::string& peer_virtual_ip, PeerRouteStatus* out_status) const;
+    bool TryGetDirectRoute(const std::string& peer_virtual_ip,
+                           uint64_t now_ms,
+                           uint64_t direct_data_timeout_ms,
+                           uint64_t direct_probe_grace_ms,
+                           PeerRouteStatus* out_status) const;
     bool TryResolveByEndpoint(uint8_t endpoint_family,
                               const uint8_t* endpoint_addr,
                               uint16_t endpoint_port,
@@ -74,6 +80,7 @@ private:
               endpoint_family(0),
               endpoint_port(0),
               last_observed_ms(0),
+              last_direct_data_ms(0),
               last_state_change_ms(0),
               pending_hello_version(0),
               pending_hello_nonce(0) {
@@ -86,6 +93,7 @@ private:
         uint16_t endpoint_port;
         uint8_t endpoint_addr[16];
         uint64_t last_observed_ms;
+        uint64_t last_direct_data_ms;
         uint64_t last_state_change_ms;
         uint64_t pending_hello_version;
         uint32_t pending_hello_nonce;

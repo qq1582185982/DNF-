@@ -23,6 +23,8 @@ const int kHeartbeatTimeoutMs = 12000;
 const int kPeerOfferTimeoutMs = 9000;
 const int kPeerDirectReadyTimeoutMs = 15000;
 const int kPeerCooldownTimeoutMs = 12000;
+const int kPeerDirectProbeGraceMs = 3000;
+const int kPeerDirectDataTimeoutMs = 5000;
 const int kPeerSnapshotLogIntervalMs = 15000;
 const int kPeerRouteDebugLogIntervalMs = 2000;
 const int kSocketReadTimeoutMs = 1000;
@@ -119,6 +121,9 @@ std::string BuildLinuxPeerRouteSnapshotSummary(const std::vector<LinuxPeerRouteS
            << "[" << LinuxPeerRouteStateName(peers[i].state)
            << " v=" << peers[i].endpoint_version
            << " obs=" << observed_age << "ms"
+           << " direct=" << ((peers[i].last_direct_data_ms != 0 && now_ms_value > peers[i].last_direct_data_ms)
+                                ? (now_ms_value - peers[i].last_direct_data_ms)
+                                : 0) << "ms"
            << " state=" << state_age << "ms]";
     }
     return ss.str();
@@ -148,6 +153,9 @@ std::string DescribeSingleLinuxPeerRoute(const std::vector<LinuxPeerRouteStatus>
            << " family=" << static_cast<int>(peers[i].endpoint_family)
            << " port=" << peers[i].endpoint_port
            << " obs=" << observed_age << "ms"
+           << " direct=" << ((peers[i].last_direct_data_ms != 0 && now_ms_value > peers[i].last_direct_data_ms)
+                                ? (now_ms_value - peers[i].last_direct_data_ms)
+                                : 0) << "ms"
            << " state=" << state_age << "ms]";
         return ss.str();
     }
@@ -623,7 +631,7 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
             if (from_known_peer) {
                 MarkNetworkActivity();
                 if (peer_link_manager_ != NULL) {
-                    peer_link_manager_->TouchPeer(peer_virtual_ip, 0);
+                    peer_link_manager_->TouchPeerDirectData(peer_virtual_ip, 0);
                 }
             }
             if (from_known_peer &&
@@ -792,7 +800,11 @@ bool LinuxPacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtu
     }
 
     LinuxPeerRouteStatus route = {};
-    if (!peer_link_manager_->TryGetDirectRoute(peer_virtual_ip, &route)) {
+    if (!peer_link_manager_->TryGetDirectRoute(peer_virtual_ip,
+                                               now_ms(),
+                                               kPeerDirectDataTimeoutMs,
+                                               kPeerDirectProbeGraceMs,
+                                               &route)) {
         return false;
     }
 
@@ -1006,9 +1018,6 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                         packet.data(),
                                         packet.size(),
                                         NULL)) {
-                    if (peer_link_manager_ != NULL) {
-                        peer_link_manager_->TouchPeer(dst_virtual_ip, 0);
-                    }
                     continue;
                 }
             } else {
