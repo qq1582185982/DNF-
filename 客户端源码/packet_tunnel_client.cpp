@@ -5,6 +5,7 @@
 #include "wintun_manager.h"
 
 #include <windows.h>
+#include <iphlpapi.h>
 #include <mstcpip.h>
 #include <ws2tcpip.h>
 
@@ -62,6 +63,158 @@ std::string Ipv4ToString(const uint8_t* addr) {
         return std::string("?");
     }
     return std::string(ip_buf);
+}
+
+std::string ToLowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+bool ContainsVirtualAdapterHint(const std::string& text_utf8) {
+    const std::string lowered = ToLowerAscii(text_utf8);
+    static const char* kHints[] = {
+        "vpn", "tunnel", "tap", "tun", "wintun", "wireguard",
+        "zerotier", "virtual", "vmware", "hyper-v", "vbox",
+        "host-only", "loopback"
+    };
+    for (size_t i = 0; i < sizeof(kHints) / sizeof(kHints[0]); ++i) {
+        if (lowered.find(kHints[i]) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsUsableIpv4Unicast(const SOCKADDR* addr) {
+    if (addr == NULL || addr->sa_family != AF_INET) {
+        return false;
+    }
+    const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(addr);
+    const uint32_t ip_be = addr4->sin_addr.S_un.S_addr;
+    const uint32_t ip = ntohl(ip_be);
+    if (ip == 0 || (ip >> 24) == 127) {
+        return false;
+    }
+    if ((ip & 0xFFFF0000u) == 0xA9FE0000u) {
+        return false;
+    }
+    return true;
+}
+
+bool IsUsableIpv6Unicast(const SOCKADDR* addr) {
+    if (addr == NULL || addr->sa_family != AF_INET6) {
+        return false;
+    }
+    const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(addr);
+    const uint8_t* bytes = addr6->sin6_addr.u.Byte;
+    if (IN6_IS_ADDR_UNSPECIFIED(&addr6->sin6_addr) ||
+        IN6_IS_ADDR_LOOPBACK(&addr6->sin6_addr) ||
+        IN6_IS_ADDR_LINKLOCAL(&addr6->sin6_addr) ||
+        IN6_IS_ADDR_MULTICAST(&addr6->sin6_addr)) {
+        return false;
+    }
+    if ((bytes[0] & 0xFE) == 0xFC) {
+        return false;
+    }
+    return true;
+}
+
+struct PreferredInterfaceChoice {
+    DWORD ipv4_if_index;
+    DWORD ipv6_if_index;
+    ULONG metric;
+    bool has_gateway;
+    std::string label;
+    bool valid;
+
+    PreferredInterfaceChoice()
+        : ipv4_if_index(0), ipv6_if_index(0), metric(ULONG_MAX), has_gateway(false), valid(false) {}
+};
+
+bool TrySelectPreferredInterface(PreferredInterfaceChoice* out_choice) {
+    if (out_choice == NULL) {
+        return false;
+    }
+
+    ULONG buffer_len = 16384;
+    std::vector<unsigned char> buffer(buffer_len);
+    IP_ADAPTER_ADDRESSES* addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+    ULONG flags = GAA_FLAG_INCLUDE_GATEWAYS;
+    DWORD ret = GetAdaptersAddresses(AF_UNSPEC, flags, NULL, addresses, &buffer_len);
+    if (ret == ERROR_BUFFER_OVERFLOW) {
+        buffer.resize(buffer_len);
+        addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+        ret = GetAdaptersAddresses(AF_UNSPEC, flags, NULL, addresses, &buffer_len);
+    }
+    if (ret != NO_ERROR) {
+        return false;
+    }
+
+    PreferredInterfaceChoice best;
+    for (IP_ADAPTER_ADDRESSES* adapter = addresses; adapter != NULL; adapter = adapter->Next) {
+        if (adapter->OperStatus != IfOperStatusUp) {
+            continue;
+        }
+        if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK || adapter->IfType == IF_TYPE_TUNNEL) {
+            continue;
+        }
+        const std::string friendly = WideToUtf8(adapter->FriendlyName != NULL ? adapter->FriendlyName : L"");
+        const std::string description = WideToUtf8(adapter->Description != NULL ? adapter->Description : L"");
+        if (ContainsVirtualAdapterHint(friendly) || ContainsVirtualAdapterHint(description)) {
+            continue;
+        }
+
+        bool has_ipv4 = false;
+        bool has_ipv6 = false;
+        for (IP_ADAPTER_UNICAST_ADDRESS* unicast = adapter->FirstUnicastAddress;
+             unicast != NULL;
+             unicast = unicast->Next) {
+            if (!has_ipv4 && IsUsableIpv4Unicast(unicast->Address.lpSockaddr)) {
+                has_ipv4 = true;
+            }
+            if (!has_ipv6 && IsUsableIpv6Unicast(unicast->Address.lpSockaddr)) {
+                has_ipv6 = true;
+            }
+        }
+        if (!has_ipv4 && !has_ipv6) {
+            continue;
+        }
+
+        const bool has_gateway = (adapter->FirstGatewayAddress != NULL);
+        ULONG metric = has_ipv4 ? adapter->Ipv4Metric : adapter->Ipv6Metric;
+        if (metric == 0) {
+            metric = has_ipv6 ? adapter->Ipv6Metric : metric;
+        }
+        if (metric == 0) {
+            metric = ULONG_MAX - 1;
+        }
+
+        if (best.valid) {
+            if (best.has_gateway != has_gateway) {
+                if (!has_gateway) {
+                    continue;
+                }
+            } else if (metric > best.metric) {
+                continue;
+            }
+        }
+
+        best.valid = true;
+        best.has_gateway = has_gateway;
+        best.metric = metric;
+        best.ipv4_if_index = has_ipv4 ? adapter->IfIndex : 0;
+        best.ipv6_if_index = has_ipv6 ? adapter->Ipv6IfIndex : 0;
+        best.label = friendly.empty() ? description : friendly;
+    }
+
+    if (!best.valid) {
+        return false;
+    }
+
+    *out_choice = best;
+    return true;
 }
 
 bool ParseIpv4StringToBe(const std::string& value, uint32_t* out_ip_be) {
@@ -525,6 +678,56 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
                  NULL);
     };
 
+    PreferredInterfaceChoice preferred_interface;
+    const bool has_preferred_interface = TrySelectPreferredInterface(&preferred_interface);
+
+    auto bind_preferred_interface = [&](SOCKET sock, int family) {
+        if (!has_preferred_interface) {
+            return;
+        }
+
+        if (family == AF_INET6) {
+            if (preferred_interface.ipv6_if_index != 0) {
+                DWORD v6_if_index = preferred_interface.ipv6_if_index;
+                setsockopt(sock,
+                           IPPROTO_IPV6,
+                           IPV6_UNICAST_IF,
+                           reinterpret_cast<const char*>(&v6_if_index),
+                           sizeof(v6_if_index));
+            }
+            if (preferred_interface.ipv4_if_index != 0) {
+                DWORD v4_if_index = htonl(preferred_interface.ipv4_if_index);
+                setsockopt(sock,
+                           IPPROTO_IP,
+                           IP_UNICAST_IF,
+                           reinterpret_cast<const char*>(&v4_if_index),
+                           sizeof(v4_if_index));
+            }
+
+            sockaddr_in6 bind_addr = {};
+            bind_addr.sin6_family = AF_INET6;
+            bind_addr.sin6_addr = in6addr_any;
+            bind_addr.sin6_port = 0;
+            bind(sock, reinterpret_cast<const sockaddr*>(&bind_addr), sizeof(bind_addr));
+            return;
+        }
+
+        if (family == AF_INET && preferred_interface.ipv4_if_index != 0) {
+            DWORD v4_if_index = htonl(preferred_interface.ipv4_if_index);
+            setsockopt(sock,
+                       IPPROTO_IP,
+                       IP_UNICAST_IF,
+                       reinterpret_cast<const char*>(&v4_if_index),
+                       sizeof(v4_if_index));
+
+            sockaddr_in bind_addr = {};
+            bind_addr.sin_family = AF_INET;
+            bind_addr.sin_addr.s_addr = INADDR_ANY;
+            bind_addr.sin_port = 0;
+            bind(sock, reinterpret_cast<const sockaddr*>(&bind_addr), sizeof(bind_addr));
+        }
+    };
+
     auto try_connect_family = [&](int preferred_family) -> bool {
         SOCKET sock = socket(preferred_family, SOCK_DGRAM, IPPROTO_UDP);
         if (sock == INVALID_SOCKET) {
@@ -532,6 +735,7 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         }
 
         configure_socket(sock, preferred_family);
+        bind_preferred_interface(sock, preferred_family);
 
         sockaddr_storage endpoint_addr = {};
         int endpoint_addr_len = 0;
@@ -546,9 +750,19 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
                 server_endpoint_.addr = endpoint_addr;
                 server_endpoint_.addr_len = endpoint_addr_len;
                 server_endpoint_.valid = true;
+                std::string interface_note;
+                if (has_preferred_interface) {
+                    interface_note = " iface=" + preferred_interface.label;
+                    if (preferred_family == AF_INET6 && preferred_interface.ipv6_if_index != 0) {
+                        interface_note += " ifindex6=" + std::to_string(preferred_interface.ipv6_if_index);
+                    } else if (preferred_family == AF_INET && preferred_interface.ipv4_if_index != 0) {
+                        interface_note += " ifindex4=" + std::to_string(preferred_interface.ipv4_if_index);
+                    }
+                }
                 PacketTunnelDebugLog("udp socket ready for relay server " + tunnel_server_ip_ +
                                      ":" + std::to_string(tunnel_port_) +
-                                     " family=" + std::to_string(socket_family_));
+                                     " family=" + std::to_string(socket_family_) +
+                                     interface_note);
                 return true;
             }
         }
