@@ -455,47 +455,60 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         return false;
     }
 
+    auto try_connect_family = [&](int preferred_family) -> bool {
+        for (addrinfo* rp = result; rp != NULL; rp = rp->ai_next) {
+            if (rp->ai_family != preferred_family) {
+                continue;
+            }
+
+            SOCKET sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            if (sock == INVALID_SOCKET) {
+                continue;
+            }
+
+            if (rp->ai_family == AF_INET6) {
+                DWORD dual_stack = 0;
+                setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&dual_stack), sizeof(dual_stack));
+            }
+
+            setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&kSocketBufferBytes, sizeof(kSocketBufferBytes));
+            setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&kSocketBufferBytes, sizeof(kSocketBufferBytes));
+
+            DWORD send_timeout = 5000;
+            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&send_timeout, sizeof(send_timeout));
+            DWORD recv_timeout = kSocketReadTimeoutMs;
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&recv_timeout, sizeof(recv_timeout));
+
+            BOOL disable_udp_connreset = FALSE;
+            DWORD bytes_returned = 0;
+            WSAIoctl(sock,
+                     SIO_UDP_CONNRESET,
+                     &disable_udp_connreset,
+                     sizeof(disable_udp_connreset),
+                     NULL,
+                     0,
+                     &bytes_returned,
+                     NULL,
+                     NULL);
+
+            sock_ = sock;
+            socket_family_ = rp->ai_family;
+            server_endpoint_.addr_len = static_cast<int>(rp->ai_addrlen);
+            memcpy(&server_endpoint_.addr, rp->ai_addr, rp->ai_addrlen);
+            server_endpoint_.valid = true;
+            PacketTunnelDebugLog("udp socket ready for relay server " + tunnel_server_ip_ +
+                                 ":" + std::to_string(tunnel_port_) +
+                                 " family=" + std::to_string(socket_family_));
+            return true;
+        }
+        return false;
+    };
+
     bool connected = false;
-    for (addrinfo* rp = result; rp != NULL; rp = rp->ai_next) {
-        SOCKET sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (sock == INVALID_SOCKET) {
-            continue;
-        }
-
-        if (rp->ai_family == AF_INET6) {
-            DWORD dual_stack = 0;
-            setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&dual_stack), sizeof(dual_stack));
-        }
-
-        setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&kSocketBufferBytes, sizeof(kSocketBufferBytes));
-        setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&kSocketBufferBytes, sizeof(kSocketBufferBytes));
-
-        DWORD send_timeout = 5000;
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&send_timeout, sizeof(send_timeout));
-        DWORD recv_timeout = kSocketReadTimeoutMs;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&recv_timeout, sizeof(recv_timeout));
-
-        BOOL disable_udp_connreset = FALSE;
-        DWORD bytes_returned = 0;
-        WSAIoctl(sock,
-                 SIO_UDP_CONNRESET,
-                 &disable_udp_connreset,
-                 sizeof(disable_udp_connreset),
-                 NULL,
-                 0,
-                 &bytes_returned,
-                 NULL,
-                 NULL);
-
-        sock_ = sock;
-        socket_family_ = rp->ai_family;
-        server_endpoint_.addr_len = static_cast<int>(rp->ai_addrlen);
-        memcpy(&server_endpoint_.addr, rp->ai_addr, rp->ai_addrlen);
-        server_endpoint_.valid = true;
+    if (try_connect_family(AF_INET6)) {
         connected = true;
-        PacketTunnelDebugLog("udp socket ready for relay server " + tunnel_server_ip_ +
-                             ":" + std::to_string(tunnel_port_));
-        break;
+    } else if (try_connect_family(AF_INET)) {
+        connected = true;
     }
 
     freeaddrinfo(result);

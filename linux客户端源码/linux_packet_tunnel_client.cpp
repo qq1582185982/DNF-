@@ -363,37 +363,52 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
         return false;
     }
 
+    auto try_connect_family = [&](int preferred_family) -> bool {
+        for (addrinfo* rp = result; rp != NULL; rp = rp->ai_next) {
+            if (rp->ai_family != preferred_family) {
+                continue;
+            }
+
+            int sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            if (sock < 0) {
+                continue;
+            }
+
+            if (rp->ai_family == AF_INET6) {
+                int dual_stack = 0;
+                setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &dual_stack, sizeof(dual_stack));
+            }
+
+            setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &kSocketBufferBytes, sizeof(kSocketBufferBytes));
+            setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &kSocketBufferBytes, sizeof(kSocketBufferBytes));
+
+            timeval send_timeout = {};
+            send_timeout.tv_sec = 5;
+            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
+
+            timeval recv_timeout = {};
+            recv_timeout.tv_sec = kSocketReadTimeoutMs / 1000;
+            recv_timeout.tv_usec = (kSocketReadTimeoutMs % 1000) * 1000;
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
+
+            sock_ = sock;
+            socket_family_ = rp->ai_family;
+            server_endpoint_.addr_len = rp->ai_addrlen;
+            memcpy(&server_endpoint_.addr, rp->ai_addr, rp->ai_addrlen);
+            server_endpoint_.valid = true;
+            LogInfo("packet tunnel udp socket ready for relay server " + tunnel_host_ +
+                    ":" + std::to_string(tunnel_port_) +
+                    " family=" + std::to_string(socket_family_));
+            return true;
+        }
+        return false;
+    };
+
     bool connected = false;
-    for (addrinfo* rp = result; rp != NULL; rp = rp->ai_next) {
-        int sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (sock < 0) {
-            continue;
-        }
-
-        if (rp->ai_family == AF_INET6) {
-            int dual_stack = 0;
-            setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &dual_stack, sizeof(dual_stack));
-        }
-
-        setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &kSocketBufferBytes, sizeof(kSocketBufferBytes));
-        setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &kSocketBufferBytes, sizeof(kSocketBufferBytes));
-
-        timeval send_timeout = {};
-        send_timeout.tv_sec = 5;
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
-
-        timeval recv_timeout = {};
-        recv_timeout.tv_sec = kSocketReadTimeoutMs / 1000;
-        recv_timeout.tv_usec = (kSocketReadTimeoutMs % 1000) * 1000;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
-
-        sock_ = sock;
-        socket_family_ = rp->ai_family;
-        server_endpoint_.addr_len = rp->ai_addrlen;
-        memcpy(&server_endpoint_.addr, rp->ai_addr, rp->ai_addrlen);
-        server_endpoint_.valid = true;
+    if (try_connect_family(AF_INET6)) {
         connected = true;
-        break;
+    } else if (try_connect_family(AF_INET)) {
+        connected = true;
     }
 
     freeaddrinfo(result);
