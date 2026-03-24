@@ -1063,7 +1063,7 @@ static bool parse_peer_offer_frame(const uint8_t* payload,
         return false;
     }
 
-    out_offer->peer_virtual_ip_be = packet_tunnel::read_u32_be(payload);
+    out_offer->peer_virtual_ip_be = htonl(packet_tunnel::read_u32_be(payload));
     out_offer->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
     out_offer->endpoint_family = payload[12];
     out_offer->endpoint_port = packet_tunnel::read_u16_be(payload + 14);
@@ -1078,7 +1078,7 @@ static bool parse_peer_signal_frame(const uint8_t* payload,
         return false;
     }
 
-    out_signal->peer_virtual_ip_be = packet_tunnel::read_u32_be(payload);
+    out_signal->peer_virtual_ip_be = htonl(packet_tunnel::read_u32_be(payload));
     out_signal->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
     out_signal->nonce = packet_tunnel::read_u32_be(payload + 12);
     return true;
@@ -1092,7 +1092,7 @@ static bool parse_peer_disable_frame(const uint8_t* payload,
         return false;
     }
 
-    out_disable->peer_virtual_ip_be = packet_tunnel::read_u32_be(payload);
+    out_disable->peer_virtual_ip_be = htonl(packet_tunnel::read_u32_be(payload));
     out_disable->endpoint_version = packet_tunnel::read_u64_be(payload + 4);
     out_disable->reason = payload[12];
     return true;

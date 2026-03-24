@@ -805,8 +805,8 @@ int main(int argc, char* argv[]) {
 
     // 初始化日志系统
     Logger::init(log_filename);
-    Logger::set_log_level("INFO");
-    Logger::info("[Log] Default log level: INFO");
+    Logger::set_log_level("DEBUG");
+    Logger::info("[Log] Default log level: DEBUG");
 
     // 生成会话UUID
     g_session_uuid = generate_session_uuid();
