@@ -866,12 +866,6 @@ void PacketTunnelClient::HeartbeatLoop() {
                                      expired[i].peer_virtual_ip +
                                      " state=" + PeerRouteStateName(expired[i].state) +
                                      " version=" + std::to_string(expired[i].endpoint_version));
-                if (expired[i].state == PeerRouteState::Cooldown &&
-                    expired[i].endpoint_version != 0) {
-                    SendPeerDisableFrame(expired[i].peer_virtual_ip,
-                                         expired[i].endpoint_version,
-                                         packet_tunnel::kPeerDisableReasonCooldown);
-                }
             }
 
             std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();

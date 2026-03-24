@@ -1069,12 +1069,6 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                 LogInfo("peer control state transition: peer=" + expired[i].peer_virtual_ip +
                         " state=" + LinuxPeerRouteStateName(expired[i].state) +
                         " version=" + std::to_string(expired[i].endpoint_version));
-                if (expired[i].state == LinuxPeerRouteState::Cooldown &&
-                    expired[i].endpoint_version != 0) {
-                    SendPeerDisableFrame(expired[i].peer_virtual_ip,
-                                         expired[i].endpoint_version,
-                                         packet_tunnel::kPeerDisableReasonCooldown);
-                }
             }
 
             std::vector<LinuxPeerRouteStatus> peers = peer_link_manager_->Snapshot();

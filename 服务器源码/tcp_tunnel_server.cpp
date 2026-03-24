@@ -2095,6 +2095,7 @@ private:
         string udp_endpoint_key;
         atomic<bool> active;
         uint64_t established_ms;
+        uint64_t last_peer_offer_announce_ms;
         mutex send_mutex;
 
         PacketTunnelSession(int fd,
@@ -2110,7 +2111,8 @@ private:
               use_udp(false),
               udp_addr_len(0),
               active(true),
-              established_ms(monotonic_millis()) {}
+              established_ms(monotonic_millis()),
+              last_peer_offer_announce_ms(0) {}
     };
 
     ServerConfig config;
@@ -2316,7 +2318,8 @@ private:
         return true;
     }
 
-    void announce_peer_offers_for_session(const shared_ptr<PacketTunnelSession>& session) {
+    void announce_peer_offers_for_session(const shared_ptr<PacketTunnelSession>& session,
+                                          bool force_new_version = true) {
         if (!session || !session->active || !session->use_udp) {
             return;
         }
@@ -2324,8 +2327,12 @@ private:
         log_expired_peer_coord_states(&peer_coord_, server_name);
 
         const string local_virtual_ip = ipv4_be_to_string(session->virtual_ip_be);
-        const uint64_t local_version = peer_coord_.BumpEndpointVersion(local_virtual_ip);
+        uint64_t local_version = peer_coord_.GetEndpointVersion(local_virtual_ip);
+        if (force_new_version || local_version == 0) {
+            local_version = peer_coord_.BumpEndpointVersion(local_virtual_ip);
+        }
         peer_coord_.SetState(local_virtual_ip, PeerEndpointState::OfferPending);
+        session->last_peer_offer_announce_ms = monotonic_millis();
 
         vector<shared_ptr<PacketTunnelSession>> peers;
         {
@@ -2355,7 +2362,7 @@ private:
             const shared_ptr<PacketTunnelSession>& peer = peers[i];
             const string peer_virtual_ip = ipv4_be_to_string(peer->virtual_ip_be);
             uint64_t peer_version = peer_coord_.GetEndpointVersion(peer_virtual_ip);
-            if (peer_version == 0) {
+            if (force_new_version || peer_version == 0) {
                 peer_version = peer_coord_.BumpEndpointVersion(peer_virtual_ip);
                 peer_coord_.SetState(peer_virtual_ip, PeerEndpointState::OfferPending);
             }
@@ -2408,6 +2415,22 @@ private:
         }
         Logger::info("[" + server_name + "|IP Tunnel] peer coord snapshot: " +
                      (snapshot.empty() ? string("none") : ss.str()));
+    }
+
+    void announce_peer_offers_if_due(const shared_ptr<PacketTunnelSession>& session) {
+        static const uint64_t kPeerOfferRefreshIntervalMs = 10000;
+        if (!session || !session->active || !session->use_udp) {
+            return;
+        }
+
+        const uint64_t now_ms = monotonic_millis();
+        if (session->last_peer_offer_announce_ms != 0 &&
+            now_ms >= session->last_peer_offer_announce_ms &&
+            (now_ms - session->last_peer_offer_announce_ms) < kPeerOfferRefreshIntervalMs) {
+            return;
+        }
+
+        announce_peer_offers_for_session(session, false);
     }
 
     bool route_peer_signal_frame(const shared_ptr<PacketTunnelSession>& sender_session,
@@ -2972,6 +2995,7 @@ private:
                 if (!send_packet_tunnel_frame(session, packet_tunnel::kFrameHeartbeatAck, nullptr, 0)) {
                     session->active = false;
                 }
+                announce_peer_offers_if_due(session);
                 continue;
             }
 
@@ -3049,12 +3073,15 @@ private:
                                     packet_tunnel_frame_name(frame_type) +
                                     " to peer=" + ipv4_be_to_string(signal.peer_virtual_ip_be));
                 }
+                announce_peer_offers_if_due(session);
                 continue;
             }
 
             if (frame_type != packet_tunnel::kFrameIpv4Packet) {
                 continue;
             }
+
+            announce_peer_offers_if_due(session);
 
             if (payload_len < 20) {
                 continue;
