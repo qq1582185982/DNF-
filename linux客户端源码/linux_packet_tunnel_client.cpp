@@ -31,6 +31,18 @@ const int kSocketReadTimeoutMs = 1000;
 const int kTunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
 
+bool IsDirectPathFresh(const LinuxPeerRouteStatus& route, unsigned long long now_tick) {
+    const bool has_fresh_direct_data =
+        route.last_direct_data_ms != 0 &&
+        now_tick >= route.last_direct_data_ms &&
+        (now_tick - route.last_direct_data_ms) <= kPeerDirectDataTimeoutMs;
+    const bool in_probe_grace =
+        route.last_state_change_ms != 0 &&
+        now_tick >= route.last_state_change_ms &&
+        (now_tick - route.last_state_change_ms) <= kPeerDirectProbeGraceMs;
+    return has_fresh_direct_data || in_probe_grace;
+}
+
 unsigned long long now_ms() {
     return static_cast<unsigned long long>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -794,7 +806,8 @@ bool LinuxPacketTunnelClient::SendPeerDisableFrame(const std::string& target_pee
 }
 
 bool LinuxPacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtual_ip,
-                                                   UdpEndpoint* endpoint) const {
+                                                   UdpEndpoint* endpoint,
+                                                   bool* direct_path_fresh) const {
     if (endpoint == NULL || peer_link_manager_ == NULL) {
         return false;
     }
@@ -806,6 +819,9 @@ bool LinuxPacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtu
                                                kPeerDirectProbeGraceMs,
                                                &route)) {
         return false;
+    }
+    if (direct_path_fresh != NULL) {
+        *direct_path_fresh = IsDirectPathFresh(route, now_ms());
     }
 
     memset(&endpoint->addr, 0, sizeof(endpoint->addr));
@@ -1012,13 +1028,16 @@ void LinuxPacketTunnelClient::TunReadLoop() {
         if (is_udp) {
             const std::string dst_virtual_ip = LinuxIpv4ToString(packet.data() + 16);
             UdpEndpoint peer_endpoint;
-            if (TryBuildPeerEndpoint(dst_virtual_ip, &peer_endpoint)) {
+            bool direct_path_fresh = false;
+            if (TryBuildPeerEndpoint(dst_virtual_ip, &peer_endpoint, &direct_path_fresh)) {
                 if (SendFrameToEndpoint(peer_endpoint,
                                         packet_tunnel::kFrameIpv4Packet,
                                         packet.data(),
                                         packet.size(),
                                         NULL)) {
-                    continue;
+                    if (direct_path_fresh) {
+                        continue;
+                    }
                 }
             } else {
                 MaybeLogDirectRouteFallback(dst_virtual_ip, "route_unavailable");

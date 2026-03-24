@@ -243,18 +243,6 @@ bool PeerLinkManager::TryGetDirectRoute(const std::string& peer_virtual_ip,
         return false;
     }
 
-    const bool has_fresh_direct_data =
-        it->second.last_direct_data_ms != 0 &&
-        now_ms >= it->second.last_direct_data_ms &&
-        (now_ms - it->second.last_direct_data_ms) <= direct_data_timeout_ms;
-    const bool in_probe_grace =
-        it->second.last_state_change_ms != 0 &&
-        now_ms >= it->second.last_state_change_ms &&
-        (now_ms - it->second.last_state_change_ms) <= direct_probe_grace_ms;
-    if (!has_fresh_direct_data && !in_probe_grace) {
-        return false;
-    }
-
     if (out_status != NULL) {
         out_status->peer_virtual_ip = it->first;
         out_status->state = it->second.state;

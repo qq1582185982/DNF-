@@ -35,6 +35,18 @@ const DWORD kSocketReadTimeoutMs = 1000;
 const DWORD kWintunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
 
+bool IsDirectPathFresh(const PeerRouteStatus& route, unsigned long long now_tick) {
+    const bool has_fresh_direct_data =
+        route.last_direct_data_ms != 0 &&
+        now_tick >= route.last_direct_data_ms &&
+        (now_tick - route.last_direct_data_ms) <= kPeerDirectDataTimeoutMs;
+    const bool in_probe_grace =
+        route.last_state_change_ms != 0 &&
+        now_tick >= route.last_state_change_ms &&
+        (now_tick - route.last_state_change_ms) <= kPeerDirectProbeGraceMs;
+    return has_fresh_direct_data || in_probe_grace;
+}
+
 std::wstring BuildSocketError(const wchar_t* prefix, int error_code) {
     std::wstringstream stream;
     stream << prefix << L" (WSA=" << error_code << L")";
@@ -812,14 +824,20 @@ void PacketTunnelClient::WintunReadLoop() {
             if (is_udp) {
                 std::string dst_virtual_ip = Ipv4ToString(packet.data() + 16);
                 UdpEndpoint peer_endpoint;
-                if (TryBuildPeerEndpoint(dst_virtual_ip, &peer_endpoint)) {
+                bool direct_path_fresh = false;
+                if (TryBuildPeerEndpoint(dst_virtual_ip, &peer_endpoint, &direct_path_fresh)) {
                     if (SendFrameToEndpoint(peer_endpoint,
                                             packet_tunnel::kFrameIpv4Packet,
                                             packet.data(),
                                             packet.size(),
                                             NULL)) {
-                        PacketTunnelDebugLog("udp wintun->peer " + desc);
-                        continue;
+                        PacketTunnelDebugLog(std::string(direct_path_fresh ? "udp wintun->peer "
+                                                                             : "udp wintun->peer-probe ")
+                                             + desc);
+                        if (direct_path_fresh) {
+                            continue;
+                        }
+                        PacketTunnelDebugLog("udp direct probe mirror relay " + desc);
                     }
                     PacketTunnelDebugLog("udp peer send failed, fallback to relay " + desc);
                 } else {
@@ -1081,7 +1099,8 @@ bool PacketTunnelClient::SendPeerDisableFrame(const std::string& target_peer_vir
 }
 
 bool PacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtual_ip,
-                                              UdpEndpoint* endpoint) const {
+                                              UdpEndpoint* endpoint,
+                                              bool* direct_path_fresh) const {
     if (endpoint == NULL || peer_link_manager_ == NULL) {
         return false;
     }
@@ -1093,6 +1112,9 @@ bool PacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtual_ip
                                                kPeerDirectProbeGraceMs,
                                                &route)) {
         return false;
+    }
+    if (direct_path_fresh != NULL) {
+        *direct_path_fresh = IsDirectPathFresh(route, GetTickCount64());
     }
 
     ZeroMemory(&endpoint->addr, sizeof(endpoint->addr));
