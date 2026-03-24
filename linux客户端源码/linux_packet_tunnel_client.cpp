@@ -255,6 +255,49 @@ bool LinuxSockaddrEquals(const sockaddr_storage& left,
     return false;
 }
 
+bool BuildEndpointForSocketFamily(const sockaddr* source_addr,
+                                  socklen_t source_addr_len,
+                                  int socket_family,
+                                  sockaddr_storage* endpoint_addr,
+                                  socklen_t* endpoint_addr_len) {
+    (void)source_addr_len;
+    if (source_addr == NULL || endpoint_addr == NULL || endpoint_addr_len == NULL) {
+        return false;
+    }
+
+    sockaddr_storage out_addr = {};
+    socklen_t out_len = 0;
+    if (socket_family == AF_INET6) {
+        sockaddr_in6* addr6 = reinterpret_cast<sockaddr_in6*>(&out_addr);
+        memset(addr6, 0, sizeof(*addr6));
+        addr6->sin6_family = AF_INET6;
+
+        if (source_addr->sa_family == AF_INET6) {
+            const sockaddr_in6* source6 = reinterpret_cast<const sockaddr_in6*>(source_addr);
+            memcpy(addr6, source6, sizeof(*source6));
+            out_len = sizeof(sockaddr_in6);
+        } else if (source_addr->sa_family == AF_INET) {
+            const sockaddr_in* source4 = reinterpret_cast<const sockaddr_in*>(source_addr);
+            addr6->sin6_port = source4->sin_port;
+            addr6->sin6_addr.s6_addr[10] = 0xff;
+            addr6->sin6_addr.s6_addr[11] = 0xff;
+            memcpy(&addr6->sin6_addr.s6_addr[12], &source4->sin_addr, sizeof(source4->sin_addr));
+            out_len = sizeof(sockaddr_in6);
+        }
+    } else if (socket_family == AF_INET && source_addr->sa_family == AF_INET) {
+        memcpy(&out_addr, source_addr, sizeof(sockaddr_in));
+        out_len = sizeof(sockaddr_in);
+    }
+
+    if (out_len == 0) {
+        return false;
+    }
+
+    *endpoint_addr = out_addr;
+    *endpoint_addr_len = out_len;
+    return true;
+}
+
 }  // namespace
 
 LinuxPacketTunnelClient::LinuxPacketTunnelClient(const std::string& tunnel_host,
@@ -363,44 +406,54 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
         return false;
     }
 
-    auto try_connect_family = [&](int preferred_family) -> bool {
-        for (addrinfo* rp = result; rp != NULL; rp = rp->ai_next) {
-            if (rp->ai_family != preferred_family) {
-                continue;
-            }
-
-            int sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-            if (sock < 0) {
-                continue;
-            }
-
-            if (rp->ai_family == AF_INET6) {
-                int dual_stack = 0;
-                setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &dual_stack, sizeof(dual_stack));
-            }
-
-            setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &kSocketBufferBytes, sizeof(kSocketBufferBytes));
-            setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &kSocketBufferBytes, sizeof(kSocketBufferBytes));
-
-            timeval send_timeout = {};
-            send_timeout.tv_sec = 5;
-            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
-
-            timeval recv_timeout = {};
-            recv_timeout.tv_sec = kSocketReadTimeoutMs / 1000;
-            recv_timeout.tv_usec = (kSocketReadTimeoutMs % 1000) * 1000;
-            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
-
-            sock_ = sock;
-            socket_family_ = rp->ai_family;
-            server_endpoint_.addr_len = rp->ai_addrlen;
-            memcpy(&server_endpoint_.addr, rp->ai_addr, rp->ai_addrlen);
-            server_endpoint_.valid = true;
-            LogInfo("packet tunnel udp socket ready for relay server " + tunnel_host_ +
-                    ":" + std::to_string(tunnel_port_) +
-                    " family=" + std::to_string(socket_family_));
-            return true;
+    auto configure_socket = [&](int sock, int family) {
+        if (family == AF_INET6) {
+            int dual_stack = 0;
+            setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &dual_stack, sizeof(dual_stack));
         }
+
+        setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &kSocketBufferBytes, sizeof(kSocketBufferBytes));
+        setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &kSocketBufferBytes, sizeof(kSocketBufferBytes));
+
+        timeval send_timeout = {};
+        send_timeout.tv_sec = 5;
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
+
+        timeval recv_timeout = {};
+        recv_timeout.tv_sec = kSocketReadTimeoutMs / 1000;
+        recv_timeout.tv_usec = (kSocketReadTimeoutMs % 1000) * 1000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
+    };
+
+    auto try_connect_family = [&](int preferred_family) -> bool {
+        int sock = socket(preferred_family, SOCK_DGRAM, IPPROTO_UDP);
+        if (sock < 0) {
+            return false;
+        }
+
+        configure_socket(sock, preferred_family);
+
+        sockaddr_storage endpoint_addr = {};
+        socklen_t endpoint_addr_len = 0;
+        for (addrinfo* rp = result; rp != NULL; rp = rp->ai_next) {
+            if (BuildEndpointForSocketFamily(rp->ai_addr,
+                                             static_cast<socklen_t>(rp->ai_addrlen),
+                                             preferred_family,
+                                             &endpoint_addr,
+                                             &endpoint_addr_len)) {
+                sock_ = sock;
+                socket_family_ = preferred_family;
+                server_endpoint_.addr = endpoint_addr;
+                server_endpoint_.addr_len = endpoint_addr_len;
+                server_endpoint_.valid = true;
+                LogInfo("packet tunnel udp socket ready for relay server " + tunnel_host_ +
+                        ":" + std::to_string(tunnel_port_) +
+                        " family=" + std::to_string(socket_family_));
+                return true;
+            }
+        }
+
+        close(sock);
         return false;
     };
 
