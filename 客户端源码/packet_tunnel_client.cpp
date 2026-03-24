@@ -390,6 +390,7 @@ PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
       connected_(false),
       stop_requested_(false),
       last_receive_tick_(0),
+      last_network_activity_tick_(0),
       peer_link_manager_(new PeerLinkManager()),
       peer_signal_nonce_(1) {
     InitializeCriticalSection(&send_lock_);
@@ -606,6 +607,10 @@ bool PacketTunnelClient::SendHandshake(std::wstring* error_msg) {
     return SendDatagramToEndpoint(server_endpoint_, handshake.data(), handshake.size(), error_msg);
 }
 
+void PacketTunnelClient::MarkNetworkActivity() {
+    last_network_activity_tick_ = GetTickCount64();
+}
+
 bool PacketTunnelClient::ReceiveHandshakeAck(std::wstring* error_msg) {
     uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
     while (!stop_requested_) {
@@ -643,6 +648,7 @@ bool PacketTunnelClient::ReceiveHandshakeAck(std::wstring* error_msg) {
         }
 
         last_receive_tick_ = GetTickCount64();
+        MarkNetworkActivity();
         PacketTunnelDebugLog("received handshake ack: mtu=" + std::to_string(mtu_) +
                              " virtual_ip=" + virtual_ip_);
         return true;
@@ -705,6 +711,7 @@ void PacketTunnelClient::SocketReadLoop() {
 
         if (from_server) {
             last_receive_tick_ = GetTickCount64();
+            MarkNetworkActivity();
 
             if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
                 continue;
@@ -721,6 +728,12 @@ void PacketTunnelClient::SocketReadLoop() {
             if (!from_server && !from_known_peer) {
                 PacketTunnelDebugLog("ignore ipv4 packet from unknown endpoint");
                 continue;
+            }
+            if (from_known_peer) {
+                MarkNetworkActivity();
+                if (peer_link_manager_ != NULL) {
+                    peer_link_manager_->TouchPeer(peer_virtual_ip, 0);
+                }
             }
             if (from_known_peer &&
                 (payload_len < 20 ||
@@ -797,6 +810,9 @@ void PacketTunnelClient::WintunReadLoop() {
                                             packet.data(),
                                             packet.size(),
                                             NULL)) {
+                        if (peer_link_manager_ != NULL) {
+                            peer_link_manager_->TouchPeer(dst_virtual_ip, 0);
+                        }
                         PacketTunnelDebugLog("udp wintun->peer " + desc);
                         continue;
                     }
@@ -884,7 +900,7 @@ void PacketTunnelClient::HeartbeatLoop() {
             }
         }
 
-        unsigned long long last_tick = last_receive_tick_.load();
+        unsigned long long last_tick = last_network_activity_tick_.load();
         if (last_tick != 0 && now_tick > last_tick && (now_tick - last_tick) > kHeartbeatTimeoutMs) {
             PacketTunnelDebugLog("heartbeat timeout: idle_ms=" + std::to_string(now_tick - last_tick));
             break;
@@ -1205,6 +1221,7 @@ bool PacketTunnelClient::SendDatagramToEndpoint(const UdpEndpoint& endpoint,
         }
         return false;
     }
+    MarkNetworkActivity();
     return true;
 }
 

@@ -78,6 +78,7 @@ private:
     int RecvDatagram(uint8_t* data, size_t length, std::string* error);
     uint32_t ParseVirtualIp(std::string* error) const;
     void MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip, const std::string& reason);
+    void MarkNetworkActivity();
 
     std::string tunnel_host_;
     uint16_t tunnel_port_;
@@ -91,6 +92,7 @@ private:
     std::atomic<bool> connected_;
     std::atomic<bool> stop_requested_;
     std::atomic<unsigned long long> last_receive_ms_;
+    std::atomic<unsigned long long> last_network_activity_ms_;
     std::thread socket_thread_;
     std::thread tun_thread_;
     std::thread heartbeat_thread_;

@@ -317,6 +317,7 @@ LinuxPacketTunnelClient::LinuxPacketTunnelClient(const std::string& tunnel_host,
       connected_(false),
       stop_requested_(false),
       last_receive_ms_(0),
+      last_network_activity_ms_(0),
       peer_link_manager_(new LinuxPeerLinkManager()),
       peer_signal_nonce_(1) {}
 
@@ -324,6 +325,10 @@ LinuxPacketTunnelClient::~LinuxPacketTunnelClient() {
     Stop();
     delete peer_link_manager_;
     peer_link_manager_ = NULL;
+}
+
+void LinuxPacketTunnelClient::MarkNetworkActivity() {
+    last_network_activity_ms_ = now_ms();
 }
 
 bool LinuxPacketTunnelClient::Start(std::string* error) {
@@ -539,6 +544,7 @@ bool LinuxPacketTunnelClient::ReceiveHandshakeAck(std::string* error) {
         }
 
         last_receive_ms_ = now_ms();
+        MarkNetworkActivity();
         return true;
     }
     if (error != NULL) {
@@ -596,6 +602,7 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
 
         if (from_server) {
             last_receive_ms_ = now_ms();
+            MarkNetworkActivity();
 
             if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
                 continue;
@@ -612,6 +619,12 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
             if (!from_server && !from_known_peer) {
                 LogWarn("ignore ipv4 packet from unknown endpoint");
                 continue;
+            }
+            if (from_known_peer) {
+                MarkNetworkActivity();
+                if (peer_link_manager_ != NULL) {
+                    peer_link_manager_->TouchPeer(peer_virtual_ip, 0);
+                }
             }
             if (from_known_peer &&
                 (payload_len < 20 ||
@@ -912,6 +925,7 @@ bool LinuxPacketTunnelClient::SendDatagramToEndpoint(const UdpEndpoint& endpoint
         }
         return false;
     }
+    MarkNetworkActivity();
     return true;
 }
 
@@ -986,6 +1000,9 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                         packet.data(),
                                         packet.size(),
                                         NULL)) {
+                    if (peer_link_manager_ != NULL) {
+                        peer_link_manager_->TouchPeer(dst_virtual_ip, 0);
+                    }
                     continue;
                 }
             } else {
@@ -1085,7 +1102,7 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
             }
         }
 
-        const unsigned long long last_ms = last_receive_ms_.load();
+        const unsigned long long last_ms = last_network_activity_ms_.load();
         if (last_ms != 0 && current_ms > last_ms && (current_ms - last_ms) > kHeartbeatTimeoutMs) {
             break;
         }

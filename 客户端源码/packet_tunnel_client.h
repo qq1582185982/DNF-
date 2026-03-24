@@ -83,6 +83,7 @@ private:
     static std::wstring Utf8ToWide(const std::string& value);
     void MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip,
                                      const std::string& reason);
+    void MarkNetworkActivity();
 
     std::string tunnel_server_ip_;
     uint16_t tunnel_port_;
@@ -96,6 +97,7 @@ private:
     std::atomic<bool> connected_;
     std::atomic<bool> stop_requested_;
     std::atomic<unsigned long long> last_receive_tick_;
+    std::atomic<unsigned long long> last_network_activity_tick_;
     std::thread socket_read_thread_;
     std::thread wintun_read_thread_;
     std::thread heartbeat_thread_;
