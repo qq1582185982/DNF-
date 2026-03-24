@@ -661,6 +661,12 @@ private:
                error_msg.find(L"发送租约命令失败") != wstring::npos;
     }
 
+    static bool IsLeaseNotFoundError(const wstring& error_msg) {
+        return error_msg.find(L"lease not found") != wstring::npos ||
+               error_msg.find(L"Lease not found") != wstring::npos ||
+               error_msg.find(L"LEASE NOT FOUND") != wstring::npos;
+    }
+
     void RenewLoop() {
         DWORD wait_ms = 30000;
 
@@ -685,6 +691,8 @@ private:
             int api_port = 0;
             string server_key;
             string session_uuid;
+            string client_id;
+            string preferred_ip;
 
             {
                 lock_guard<mutex> lock(lock_);
@@ -692,6 +700,8 @@ private:
                 api_port = api_port_;
                 server_key = server_key_;
                 session_uuid = session_uuid_;
+                client_id = client_id_;
+                preferred_ip = lease_.virtual_ip;
             }
 
             lock_guard<mutex> op_lock(op_lock_);
@@ -707,8 +717,32 @@ private:
                 Logger::debug("[租约] 续租成功: " + renewed.virtual_ip +
                               " 租期=" + to_string(renewed.lease_seconds) + "秒");
             } else {
-                renew_failed_ = true;
-                Logger::warning("[租约] 续租失败: " + wstring_to_utf8(error_msg));
+                if (IsLeaseNotFoundError(error_msg)) {
+                    ip_tunnel::LeaseRequest request;
+                    request.server_key = server_key;
+                    request.session_uuid = session_uuid;
+                    request.client_id = client_id;
+                    request.preferred_ip = preferred_ip;
+
+                    ip_tunnel::LeaseGrant reacquired;
+                    wstring reacquire_error;
+                    if (client.RequestLease(api_url, api_port, request, &reacquired, &reacquire_error)) {
+                        {
+                            lock_guard<mutex> lock(lock_);
+                            lease_ = reacquired;
+                        }
+                        renew_failed_ = false;
+                        Logger::info("[租约] 续租记录丢失，已重新申请虚拟IP: " + reacquired.virtual_ip +
+                                     " 租期=" + to_string(reacquired.lease_seconds) + "秒");
+                    } else {
+                        renew_failed_ = true;
+                        Logger::warning("[租约] 续租记录丢失，重新申请失败: " +
+                                        wstring_to_utf8(reacquire_error));
+                    }
+                } else {
+                    renew_failed_ = true;
+                    Logger::warning("[租约] 续租失败: " + wstring_to_utf8(error_msg));
+                }
             }
         }
     }
