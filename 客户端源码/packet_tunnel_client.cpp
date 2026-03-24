@@ -839,6 +839,10 @@ void PacketTunnelClient::WintunReadLoop() {
                         }
                         PacketTunnelDebugLog("udp direct probe mirror relay " + desc);
                     }
+                    if (peer_link_manager_ != NULL) {
+                        peer_link_manager_->MarkPeerCooldown(dst_virtual_ip);
+                    }
+                    PacketTunnelDebugLog("udp peer send failure demote to cooldown " + desc);
                     PacketTunnelDebugLog("udp peer send failed, fallback to relay " + desc);
                 } else {
                     MaybeLogDirectRouteFallback(dst_virtual_ip, "route_unavailable");

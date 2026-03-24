@@ -1039,6 +1039,9 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                         continue;
                     }
                 }
+                if (peer_link_manager_ != NULL) {
+                    peer_link_manager_->MarkPeerCooldown(dst_virtual_ip);
+                }
             } else {
                 MaybeLogDirectRouteFallback(dst_virtual_ip, "route_unavailable");
             }
