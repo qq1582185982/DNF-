@@ -11,11 +11,6 @@
 #include <string>
 #include <vector>
 
-enum class ClientDataPlaneMode {
-    LegacyTap = 0,
-    ExperimentalWintun = 1
-};
-
 struct TunnelLeaseRuntimeConfig {
     std::string server_virtual_ip;
     std::string virtual_ip;
@@ -32,9 +27,6 @@ class WintunManager {
 public:
     WintunManager();
     ~WintunManager();
-
-    static ClientDataPlaneMode ResolveRequestedMode(const std::string& preferred_mode = "");
-    static bool IsExperimentalModeEnabled();
 
     bool Setup(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg);
     bool ActivateNetwork(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg);
@@ -63,8 +55,6 @@ private:
     typedef BYTE* (WINAPI *AllocateSendPacketFn)(WINTUN_SESSION_HANDLE, DWORD);
     typedef void (WINAPI *SendPacketFn)(WINTUN_SESSION_HANDLE, const BYTE*);
 
-    static std::string ReadEnvUtf8(const char* name);
-    static std::string ToLowerCopy(std::string value);
     static std::wstring Utf8ToWide(const std::string& value);
     static bool HasBasicRuntimeConfig(const TunnelLeaseRuntimeConfig& config);
 

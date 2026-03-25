@@ -238,24 +238,6 @@ WintunManager::~WintunManager() {
     Cleanup();
 }
 
-std::string WintunManager::ReadEnvUtf8(const char* name) {
-    size_t required = 0;
-    getenv_s(&required, NULL, 0, name);
-    if (required == 0) {
-        return "";
-    }
-
-    std::string value(required - 1, '\0');
-    getenv_s(&required, &value[0], required, name);
-    return value;
-}
-
-std::string WintunManager::ToLowerCopy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char ch) { return static_cast<char>(tolower(ch)); });
-    return value;
-}
-
 std::wstring WintunManager::Utf8ToWide(const std::string& value) {
     if (value.empty()) {
         return std::wstring();
@@ -276,26 +258,6 @@ bool WintunManager::HasBasicRuntimeConfig(const TunnelLeaseRuntimeConfig& config
            !config.virtual_ip.empty() &&
            !config.subnet_mask.empty() &&
            !config.gateway_ip.empty();
-}
-
-ClientDataPlaneMode WintunManager::ResolveRequestedMode(const std::string& preferred_mode) {
-    const std::string config_value = ToLowerCopy(preferred_mode);
-    if (config_value == "wintun") {
-        return ClientDataPlaneMode::ExperimentalWintun;
-    }
-    if (config_value == "tap" || config_value == "legacy" || config_value == "legacytap") {
-        return ClientDataPlaneMode::ExperimentalWintun;
-    }
-
-    const std::string env_value = ToLowerCopy(ReadEnvUtf8("DNF_PROXY_DATA_PLANE"));
-    if (env_value == "wintun") {
-        return ClientDataPlaneMode::ExperimentalWintun;
-    }
-    return ClientDataPlaneMode::ExperimentalWintun;
-}
-
-bool WintunManager::IsExperimentalModeEnabled() {
-    return ResolveRequestedMode() == ClientDataPlaneMode::ExperimentalWintun;
 }
 
 bool WintunManager::LoadRuntime(std::wstring* error_msg) {

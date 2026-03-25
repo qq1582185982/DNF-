@@ -1086,11 +1086,6 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    ClientDataPlaneMode data_plane_mode = WintunManager::ResolveRequestedMode(CONFIG_DATA_PLANE_MODE);
-    if (data_plane_mode != ClientDataPlaneMode::ExperimentalWintun) {
-        Logger::warning("[数据面] 检测到旧 data_plane_mode 配置，已强制切换到 Wintun + IP Tunnel");
-    }
-
     cout << "[步骤4/4] 启动虚拟局域网数据面..." << endl;
     Logger::info("[数据面] 启动 Wintun + IP Tunnel 主链路");
 
