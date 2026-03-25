@@ -22,6 +22,7 @@
 #include <mutex>
 #include <algorithm>
 #include <cctype>
+#include <cstdarg>
 #include <sys/inotify.h>
 #include <sys/select.h>
 #include <ifaddrs.h>
@@ -77,6 +78,26 @@ static const char* kNetworkPoolKey = "network";
 static string g_latest_md5;  // 最新版本MD5
 static string g_download_url;  // 下载地址
 static const size_t CONFIG_THREAD_STACK_SIZE = 1 * 1024 * 1024;  // 1MB
+
+static bool tcp_config_trace_enabled() {
+    static int cached = -1;
+    if (cached == -1) {
+        const char* env = getenv("DNF_TCP_CONFIG_DEBUG");
+        cached = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+static void tcp_config_tracef(const char* fmt, ...) {
+    if (!tcp_config_trace_enabled()) {
+        return;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+}
 
 // 简单的JSON字符串提取函数
 string extract_json_string(const string& json, const string& key) {
@@ -755,22 +776,22 @@ void handle_tcp_request(int client_fd) {
     string request = trim_copy(string(buffer));
     vector<string> parts = split_command(request);
 
-    printf("[TCP] 收到请求: %s\n", request.c_str());
+    tcp_config_tracef("[TCP] 收到请求: %s\n", request.c_str());
 
     // 处理 GET_SERVERS 请求
     if (request == "GET_SERVERS") {
         string json_response = generate_server_list_json();
         send(client_fd, json_response.c_str(), json_response.length(), 0);
-        printf("[TCP] 已发送服务器列表 (%zu 字节)\n", json_response.length());
+        tcp_config_tracef("[TCP] 已发送服务器列表 (%zu 字节)\n", json_response.length());
     }
     // 处理 GET_VERSION 请求
     else if (request == "GET_VERSION") {
         string json_response = generate_version_json();
         send(client_fd, json_response.c_str(), json_response.length(), 0);
         if (g_latest_md5.empty() || g_download_url.empty()) {
-            printf("[TCP] 版本配置未设置，已发送空版本信息 (%zu 字节)\n", json_response.length());
+            tcp_config_tracef("[TCP] 版本配置未设置，已发送空版本信息 (%zu 字节)\n", json_response.length());
         } else {
-            printf("[TCP] 已发送版本信息 (%zu 字节): MD5=%s\n",
+            tcp_config_tracef("[TCP] 已发送版本信息 (%zu 字节): MD5=%s\n",
                    json_response.length(), g_latest_md5.c_str());
         }
     }
@@ -856,7 +877,7 @@ void handle_tcp_request(int client_fd) {
         // 未知请求
         const char* error_msg = "{\"error\":\"Unknown request\"}";
         send(client_fd, error_msg, strlen(error_msg), 0);
-        printf("[TCP] 未知请求: %s\n", request.c_str());
+        fprintf(stderr, "[TCP] 未知请求: %s\n", request.c_str());
     }
 
     close(client_fd);
@@ -926,7 +947,7 @@ void* tcp_server_thread(void* arg) {
             client_port = ntohs(addr_in6->sin6_port);
         }
 
-        printf("[TCP] 新连接来自 %s:%d\n", client_ip, client_port);
+        tcp_config_tracef("[TCP] 新连接来自 %s:%d\n", client_ip, client_port);
 
         // 直接处理请求（简单实现，不使用线程池）
         handle_tcp_request(client_fd);
@@ -1123,3 +1144,4 @@ void* config_monitor_thread(void* arg) {
     printf("配置文件监控已停止\n");
     return NULL;
 }
+

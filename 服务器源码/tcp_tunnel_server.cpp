@@ -2309,7 +2309,7 @@ private:
                 client_str = "unknown";
             }
 
-            Logger::info("新客户端连接: " + client_str);
+            Logger::debug("新客户端连接: " + client_str);
 
             // 在新线程中处理客户端 - 使用shared_from_this()避免Use-After-Free
             auto self = shared_from_this();
@@ -2367,7 +2367,7 @@ private:
             // ===== 新数据面: 识别IP Tunnel专用连接 =====
             const uint32_t PACKET_TUNNEL_MAGIC = packet_tunnel::kHandshakeConnId;
             if (conn_id == PACKET_TUNNEL_MAGIC) {
-                Logger::info("[IP Tunnel|" + session_uuid + "] 已识别为IP Tunnel专用连接: 客户端=" + client_str);
+                Logger::debug("[IP Tunnel|" + session_uuid + "] 已识别为IP Tunnel专用连接: 客户端=" + client_str);
                 handle_packet_tunnel(client_fd, client_str, session_uuid);
                 return;
             }
@@ -2422,7 +2422,7 @@ private:
             memcpy(&virtual_ip_be, tail + 4, sizeof(virtual_ip_be));
 
             string virtual_ip = ipv4_be_to_string(virtual_ip_be);
-            Logger::info("[IP Tunnel|" + session_uuid + "] 握手参数: version=" + to_string((int)version) +
+            Logger::debug("[IP Tunnel|" + session_uuid + "] 握手参数: version=" + to_string((int)version) +
                          ", mtu=" + to_string(mtu) + ", virtual_ip=" + virtual_ip +
                          ", flags=" + to_string((int)flags));
 
@@ -2493,14 +2493,14 @@ private:
                 Logger::warning("[IP Tunnel|" + session_uuid + "] 替换旧会话: virtual_ip=" + virtual_ip);
             }
 
-            Logger::info("[IP Tunnel|" + session_uuid + "] 专用会话已建立: 客户端=" + client_str +
+            Logger::debug("[IP Tunnel|" + session_uuid + "] 专用会话已建立: 客户端=" + client_str +
                          ", virtual_ip=" + virtual_ip);
 
             while (running && session->active) {
                 uint8_t header[packet_tunnel::kFrameHeaderSize] = {};
                 int n = recv(client_fd, header, sizeof(header), MSG_WAITALL);
                 if (n == 0) {
-                    Logger::info("[IP Tunnel|" + session_uuid + "] 客户端已正常断开");
+                    Logger::debug("[IP Tunnel|" + session_uuid + "] 客户端已正常断开");
                     break;
                 }
                 if (n != (int)sizeof(header)) {
@@ -3299,3 +3299,4 @@ int main(int argc, char** argv) {
     Logger::close();
     return 0;
 }
+
