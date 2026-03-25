@@ -98,13 +98,16 @@ bool IPLeaseClient::SendCommand(const std::string& host,
     response.clear();
     char buffer[4096];
     int received = 0;
+    bool recv_timed_out = false;
     while ((received = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
         response.append(buffer, received);
     }
 
     if (received == SOCKET_ERROR) {
         int err = WSAGetLastError();
-        if (err != WSAETIMEDOUT) {
+        if (err == WSAETIMEDOUT) {
+            recv_timed_out = true;
+        } else {
             if (error_msg) {
                 *error_msg = L"接收租约响应失败，错误码: " + std::to_wstring(err);
             }
@@ -120,7 +123,11 @@ bool IPLeaseClient::SendCommand(const std::string& host,
             return true;
         }
         if (error_msg) {
-            *error_msg = L"租约服务器返回空数据";
+            if (recv_timed_out) {
+                *error_msg = L"租约服务器响应超时";
+            } else {
+                *error_msg = L"租约服务器连接被对端关闭(空响应)";
+            }
         }
         return false;
     }

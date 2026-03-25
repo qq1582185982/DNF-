@@ -763,11 +763,26 @@ string generate_version_json() {
     return json.str();
 }
 
+static void send_tcp_response(int client_fd, const string& response, const char* context, const char* request = NULL) {
+    ssize_t sent = send(client_fd, response.c_str(), response.length(), 0);
+    if (sent < 0) {
+        fprintf(stderr, "[TCP][WARN] send failed context=%s errno=%d request=%s\n",
+                context, errno, request != NULL ? request : "(unknown)");
+    }
+}
+
 // 处理TCP请求
-void handle_tcp_request(int client_fd) {
+void handle_tcp_request(int client_fd, const string& client_label) {
     char buffer[1024];
     int n = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
     if (n <= 0) {
+        if (n == 0) {
+            fprintf(stderr, "[TCP][WARN] connection closed before request: client=%s\n",
+                    client_label.c_str());
+        } else {
+            fprintf(stderr, "[TCP][WARN] recv request failed: client=%s errno=%d\n",
+                    client_label.c_str(), errno);
+        }
         close(client_fd);
         return;
     }
@@ -781,13 +796,13 @@ void handle_tcp_request(int client_fd) {
     // 处理 GET_SERVERS 请求
     if (request == "GET_SERVERS") {
         string json_response = generate_server_list_json();
-        send(client_fd, json_response.c_str(), json_response.length(), 0);
+        send_tcp_response(client_fd, json_response, "GET_SERVERS", request.c_str());
         tcp_config_tracef("[TCP] 已发送服务器列表 (%zu 字节)\n", json_response.length());
     }
     // 处理 GET_VERSION 请求
     else if (request == "GET_VERSION") {
         string json_response = generate_version_json();
-        send(client_fd, json_response.c_str(), json_response.length(), 0);
+        send_tcp_response(client_fd, json_response, "GET_VERSION", request.c_str());
         if (g_latest_md5.empty() || g_download_url.empty()) {
             tcp_config_tracef("[TCP] 版本配置未设置，已发送空版本信息 (%zu 字节)\n", json_response.length());
         } else {
@@ -799,7 +814,7 @@ void handle_tcp_request(int client_fd) {
         if (parts.size() < 4) {
             string json_response = make_status_json(ip_tunnel::kStatusInvalidRequest,
                                                     "usage: LEASE_IP <server_key> <session_uuid> <client_id> [preferred_ip]");
-            send(client_fd, json_response.c_str(), json_response.length(), 0);
+            send_tcp_response(client_fd, json_response, "LEASE_IP/usage", request.c_str());
         } else {
             string json_response;
             lock_guard<mutex> lock(g_servers_mutex);
@@ -825,14 +840,14 @@ void handle_tcp_request(int client_fd) {
                 }
             }
 
-            send(client_fd, json_response.c_str(), json_response.length(), 0);
+            send_tcp_response(client_fd, json_response, "LEASE_IP", request.c_str());
         }
     }
     else if (!parts.empty() && parts[0] == "RENEW_LEASE") {
         if (parts.size() < 3) {
             string json_response = make_status_json(ip_tunnel::kStatusInvalidRequest,
                                                     "usage: RENEW_LEASE <server_key> <session_uuid>");
-            send(client_fd, json_response.c_str(), json_response.length(), 0);
+            send_tcp_response(client_fd, json_response, "RENEW_LEASE/usage", request.c_str());
         } else {
             string json_response;
             lock_guard<mutex> lock(g_servers_mutex);
@@ -846,18 +861,21 @@ void handle_tcp_request(int client_fd) {
                     lease_record.server_virtual_ip = node->server_virtual_ip;
                     json_response = generate_lease_json(*node, lease_record, "lease renewed");
                 } else {
+                    fprintf(stderr,
+                            "[TCP][WARN] renew lease failed: client=%s server_key=%s session=%s error=%s\n",
+                            client_label.c_str(), parts[1].c_str(), parts[2].c_str(), error.c_str());
                     json_response = make_status_json(status_from_error(error), error, canonical_node_key(*node));
                 }
             }
 
-            send(client_fd, json_response.c_str(), json_response.length(), 0);
+            send_tcp_response(client_fd, json_response, "RENEW_LEASE", request.c_str());
         }
     }
     else if (!parts.empty() && parts[0] == "RELEASE_LEASE") {
         if (parts.size() < 3) {
             string json_response = make_status_json(ip_tunnel::kStatusInvalidRequest,
                                                     "usage: RELEASE_LEASE <server_key> <session_uuid>");
-            send(client_fd, json_response.c_str(), json_response.length(), 0);
+            send_tcp_response(client_fd, json_response, "RELEASE_LEASE/usage", request.c_str());
         } else {
             string json_response;
             lock_guard<mutex> lock(g_servers_mutex);
@@ -870,13 +888,14 @@ void handle_tcp_request(int client_fd) {
                 json_response = make_status_json(ip_tunnel::kStatusLeaseNotFound, "lease not found", canonical_node_key(*node));
             }
 
-            send(client_fd, json_response.c_str(), json_response.length(), 0);
+            send_tcp_response(client_fd, json_response, "RELEASE_LEASE", request.c_str());
         }
     }
     else {
         // 未知请求
         const char* error_msg = "{\"error\":\"Unknown request\"}";
-        send(client_fd, error_msg, strlen(error_msg), 0);
+        string json_response(error_msg);
+        send_tcp_response(client_fd, json_response, "UNKNOWN", request.c_str());
         fprintf(stderr, "[TCP] 未知请求: %s\n", request.c_str());
     }
 
@@ -950,7 +969,8 @@ void* tcp_server_thread(void* arg) {
         tcp_config_tracef("[TCP] 新连接来自 %s:%d\n", client_ip, client_port);
 
         // 直接处理请求（简单实现，不使用线程池）
-        handle_tcp_request(client_fd);
+        string client_label = string(client_ip) + ":" + to_string(client_port);
+        handle_tcp_request(client_fd, client_label);
     }
 
     close(listen_fd);
