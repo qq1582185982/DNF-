@@ -737,6 +737,22 @@ void PacketTunnelClient::SocketReadLoop() {
         std::string peer_virtual_ip;
         const bool from_known_peer = !from_server &&
                                      TryResolvePeerBySource(source_addr, source_addr_len, &peer_virtual_ip);
+        auto has_fresh_direct_route = [this](const std::string& candidate_peer_virtual_ip) -> bool {
+            if (candidate_peer_virtual_ip.empty() || peer_link_manager_ == NULL) {
+                return false;
+            }
+
+            PeerRouteStatus route = {};
+            const unsigned long long now_tick = GetTickCount64();
+            if (!peer_link_manager_->TryGetDirectRoute(candidate_peer_virtual_ip,
+                                                       now_tick,
+                                                       kPeerDirectDataTimeoutMs,
+                                                       kPeerDirectProbeGraceMs,
+                                                       &route)) {
+                return false;
+            }
+            return route.active_direct && IsDirectPathFresh(route, now_tick);
+        };
 
         if (from_server) {
             last_receive_tick_ = GetTickCount64();
@@ -754,8 +770,16 @@ void PacketTunnelClient::SocketReadLoop() {
         }
 
         if (frame_type == packet_tunnel::kFrameIpv4Packet && wintun_manager_ != NULL) {
+            const uint8_t* payload = buffer.data() + packet_tunnel::kFrameHeaderSize;
             if (!from_server && !from_known_peer) {
                 PacketTunnelDebugLog("ignore ipv4 packet from unknown endpoint");
+                continue;
+            }
+            if (from_known_peer &&
+                (payload_len < 20 ||
+                 Ipv4ToString(payload + 12) != peer_virtual_ip)) {
+                PacketTunnelDebugLog("ignore peer ipv4 packet with mismatched inner src peer=" +
+                                     peer_virtual_ip);
                 continue;
             }
             if (from_known_peer) {
@@ -763,20 +787,18 @@ void PacketTunnelClient::SocketReadLoop() {
                 if (peer_link_manager_ != NULL) {
                     peer_link_manager_->TouchPeerDirectData(peer_virtual_ip, 0);
                 }
-            }
-            if (from_known_peer &&
-                (payload_len < 20 ||
-                 Ipv4ToString(buffer.data() + packet_tunnel::kFrameHeaderSize + 12) != peer_virtual_ip)) {
-                PacketTunnelDebugLog("ignore peer ipv4 packet with mismatched inner src peer=" +
-                                     peer_virtual_ip);
+                if (!has_fresh_direct_route(peer_virtual_ip)) {
+                    continue;
+                }
+            } else if (payload_len >= 20 && has_fresh_direct_route(Ipv4ToString(payload + 12))) {
                 continue;
             }
             std::string desc;
-            if (!IsNoisyUdpForLogging(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len) &&
-                TryDescribeUdpPacket(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len, &desc)) {
+            if (!IsNoisyUdpForLogging(payload, payload_len) &&
+                TryDescribeUdpPacket(payload, payload_len, &desc)) {
                 PacketTunnelDebugLog(std::string(from_known_peer ? "udp peer->wintun " : "udp tunnel->wintun ") + desc);
             }
-            wintun_manager_->WritePacket(buffer.data() + packet_tunnel::kFrameHeaderSize, payload_len, NULL);
+            wintun_manager_->WritePacket(payload, payload_len, NULL);
             continue;
         }
 

@@ -1471,6 +1471,46 @@ private:
         return true;
     }
 
+    bool relay_virtual_peer_packet(const shared_ptr<PacketTunnelSession>& sender_session,
+                                   uint32_t dst_ip_be,
+                                   const uint8_t* payload,
+                                   size_t payload_len) {
+        if (!sender_session || !sender_session->active || payload == nullptr || payload_len < 20) {
+            return false;
+        }
+
+        shared_ptr<PacketTunnelSession> target_session;
+        {
+            lock_guard<mutex> lock(packet_tunnel_mutex);
+            map<uint32_t, shared_ptr<PacketTunnelSession>>::const_iterator it =
+                packet_tunnel_sessions.find(dst_ip_be);
+            if (it != packet_tunnel_sessions.end()) {
+                target_session = it->second;
+            }
+        }
+
+        if (!target_session || !target_session->active || target_session == sender_session) {
+            return false;
+        }
+
+        if (!send_packet_tunnel_frame(target_session,
+                                      packet_tunnel::kFrameIpv4Packet,
+                                      payload,
+                                      payload_len)) {
+            Logger::warning("[IP Tunnel|" + sender_session->session_uuid +
+                            "] failed to relay virtual peer packet to " +
+                            ipv4_be_to_string(target_session->virtual_ip_be));
+            target_session->active = false;
+            if (!target_session->use_udp && target_session->client_fd >= 0) {
+                shutdown(target_session->client_fd, SHUT_RDWR);
+            }
+            return false;
+        }
+
+        touch_packet_tunnel_session(target_session);
+        return true;
+    }
+
     static void touch_packet_tunnel_session(const shared_ptr<PacketTunnelSession>& session,
                                             uint64_t now_ms = 0) {
         if (!session) {
@@ -2382,6 +2422,11 @@ private:
                 continue;
             }
 
+            if (dst_is_virtual_peer &&
+                relay_virtual_peer_packet(session, dst_ip_be, payload, payload_len)) {
+                continue;
+            }
+
             if (payload[9] == IPPROTO_UDP) {
                 uint16_t src_port = 0;
                 uint16_t dst_port = 0;
@@ -2756,6 +2801,11 @@ private:
                     if (!dst_is_game_server && !dst_is_virtual_peer) {
                         Logger::debug("[IP Tunnel|" + session_uuid + "] ignore non-tunnel route: dst=" +
                                       ipv4_be_to_string(dst_ip_be));
+                        continue;
+                    }
+
+                    if (dst_is_virtual_peer &&
+                        relay_virtual_peer_packet(session, dst_ip_be, payload.data(), payload_len)) {
                         continue;
                     }
 
