@@ -1272,6 +1272,8 @@ private:
         uint64_t established_ms;
         uint64_t last_peer_offer_announce_ms;
         atomic<uint64_t> last_activity_ms;
+        uint8_t handshake_flags;
+        bool allow_peer_direct;
         mutex send_mutex;
 
         PacketTunnelSession(int fd,
@@ -1289,7 +1291,9 @@ private:
               active(true),
               established_ms(monotonic_millis()),
               last_peer_offer_announce_ms(0),
-              last_activity_ms(established_ms) {}
+              last_activity_ms(established_ms),
+              handshake_flags(packet_tunnel::kHandshakeFlagNone),
+              allow_peer_direct(true) {}
     };
 
     ServerConfig config;
@@ -1387,6 +1391,28 @@ private:
         }
     }
 
+    static bool session_allows_peer_direct(const shared_ptr<PacketTunnelSession>& session) {
+        return session && session->allow_peer_direct;
+    }
+
+    bool send_peer_disable_notice(const shared_ptr<PacketTunnelSession>& session,
+                                  uint32_t peer_virtual_ip_be,
+                                  uint64_t endpoint_version,
+                                  uint8_t reason) {
+        if (!session || !session->active || !session->use_udp) {
+            return false;
+        }
+
+        vector<uint8_t> payload(packet_tunnel::kPeerDisablePayloadSize, 0);
+        packet_tunnel::write_u32_be(payload.data(), ntohl(peer_virtual_ip_be));
+        packet_tunnel::write_u64_be(payload.data() + 4, endpoint_version);
+        payload[12] = reason;
+        return send_packet_tunnel_frame(session,
+                                        packet_tunnel::kFramePeerDisable,
+                                        payload.data(),
+                                        payload.size());
+    }
+
     void log_expired_peer_coord_states(PeerCoord* peer_coord, const string& server_name) {
         if (peer_coord == nullptr) {
             return;
@@ -1454,7 +1480,11 @@ private:
                            MSG_NOSIGNAL,
                            (const sockaddr*)&session->udp_addr,
                            session->udp_addr_len);
-            return n == (int)frame.size();
+            if (n != (int)frame.size()) {
+                return false;
+            }
+            touch_packet_tunnel_session(session);
+            return true;
         }
 
         size_t sent = 0;
@@ -1468,6 +1498,7 @@ private:
             }
             sent += (size_t)n;
         }
+        touch_packet_tunnel_session(session);
         return true;
     }
 
@@ -1607,7 +1638,10 @@ private:
         if (force_new_version || local_version == 0) {
             local_version = peer_coord_.BumpEndpointVersion(local_virtual_ip);
         }
-        peer_coord_.SetState(local_virtual_ip, PeerEndpointState::OfferPending);
+        peer_coord_.SetState(local_virtual_ip,
+                             session_allows_peer_direct(session)
+                                 ? PeerEndpointState::OfferPending
+                                 : PeerEndpointState::RelayOnly);
         session->last_peer_offer_announce_ms = monotonic_millis();
 
         vector<shared_ptr<PacketTunnelSession>> peers;
@@ -1640,7 +1674,28 @@ private:
             uint64_t peer_version = peer_coord_.GetEndpointVersion(peer_virtual_ip);
             if (force_new_version || peer_version == 0) {
                 peer_version = peer_coord_.BumpEndpointVersion(peer_virtual_ip);
-                peer_coord_.SetState(peer_virtual_ip, PeerEndpointState::OfferPending);
+                peer_coord_.SetState(peer_virtual_ip,
+                                     session_allows_peer_direct(peer)
+                                         ? PeerEndpointState::OfferPending
+                                         : PeerEndpointState::RelayOnly);
+            }
+
+            if (!session_allows_peer_direct(session) || !session_allows_peer_direct(peer)) {
+                if (session_allows_peer_direct(session)) {
+                    send_peer_disable_notice(session,
+                                             peer->virtual_ip_be,
+                                             peer_version,
+                                             packet_tunnel::kPeerDisableReasonCooldown);
+                }
+                if (session_allows_peer_direct(peer)) {
+                    send_peer_disable_notice(peer,
+                                             session->virtual_ip_be,
+                                             local_version,
+                                             packet_tunnel::kPeerDisableReasonCooldown);
+                }
+                Logger::debug("[" + server_name + "|IP Tunnel] skip peer offer for relay-only pair " +
+                              local_virtual_ip + " <-> " + peer_virtual_ip);
+                continue;
             }
 
             vector<uint8_t> peer_offer_payload;
@@ -1733,6 +1788,23 @@ private:
         }
 
         const string sender_virtual_ip = ipv4_be_to_string(sender_session->virtual_ip_be);
+        const string target_virtual_ip = ipv4_be_to_string(target_session->virtual_ip_be);
+        if (!session_allows_peer_direct(sender_session) ||
+            !session_allows_peer_direct(target_session)) {
+            if (session_allows_peer_direct(sender_session)) {
+                const uint64_t target_version = peer_coord_.GetEndpointVersion(target_virtual_ip);
+                send_peer_disable_notice(sender_session,
+                                         target_session->virtual_ip_be,
+                                         target_version,
+                                         packet_tunnel::kPeerDisableReasonCooldown);
+            }
+            Logger::debug("[IP Tunnel|" + sender_session->session_uuid +
+                          "] suppress " + packet_tunnel_frame_name(frame_type) +
+                          " for relay-only pair " + sender_virtual_ip + " -> " +
+                          target_virtual_ip);
+            return true;
+        }
+
         uint64_t sender_version = peer_coord_.GetEndpointVersion(sender_virtual_ip);
         if (sender_version == 0) {
             sender_version = peer_coord_.BumpEndpointVersion(sender_virtual_ip);
@@ -1763,7 +1835,7 @@ private:
         Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] relay " +
                       packet_tunnel_frame_name(frame_type) + " " +
                       sender_virtual_ip + " -> " +
-                      ipv4_be_to_string(target_session->virtual_ip_be) +
+                      target_virtual_ip +
                       " nonce=" + to_string(signal.nonce) +
                       " version=" + to_string(sender_version));
         {
@@ -2227,6 +2299,9 @@ private:
                     session->udp_addr = client_addr;
                     session->udp_addr_len = client_addr_len;
                     session->udp_endpoint_key = client_str;
+                    session->handshake_flags = flags;
+                    session->allow_peer_direct =
+                        (flags & packet_tunnel::kHandshakeFlagRelayOnly) == 0;
                     touch_packet_tunnel_session(session);
 
                     shared_ptr<PacketTunnelSession> replaced_by_virtual_ip;
@@ -2271,7 +2346,9 @@ private:
                     }
 
                     Logger::info("[IP Tunnel|" + session_uuid + "] UDP session established: client=" +
-                                 client_str + ", virtual_ip=" + virtual_ip);
+                                 client_str + ", virtual_ip=" + virtual_ip +
+                                 ", direct=" +
+                                 string(session->allow_peer_direct ? "enabled" : "relay_only"));
                     announce_peer_offers_for_session(session);
                     continue;
                 }
@@ -2643,6 +2720,9 @@ private:
             }
 
             session = make_shared<PacketTunnelSession>(client_fd, client_str, session_uuid, virtual_ip_be, mtu);
+            session->handshake_flags = flags;
+            session->allow_peer_direct =
+                (flags & packet_tunnel::kHandshakeFlagRelayOnly) == 0;
             touch_packet_tunnel_session(session);
 
             shared_ptr<PacketTunnelSession> replaced_session;

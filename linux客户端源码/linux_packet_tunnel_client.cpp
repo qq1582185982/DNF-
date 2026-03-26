@@ -273,6 +273,35 @@ std::string LinuxPeerEndpointToString(uint8_t family, const uint8_t* addr, uint1
     return "unknown";
 }
 
+std::string LinuxSockaddrToString(const sockaddr_storage& addr, socklen_t addr_len) {
+    (void)addr_len;
+    char buffer[INET6_ADDRSTRLEN] = {};
+    if (addr.ss_family == AF_INET) {
+        const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(&addr);
+        if (inet_ntop(AF_INET, &addr4->sin_addr, buffer, sizeof(buffer)) != NULL) {
+            return std::string(buffer) + ":" + std::to_string(ntohs(addr4->sin_port));
+        }
+    } else if (addr.ss_family == AF_INET6) {
+        const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(&addr);
+        if (inet_ntop(AF_INET6, &addr6->sin6_addr, buffer, sizeof(buffer)) != NULL) {
+            return "[" + std::string(buffer) + "]:" + std::to_string(ntohs(addr6->sin6_port));
+        }
+    }
+    return "unknown";
+}
+
+void LinuxClearSockaddrPort(sockaddr_storage* addr) {
+    if (addr == NULL) {
+        return;
+    }
+
+    if (addr->ss_family == AF_INET) {
+        reinterpret_cast<sockaddr_in*>(addr)->sin_port = 0;
+    } else if (addr->ss_family == AF_INET6) {
+        reinterpret_cast<sockaddr_in6*>(addr)->sin6_port = 0;
+    }
+}
+
 bool ParseLinuxPeerOfferPayload(const uint8_t* payload, size_t length, ParsedLinuxPeerOffer* out_offer) {
     if (payload == NULL || out_offer == NULL || length != packet_tunnel::kPeerOfferPayloadSize) {
         return false;
@@ -513,13 +542,6 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
     };
 
     auto try_connect_family = [&](int preferred_family) -> bool {
-        int sock = socket(preferred_family, SOCK_DGRAM, IPPROTO_UDP);
-        if (sock < 0) {
-            return false;
-        }
-
-        configure_socket(sock, preferred_family);
-
         sockaddr_storage endpoint_addr = {};
         socklen_t endpoint_addr_len = 0;
         for (addrinfo* rp = result; rp != NULL; rp = rp->ai_next) {
@@ -528,20 +550,62 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
                                              preferred_family,
                                              &endpoint_addr,
                                              &endpoint_addr_len)) {
-                sock_ = sock;
-                socket_family_ = preferred_family;
-                server_endpoint_.addr = endpoint_addr;
-                server_endpoint_.addr_len = endpoint_addr_len;
-                server_endpoint_.valid = true;
-                LogInfo("packet tunnel udp socket ready for relay server " + tunnel_host_ +
-                        ":" + std::to_string(tunnel_port_) +
-                        " family=" + std::to_string(socket_family_));
-                return true;
+                break;
             }
         }
 
-        close(sock);
-        return false;
+        if (endpoint_addr_len == 0) {
+            return false;
+        }
+
+        sockaddr_storage local_bind_addr = {};
+        socklen_t local_bind_addr_len = 0;
+        bool has_local_bind = false;
+
+        int probe_sock = socket(preferred_family, SOCK_DGRAM, IPPROTO_UDP);
+        if (probe_sock >= 0) {
+            configure_socket(probe_sock, preferred_family);
+            if (connect(probe_sock,
+                        reinterpret_cast<const sockaddr*>(&endpoint_addr),
+                        endpoint_addr_len) == 0) {
+                local_bind_addr_len = sizeof(local_bind_addr);
+                if (getsockname(probe_sock,
+                                reinterpret_cast<sockaddr*>(&local_bind_addr),
+                                &local_bind_addr_len) == 0) {
+                    LinuxClearSockaddrPort(&local_bind_addr);
+                    has_local_bind = true;
+                }
+            }
+            close(probe_sock);
+        }
+
+        int sock = socket(preferred_family, SOCK_DGRAM, IPPROTO_UDP);
+        if (sock < 0) {
+            return false;
+        }
+
+        configure_socket(sock, preferred_family);
+
+        if (has_local_bind &&
+            bind(sock,
+                 reinterpret_cast<const sockaddr*>(&local_bind_addr),
+                 local_bind_addr_len) != 0) {
+            LogWarn("packet tunnel local bind fallback: " + std::string(strerror(errno)));
+            has_local_bind = false;
+        }
+
+        sock_ = sock;
+        socket_family_ = preferred_family;
+        server_endpoint_.addr = endpoint_addr;
+        server_endpoint_.addr_len = endpoint_addr_len;
+        server_endpoint_.valid = true;
+        LogInfo("packet tunnel udp socket ready for relay server " + tunnel_host_ +
+                ":" + std::to_string(tunnel_port_) +
+                " family=" + std::to_string(socket_family_) +
+                (has_local_bind
+                     ? (" local=" + LinuxSockaddrToString(local_bind_addr, local_bind_addr_len))
+                     : std::string("")));
+        return true;
     };
 
     bool connected = false;
@@ -716,7 +780,8 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
         if (frame_type == packet_tunnel::kFrameIpv4Packet && tun_manager_ != NULL) {
             const uint8_t* payload = buffer.data() + packet_tunnel::kFrameHeaderSize;
             if (!from_server && !from_known_peer) {
-                LogWarn("ignore ipv4 packet from unknown endpoint");
+                LogWarn("ignore ipv4 packet from unknown endpoint source=" +
+                        LinuxSockaddrToString(source_addr, source_addr_len));
                 continue;
             }
             if (from_known_peer &&

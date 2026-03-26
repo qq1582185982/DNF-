@@ -15,6 +15,11 @@ enum StatusCode : uint8_t {
     kStatusUnsupportedVersion = 2
 };
 
+enum HandshakeFlags : uint8_t {
+    kHandshakeFlagNone = 0,
+    kHandshakeFlagRelayOnly = 1 << 0
+};
+
 enum FrameType : uint8_t {
     kFrameHeartbeat = 0x20,
     kFrameHeartbeatAck = 0x21,

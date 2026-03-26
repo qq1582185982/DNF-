@@ -107,4 +107,5 @@ private:
     PeerLinkManager* peer_link_manager_;
     std::atomic<uint32_t> peer_signal_nonce_;
     std::map<std::string, unsigned long long> peer_route_debug_log_tick_;
+    bool peer_direct_allowed_;
 };

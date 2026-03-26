@@ -5,7 +5,9 @@
 #include "wintun_manager.h"
 
 #include <windows.h>
+#include <iphlpapi.h>
 #include <mstcpip.h>
+#include <netioapi.h>
 #include <ws2tcpip.h>
 
 #include <algorithm>
@@ -294,6 +296,274 @@ std::string PeerEndpointToString(uint8_t family, const uint8_t* addr, uint16_t p
     return "unknown";
 }
 
+std::string SockaddrToString(const sockaddr_storage& addr, int addr_len) {
+    (void)addr_len;
+    char buffer[INET6_ADDRSTRLEN] = {};
+    if (addr.ss_family == AF_INET) {
+        const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(&addr);
+        if (InetNtopA(AF_INET, const_cast<IN_ADDR*>(&addr4->sin_addr), buffer, sizeof(buffer)) != NULL) {
+            return std::string(buffer) + ":" + std::to_string(ntohs(addr4->sin_port));
+        }
+    } else if (addr.ss_family == AF_INET6) {
+        const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(&addr);
+        if (InetNtopA(AF_INET6, const_cast<IN6_ADDR*>(&addr6->sin6_addr), buffer, sizeof(buffer)) != NULL) {
+            return "[" + std::string(buffer) + "]:" + std::to_string(ntohs(addr6->sin6_port));
+        }
+    }
+    return "unknown";
+}
+
+void ClearSockaddrPort(sockaddr_storage* addr) {
+    if (addr == NULL) {
+        return;
+    }
+
+    if (addr->ss_family == AF_INET) {
+        reinterpret_cast<sockaddr_in*>(addr)->sin_port = 0;
+    } else if (addr->ss_family == AF_INET6) {
+        reinterpret_cast<sockaddr_in6*>(addr)->sin6_port = 0;
+    }
+}
+
+bool IsUsableBindAddress(const sockaddr* addr) {
+    if (addr == NULL) {
+        return false;
+    }
+
+    if (addr->sa_family == AF_INET) {
+        const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(addr);
+        uint32_t ip = ntohl(addr4->sin_addr.S_un.S_addr);
+        if (ip == 0 ||
+            (ip & 0xff000000u) == 0x7f000000u ||
+            (ip & 0xffff0000u) == 0xa9fe0000u ||
+            (ip & 0xfffe0000u) == 0xc6120000u) {
+            return false;
+        }
+        return true;
+    }
+
+    if (addr->sa_family == AF_INET6) {
+        const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(addr);
+        if (IN6_IS_ADDR_UNSPECIFIED(&addr6->sin6_addr) ||
+            IN6_IS_ADDR_LOOPBACK(&addr6->sin6_addr) ||
+            IN6_IS_ADDR_MULTICAST(&addr6->sin6_addr) ||
+            IN6_IS_ADDR_LINKLOCAL(&addr6->sin6_addr)) {
+            return false;
+        }
+        return (addr6->sin6_addr.u.Byte[0] & 0xe0) == 0x20;
+    }
+
+    return false;
+}
+
+bool IsPublicInternetAddress(const sockaddr* addr) {
+    if (addr == NULL) {
+        return false;
+    }
+
+    if (addr->sa_family == AF_INET) {
+        const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(addr);
+        uint32_t ip = ntohl(addr4->sin_addr.S_un.S_addr);
+        if (ip == 0 ||
+            (ip & 0xff000000u) == 0x0a000000u ||
+            (ip & 0xfff00000u) == 0xac100000u ||
+            (ip & 0xffff0000u) == 0xc0a80000u ||
+            (ip & 0xff000000u) == 0x7f000000u ||
+            (ip & 0xffff0000u) == 0xa9fe0000u ||
+            (ip & 0xffc00000u) == 0x64400000u ||
+            (ip & 0xfffe0000u) == 0xc6120000u) {
+            return false;
+        }
+        return true;
+    }
+
+    if (addr->sa_family == AF_INET6) {
+        const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(addr);
+        if (IN6_IS_ADDR_UNSPECIFIED(&addr6->sin6_addr) ||
+            IN6_IS_ADDR_LOOPBACK(&addr6->sin6_addr) ||
+            IN6_IS_ADDR_MULTICAST(&addr6->sin6_addr) ||
+            IN6_IS_ADDR_LINKLOCAL(&addr6->sin6_addr)) {
+            return false;
+        }
+        if ((addr6->sin6_addr.u.Byte[0] & 0xfe) == 0xfc) {
+            return false;
+        }
+        return (addr6->sin6_addr.u.Byte[0] & 0xe0) == 0x20;
+    }
+
+    return false;
+}
+
+bool SockaddrAddressEquals(const sockaddr_storage& left, const sockaddr* right) {
+    if (right == NULL || left.ss_family != right->sa_family) {
+        return false;
+    }
+
+    if (left.ss_family == AF_INET) {
+        const sockaddr_in* left4 = reinterpret_cast<const sockaddr_in*>(&left);
+        const sockaddr_in* right4 = reinterpret_cast<const sockaddr_in*>(right);
+        return left4->sin_addr.S_un.S_addr == right4->sin_addr.S_un.S_addr;
+    }
+
+    if (left.ss_family == AF_INET6) {
+        const sockaddr_in6* left6 = reinterpret_cast<const sockaddr_in6*>(&left);
+        const sockaddr_in6* right6 = reinterpret_cast<const sockaddr_in6*>(right);
+        return memcmp(&left6->sin6_addr, &right6->sin6_addr, sizeof(left6->sin6_addr)) == 0;
+    }
+
+    return false;
+}
+
+bool LoadAdapterAddresses(ULONG family,
+                          std::vector<unsigned char>* buffer,
+                          IP_ADAPTER_ADDRESSES** adapters) {
+    if (buffer == NULL || adapters == NULL) {
+        return false;
+    }
+
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    ULONG buffer_size = 16 * 1024;
+    buffer->assign(buffer_size, 0);
+
+    ULONG ret = ERROR_BUFFER_OVERFLOW;
+    for (int attempt = 0; attempt < 3 && ret == ERROR_BUFFER_OVERFLOW; ++attempt) {
+        ret = GetAdaptersAddresses(family,
+                                   flags,
+                                   NULL,
+                                   reinterpret_cast<IP_ADAPTER_ADDRESSES*>(&(*buffer)[0]),
+                                   &buffer_size);
+        if (ret == ERROR_BUFFER_OVERFLOW) {
+            buffer->assign(buffer_size, 0);
+        }
+    }
+
+    if (ret != NO_ERROR) {
+        return false;
+    }
+
+    *adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(&(*buffer)[0]);
+    return true;
+}
+
+std::string AdapterDisplayName(const IP_ADAPTER_ADDRESSES* adapter) {
+    if (adapter == NULL) {
+        return "unknown";
+    }
+
+    std::wstring name = adapter->FriendlyName ? adapter->FriendlyName : L"";
+    if (name.empty() && adapter->Description != NULL) {
+        name = adapter->Description;
+    }
+    return WideToUtf8(name);
+}
+
+bool IsPreferredPhysicalAdapter(const IP_ADAPTER_ADDRESSES* adapter) {
+    if (adapter == NULL || adapter->OperStatus != IfOperStatusUp) {
+        return false;
+    }
+
+    if (adapter->IfType != IF_TYPE_ETHERNET_CSMACD &&
+        adapter->IfType != IF_TYPE_IEEE80211) {
+        return false;
+    }
+
+    MIB_IF_ROW2 row = {};
+    row.InterfaceLuid = adapter->Luid;
+    if (GetIfEntry2(&row) != NO_ERROR) {
+        return false;
+    }
+    if (!row.InterfaceAndOperStatusFlags.HardwareInterface ||
+        row.InterfaceAndOperStatusFlags.FilterInterface) {
+        return false;
+    }
+
+    return true;
+}
+
+bool TryResolveBindAdapter(const sockaddr_storage& addr,
+                           int family,
+                           std::string* adapter_name,
+                           bool* preferred) {
+    std::vector<unsigned char> buffer;
+    IP_ADAPTER_ADDRESSES* adapters = NULL;
+    if (!LoadAdapterAddresses(static_cast<ULONG>(family), &buffer, &adapters)) {
+        return false;
+    }
+
+    for (IP_ADAPTER_ADDRESSES* adapter = adapters; adapter != NULL; adapter = adapter->Next) {
+        for (IP_ADAPTER_UNICAST_ADDRESS* unicast = adapter->FirstUnicastAddress;
+             unicast != NULL;
+             unicast = unicast->Next) {
+            if (unicast->Address.lpSockaddr == NULL ||
+                unicast->Address.lpSockaddr->sa_family != family) {
+                continue;
+            }
+            if (!SockaddrAddressEquals(addr, unicast->Address.lpSockaddr)) {
+                continue;
+            }
+
+            if (adapter_name != NULL) {
+                *adapter_name = AdapterDisplayName(adapter);
+            }
+            if (preferred != NULL) {
+                *preferred = IsPreferredPhysicalAdapter(adapter);
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool TryFindPreferredBindAddress(int family,
+                                 sockaddr_storage* bind_addr,
+                                 int* bind_addr_len,
+                                 std::string* adapter_name) {
+    if (bind_addr == NULL || bind_addr_len == NULL) {
+        return false;
+    }
+
+    std::vector<unsigned char> buffer;
+    IP_ADAPTER_ADDRESSES* adapters = NULL;
+    if (!LoadAdapterAddresses(static_cast<ULONG>(family), &buffer, &adapters)) {
+        return false;
+    }
+
+    for (IP_ADAPTER_ADDRESSES* adapter = adapters; adapter != NULL; adapter = adapter->Next) {
+        if (!IsPreferredPhysicalAdapter(adapter)) {
+            continue;
+        }
+
+        for (IP_ADAPTER_UNICAST_ADDRESS* unicast = adapter->FirstUnicastAddress;
+             unicast != NULL;
+             unicast = unicast->Next) {
+            if (unicast->Address.lpSockaddr == NULL ||
+                unicast->Address.lpSockaddr->sa_family != family ||
+                !IsUsableBindAddress(unicast->Address.lpSockaddr)) {
+                continue;
+            }
+
+            if (family == AF_INET) {
+                *bind_addr_len = sizeof(sockaddr_in);
+                memcpy(bind_addr, unicast->Address.lpSockaddr, sizeof(sockaddr_in));
+            } else if (family == AF_INET6) {
+                *bind_addr_len = sizeof(sockaddr_in6);
+                memcpy(bind_addr, unicast->Address.lpSockaddr, sizeof(sockaddr_in6));
+            } else {
+                continue;
+            }
+
+            ClearSockaddrPort(bind_addr);
+            if (adapter_name != NULL) {
+                *adapter_name = AdapterDisplayName(adapter);
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool ParsePeerOfferPayload(const uint8_t* payload, size_t length, ParsedPeerOffer* out_offer) {
     if (payload == NULL || out_offer == NULL || length != packet_tunnel::kPeerOfferPayloadSize) {
         return false;
@@ -369,23 +639,13 @@ bool BuildEndpointForSocketFamily(const sockaddr* source_addr,
 
     sockaddr_storage out_addr = {};
     int out_len = 0;
-    if (socket_family == AF_INET6) {
+    if (socket_family == AF_INET6 && source_addr->sa_family == AF_INET6) {
         sockaddr_in6* addr6 = reinterpret_cast<sockaddr_in6*>(&out_addr);
         ZeroMemory(addr6, sizeof(*addr6));
         addr6->sin6_family = AF_INET6;
-
-        if (source_addr->sa_family == AF_INET6) {
-            const sockaddr_in6* source6 = reinterpret_cast<const sockaddr_in6*>(source_addr);
-            memcpy(addr6, source6, sizeof(*source6));
-            out_len = sizeof(sockaddr_in6);
-        } else if (source_addr->sa_family == AF_INET) {
-            const sockaddr_in* source4 = reinterpret_cast<const sockaddr_in*>(source_addr);
-            addr6->sin6_port = source4->sin_port;
-            addr6->sin6_addr.u.Byte[10] = 0xff;
-            addr6->sin6_addr.u.Byte[11] = 0xff;
-            memcpy(&addr6->sin6_addr.u.Byte[12], &source4->sin_addr, sizeof(source4->sin_addr));
-            out_len = sizeof(sockaddr_in6);
-        }
+        const sockaddr_in6* source6 = reinterpret_cast<const sockaddr_in6*>(source_addr);
+        memcpy(addr6, source6, sizeof(*source6));
+        out_len = sizeof(sockaddr_in6);
     } else if (socket_family == AF_INET && source_addr->sa_family == AF_INET) {
         memcpy(&out_addr, source_addr, sizeof(sockaddr_in));
         out_len = sizeof(sockaddr_in);
@@ -421,7 +681,8 @@ PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
       last_receive_tick_(0),
       last_network_activity_tick_(0),
       peer_link_manager_(new PeerLinkManager()),
-      peer_signal_nonce_(1) {
+      peer_signal_nonce_(1),
+      peer_direct_allowed_(true) {
     InitializeCriticalSection(&send_lock_);
 }
 
@@ -511,6 +772,7 @@ void PacketTunnelClient::Stop() {
 bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
     server_endpoint_ = UdpEndpoint();
     socket_family_ = AF_UNSPEC;
+    peer_direct_allowed_ = true;
 
     struct addrinfo hints = {};
     struct addrinfo* result = NULL;
@@ -555,13 +817,6 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
     };
 
     auto try_connect_family = [&](int preferred_family) -> bool {
-        SOCKET sock = socket(preferred_family, SOCK_DGRAM, IPPROTO_UDP);
-        if (sock == INVALID_SOCKET) {
-            return false;
-        }
-
-        configure_socket(sock, preferred_family);
-
         sockaddr_storage endpoint_addr = {};
         int endpoint_addr_len = 0;
         for (addrinfo* rp = result; rp != NULL; rp = rp->ai_next) {
@@ -570,20 +825,107 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
                                              preferred_family,
                                              &endpoint_addr,
                                              &endpoint_addr_len)) {
-                sock_ = sock;
-                socket_family_ = preferred_family;
-                server_endpoint_.addr = endpoint_addr;
-                server_endpoint_.addr_len = endpoint_addr_len;
-                server_endpoint_.valid = true;
-                PacketTunnelDebugLog("udp socket ready for relay server " + tunnel_server_ip_ +
-                                     ":" + std::to_string(tunnel_port_) +
-                                     " family=" + std::to_string(socket_family_));
-                return true;
+                break;
             }
         }
 
-        closesocket(sock);
-        return false;
+        if (endpoint_addr_len == 0) {
+            return false;
+        }
+
+        const bool public_relay_target =
+            IsPublicInternetAddress(reinterpret_cast<const sockaddr*>(&endpoint_addr));
+        peer_direct_allowed_ = public_relay_target;
+
+        sockaddr_storage local_bind_addr = {};
+        int local_bind_addr_len = 0;
+        bool has_local_bind = false;
+        std::string bind_adapter_name;
+
+        SOCKET probe_sock = socket(preferred_family, SOCK_DGRAM, IPPROTO_UDP);
+        if (probe_sock != INVALID_SOCKET) {
+            configure_socket(probe_sock, preferred_family);
+            if (connect(probe_sock,
+                        reinterpret_cast<const sockaddr*>(&endpoint_addr),
+                        endpoint_addr_len) == 0) {
+                local_bind_addr_len = static_cast<int>(sizeof(local_bind_addr));
+                if (getsockname(probe_sock,
+                                reinterpret_cast<sockaddr*>(&local_bind_addr),
+                                &local_bind_addr_len) == 0) {
+                    ClearSockaddrPort(&local_bind_addr);
+                    if (!public_relay_target) {
+                        has_local_bind = true;
+                    } else {
+                        bool preferred_adapter = false;
+                        if (IsUsableBindAddress(reinterpret_cast<const sockaddr*>(&local_bind_addr)) &&
+                            TryResolveBindAdapter(local_bind_addr,
+                                                  preferred_family,
+                                                  &bind_adapter_name,
+                                                  &preferred_adapter) &&
+                            preferred_adapter) {
+                            has_local_bind = true;
+                        } else {
+                            PacketTunnelDebugLog("udp socket local bind rejected: " +
+                                                 SockaddrToString(local_bind_addr, local_bind_addr_len) +
+                                                 (bind_adapter_name.empty()
+                                                      ? std::string()
+                                                      : (" adapter=" + bind_adapter_name)));
+                        }
+                    }
+                }
+            }
+            closesocket(probe_sock);
+        }
+
+        if (public_relay_target && !has_local_bind) {
+            if (!TryFindPreferredBindAddress(preferred_family,
+                                             &local_bind_addr,
+                                             &local_bind_addr_len,
+                                             &bind_adapter_name)) {
+                PacketTunnelDebugLog("udp socket preferred bind not found for family=" +
+                                     std::to_string(preferred_family));
+                return false;
+            }
+            has_local_bind = true;
+            PacketTunnelDebugLog("udp socket local bind override: " +
+                                 SockaddrToString(local_bind_addr, local_bind_addr_len) +
+                                 " adapter=" + bind_adapter_name);
+        }
+
+        SOCKET sock = socket(preferred_family, SOCK_DGRAM, IPPROTO_UDP);
+        if (sock == INVALID_SOCKET) {
+            return false;
+        }
+
+        configure_socket(sock, preferred_family);
+
+        if (public_relay_target &&
+            has_local_bind &&
+            bind(sock,
+                 reinterpret_cast<const sockaddr*>(&local_bind_addr),
+                 local_bind_addr_len) != 0) {
+            PacketTunnelDebugLog("udp socket local bind fallback: " +
+                                 WideToUtf8(BuildSocketError(L"bind failed", WSAGetLastError())));
+            closesocket(sock);
+            return false;
+        }
+
+        sock_ = sock;
+        socket_family_ = preferred_family;
+        server_endpoint_.addr = endpoint_addr;
+        server_endpoint_.addr_len = endpoint_addr_len;
+        server_endpoint_.valid = true;
+        if (!peer_direct_allowed_) {
+            PacketTunnelDebugLog("peer direct disabled: relay target is non-public " +
+                                 SockaddrToString(endpoint_addr, endpoint_addr_len));
+        }
+        PacketTunnelDebugLog("udp socket ready for relay server " + tunnel_server_ip_ +
+                             ":" + std::to_string(tunnel_port_) +
+                             " family=" + std::to_string(socket_family_) +
+                             ((public_relay_target && has_local_bind)
+                                  ? (" local=" + SockaddrToString(local_bind_addr, local_bind_addr_len))
+                                  : std::string("")));
+        return true;
     };
 
     bool connected = false;
@@ -625,7 +967,9 @@ bool PacketTunnelClient::SendHandshake(std::wstring* error_msg) {
 
     size_t tail = 7 + session_uuid_len;
     handshake[tail + 0] = packet_tunnel::kProtocolVersion;
-    handshake[tail + 1] = 0;
+    handshake[tail + 1] = peer_direct_allowed_
+        ? packet_tunnel::kHandshakeFlagNone
+        : packet_tunnel::kHandshakeFlagRelayOnly;
     uint16_t mtu_be = htons(mtu_);
     memcpy(&handshake[tail + 2], &mtu_be, sizeof(mtu_be));
     memcpy(&handshake[tail + 4], &virtual_ip_be, sizeof(virtual_ip_be));
@@ -772,7 +1116,8 @@ void PacketTunnelClient::SocketReadLoop() {
         if (frame_type == packet_tunnel::kFrameIpv4Packet && wintun_manager_ != NULL) {
             const uint8_t* payload = buffer.data() + packet_tunnel::kFrameHeaderSize;
             if (!from_server && !from_known_peer) {
-                PacketTunnelDebugLog("ignore ipv4 packet from unknown endpoint");
+                PacketTunnelDebugLog("ignore ipv4 packet from unknown endpoint source=" +
+                                     SockaddrToString(source_addr, source_addr_len));
                 continue;
             }
             if (from_known_peer &&
@@ -802,10 +1147,11 @@ void PacketTunnelClient::SocketReadLoop() {
             continue;
         }
 
-        if (!from_server && !from_known_peer) {
-            PacketTunnelDebugLog("ignore packet from unknown endpoint frame=" +
-                                 PacketTunnelFrameName(frame_type));
-        }
+    if (!from_server && !from_known_peer) {
+        PacketTunnelDebugLog("ignore packet from unknown endpoint source=" +
+                             SockaddrToString(source_addr, source_addr_len) +
+                             " frame=" + PacketTunnelFrameName(frame_type));
+    }
     }
 
     connected_ = false;
@@ -853,7 +1199,7 @@ void PacketTunnelClient::WintunReadLoop() {
             !IsNoisyUdpForLogging(packet.data(), packet.size()) &&
             TryDescribeUdpPacket(packet.data(), packet.size(), &desc);
         const bool is_udp = packet.size() >= 20 && packet[9] == IPPROTO_UDP;
-        if (is_udp) {
+        if (is_udp && peer_direct_allowed_) {
             const std::string dst_virtual_ip = Ipv4ToString(packet.data() + 16);
             const std::string route_desc =
                 has_desc ? desc : ("dst=" + dst_virtual_ip + " len=" + std::to_string(packet.size()));
@@ -935,7 +1281,7 @@ void PacketTunnelClient::HeartbeatLoop() {
 
         unsigned long long now_tick = GetTickCount64();
 
-        if (peer_link_manager_ != NULL) {
+        if (peer_direct_allowed_ && peer_link_manager_ != NULL) {
             std::vector<PeerRouteStatus> expired = peer_link_manager_->ExpireStalePeers(
                 now_tick,
                 kPeerOfferTimeoutMs,
@@ -1018,6 +1364,18 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             PacketTunnelDebugLog("ignore invalid peer_offer frame len=" + std::to_string(length));
             return true;
         }
+        if (!peer_direct_allowed_) {
+            PacketTunnelDebugLog("peer control ignore peer_offer: relay-only mode peer=" +
+                                 offer.peer_virtual_ip +
+                                 " endpoint=" + offer.endpoint);
+            if (offer.endpoint_version != 0) {
+                SendPeerDisableFrame(offer.peer_virtual_ip,
+                                     offer.endpoint_version,
+                                     packet_tunnel::kPeerDisableReasonCooldown);
+            }
+            return true;
+        }
+
         bool should_send_hello = true;
         if (peer_link_manager_ != NULL) {
             should_send_hello = peer_link_manager_->UpdatePeerOffer(offer.peer_virtual_ip,
@@ -1065,6 +1423,19 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             return true;
         }
 
+        if (!peer_direct_allowed_) {
+            PacketTunnelDebugLog("peer control ignore " + PacketTunnelFrameName(frame_type) +
+                                 ": relay-only mode peer=" + signal.peer_virtual_ip +
+                                 " version=" + std::to_string(signal.endpoint_version) +
+                                 " nonce=" + std::to_string(signal.nonce));
+            if (frame_type != packet_tunnel::kFramePeerAck && signal.endpoint_version != 0) {
+                SendPeerDisableFrame(signal.peer_virtual_ip,
+                                     signal.endpoint_version,
+                                     packet_tunnel::kPeerDisableReasonCooldown);
+            }
+            return true;
+        }
+
         if (peer_link_manager_ != NULL) {
             if (frame_type == packet_tunnel::kFramePeerHello) {
                 peer_link_manager_->MarkPeerProbing(signal.peer_virtual_ip, signal.endpoint_version);
@@ -1109,6 +1480,13 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
         ParsedPeerDisable disable = {};
         if (!ParsePeerDisablePayload(payload, length, &disable)) {
             PacketTunnelDebugLog("ignore invalid peer_disable frame len=" + std::to_string(length));
+            return true;
+        }
+        if (!peer_direct_allowed_) {
+            PacketTunnelDebugLog("peer control ignore peer_disable: relay-only mode peer=" +
+                                 disable.peer_virtual_ip +
+                                 " version=" + std::to_string(disable.endpoint_version) +
+                                 " reason=" + std::to_string(disable.reason));
             return true;
         }
         if (peer_link_manager_ != NULL) {
