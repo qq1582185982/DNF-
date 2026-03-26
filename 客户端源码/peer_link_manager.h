@@ -12,7 +12,7 @@ enum class PeerRouteState : uint8_t {
     RelayOnly = 0,
     OfferReceived = 1,
     Probing = 2,
-    DirectReady = 3,
+    DirectActive = 3,
     Cooldown = 4
 };
 
@@ -24,9 +24,19 @@ struct PeerRouteStatus {
     uint16_t endpoint_port;
     uint8_t endpoint_addr[16];
     bool direct_ready;
+    bool direct_eligible;
+    bool active_direct;
     uint64_t last_observed_ms;
     uint64_t last_direct_data_ms;
     uint64_t last_state_change_ms;
+    uint64_t acked_at_ms;
+    uint64_t first_direct_data_ms;
+    uint64_t last_direct_failure_ms;
+    uint64_t freeze_until_ms;
+    uint64_t retry_after_ms;
+    uint32_t direct_sample_count;
+    uint32_t probe_failures;
+    uint32_t active_failures;
 };
 
 class PeerLinkManager {
@@ -53,8 +63,11 @@ public:
                                    uint64_t endpoint_version,
                                    uint32_t nonce);
     void MarkPeerProbing(const std::string& peer_virtual_ip, uint64_t endpoint_version = 0);
-    void MarkPeerDirectReady(const std::string& peer_virtual_ip, uint64_t endpoint_version = 0);
     void MarkPeerCooldown(const std::string& peer_virtual_ip, uint64_t endpoint_version = 0);
+    bool RecordDirectSendFailure(const std::string& peer_virtual_ip,
+                                 uint64_t endpoint_version,
+                                 bool active_path,
+                                 PeerRouteStatus* out_status = NULL);
     std::vector<PeerRouteStatus> ExpireStalePeers(uint64_t now_ms,
                                                   uint64_t offer_timeout_ms,
                                                   uint64_t direct_ready_timeout_ms,
@@ -82,6 +95,17 @@ private:
               last_observed_ms(0),
               last_direct_data_ms(0),
               last_state_change_ms(0),
+              acked_at_ms(0),
+              first_direct_data_ms(0),
+              last_direct_failure_ms(0),
+              freeze_until_ms(0),
+              retry_after_ms(0),
+              direct_sample_count(0),
+              probe_failures(0),
+              active_failures(0),
+              direct_ready(false),
+              direct_eligible(false),
+              active_direct(false),
               pending_hello_version(0),
               pending_hello_nonce(0) {
             memset(endpoint_addr, 0, sizeof(endpoint_addr));
@@ -95,6 +119,17 @@ private:
         uint64_t last_observed_ms;
         uint64_t last_direct_data_ms;
         uint64_t last_state_change_ms;
+        uint64_t acked_at_ms;
+        uint64_t first_direct_data_ms;
+        uint64_t last_direct_failure_ms;
+        uint64_t freeze_until_ms;
+        uint64_t retry_after_ms;
+        uint32_t direct_sample_count;
+        uint32_t probe_failures;
+        uint32_t active_failures;
+        bool direct_ready;
+        bool direct_eligible;
+        bool active_direct;
         uint64_t pending_hello_version;
         uint32_t pending_hello_nonce;
     };
@@ -102,4 +137,14 @@ private:
     mutable std::mutex mutex_;
     std::string local_virtual_ip_;
     std::map<std::string, Entry> peers_;
+
+    static bool HasEndpoint(const Entry& entry);
+    static bool CanActivateDirect(const Entry& entry, uint64_t now_ms);
+    static void ResetPendingHello(Entry* entry);
+    static void ResetDirectAssessment(Entry* entry);
+    static void EnterState(Entry* entry, PeerRouteState next_state, uint64_t now_ms);
+    static void EnterCooldown(Entry* entry, uint64_t now_ms);
+    static void FillStatus(const std::string& peer_virtual_ip,
+                           const Entry& entry,
+                           PeerRouteStatus* out_status);
 };

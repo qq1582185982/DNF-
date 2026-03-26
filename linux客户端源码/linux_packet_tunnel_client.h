@@ -51,7 +51,8 @@ private:
                               uint8_t reason);
     bool TryBuildPeerEndpoint(const std::string& peer_virtual_ip,
                               UdpEndpoint* endpoint,
-                              bool* direct_path_fresh = NULL) const;
+                              bool* direct_path_fresh = NULL,
+                              bool* active_direct = NULL) const;
     bool TryResolvePeerBySource(const sockaddr_storage& source_addr,
                                 socklen_t source_addr_len,
                                 std::string* peer_virtual_ip) const;

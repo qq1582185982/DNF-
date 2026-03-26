@@ -26,7 +26,7 @@ const DWORD kHeartbeatIntervalMs = 3000;
 const DWORD kHeartbeatTimeoutMs = 12000;
 const DWORD kPeerOfferTimeoutMs = 9000;
 const DWORD kPeerDirectReadyTimeoutMs = 15000;
-const DWORD kPeerCooldownTimeoutMs = 12000;
+const DWORD kPeerCooldownTimeoutMs = 30000;
 const DWORD kPeerDirectProbeGraceMs = 3000;
 const DWORD kPeerDirectDataTimeoutMs = 5000;
 const DWORD kPeerSnapshotLogIntervalMs = 15000;
@@ -36,15 +36,14 @@ const DWORD kWintunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
 
 bool IsDirectPathFresh(const PeerRouteStatus& route, unsigned long long now_tick) {
-    const bool has_fresh_direct_data =
+    if (!route.active_direct) {
+        return false;
+    }
+
+    return
         route.last_direct_data_ms != 0 &&
         now_tick >= route.last_direct_data_ms &&
         (now_tick - route.last_direct_data_ms) <= kPeerDirectDataTimeoutMs;
-    const bool in_probe_grace =
-        route.last_state_change_ms != 0 &&
-        now_tick >= route.last_state_change_ms &&
-        (now_tick - route.last_state_change_ms) <= kPeerDirectProbeGraceMs;
-    return has_fresh_direct_data || in_probe_grace;
 }
 
 std::wstring BuildSocketError(const wchar_t* prefix, int error_code) {
@@ -100,8 +99,8 @@ const char* PeerRouteStateName(PeerRouteState state) {
         return "offer_received";
     case PeerRouteState::Probing:
         return "probing";
-    case PeerRouteState::DirectReady:
-        return "direct_ready";
+    case PeerRouteState::DirectActive:
+        return "direct_active";
     case PeerRouteState::Cooldown:
         return "cooldown";
     default:
@@ -131,10 +130,15 @@ std::string BuildPeerRouteSnapshotSummary(const std::vector<PeerRouteStatus>& pe
         ss << peers[i].peer_virtual_ip
            << "[" << PeerRouteStateName(peers[i].state)
            << " v=" << peers[i].endpoint_version
+           << " ready=" << (peers[i].direct_ready ? "y" : "n")
+           << " eligible=" << (peers[i].direct_eligible ? "y" : "n")
+           << " active=" << (peers[i].active_direct ? "y" : "n")
            << " obs=" << observed_age << "ms"
            << " direct=" << ((peers[i].last_direct_data_ms != 0 && now_tick > peers[i].last_direct_data_ms)
                                 ? (now_tick - peers[i].last_direct_data_ms)
                                 : 0) << "ms"
+           << " sample=" << peers[i].direct_sample_count
+           << " fail=" << peers[i].active_failures << "/" << peers[i].probe_failures
            << " state=" << state_age << "ms]";
     }
     return ss.str();
@@ -163,10 +167,15 @@ std::string DescribeSinglePeerRoute(const std::vector<PeerRouteStatus>& peers,
            << " v=" << peers[i].endpoint_version
            << " family=" << static_cast<int>(peers[i].endpoint_family)
            << " port=" << peers[i].endpoint_port
+           << " ready=" << (peers[i].direct_ready ? "y" : "n")
+           << " eligible=" << (peers[i].direct_eligible ? "y" : "n")
+           << " active=" << (peers[i].active_direct ? "y" : "n")
            << " obs=" << observed_age << "ms"
            << " direct=" << ((peers[i].last_direct_data_ms != 0 && now_tick > peers[i].last_direct_data_ms)
                                 ? (now_tick - peers[i].last_direct_data_ms)
                                 : 0) << "ms"
+           << " sample=" << peers[i].direct_sample_count
+           << " fail=" << peers[i].active_failures << "/" << peers[i].probe_failures
            << " state=" << state_age << "ms]";
         return ss.str();
     }
@@ -818,35 +827,58 @@ void PacketTunnelClient::WintunReadLoop() {
         }
 
         std::string desc;
-        if (!IsNoisyUdpForLogging(packet.data(), packet.size()) &&
-            TryDescribeUdpPacket(packet.data(), packet.size(), &desc)) {
-            const bool is_udp = packet.size() >= 20 && packet[9] == IPPROTO_UDP;
-            if (is_udp) {
-                std::string dst_virtual_ip = Ipv4ToString(packet.data() + 16);
-                UdpEndpoint peer_endpoint;
-                bool direct_path_fresh = false;
-                if (TryBuildPeerEndpoint(dst_virtual_ip, &peer_endpoint, &direct_path_fresh)) {
-                    if (SendFrameToEndpoint(peer_endpoint,
-                                            packet_tunnel::kFrameIpv4Packet,
-                                            packet.data(),
-                                            packet.size(),
-                                            NULL)) {
-                        PacketTunnelDebugLog(std::string(direct_path_fresh ? "udp wintun->peer "
-                                                                             : "udp wintun->peer-probe ")
-                                             + desc);
-                        if (direct_path_fresh) {
-                            continue;
-                        }
-                        PacketTunnelDebugLog("udp direct probe mirror relay " + desc);
+        const bool has_desc =
+            !IsNoisyUdpForLogging(packet.data(), packet.size()) &&
+            TryDescribeUdpPacket(packet.data(), packet.size(), &desc);
+        const bool is_udp = packet.size() >= 20 && packet[9] == IPPROTO_UDP;
+        if (is_udp) {
+            const std::string dst_virtual_ip = Ipv4ToString(packet.data() + 16);
+            const std::string route_desc =
+                has_desc ? desc : ("dst=" + dst_virtual_ip + " len=" + std::to_string(packet.size()));
+            UdpEndpoint peer_endpoint;
+            bool direct_path_fresh = false;
+            bool active_direct = false;
+            if (TryBuildPeerEndpoint(dst_virtual_ip,
+                                     &peer_endpoint,
+                                     &direct_path_fresh,
+                                     &active_direct)) {
+                if (SendFrameToEndpoint(peer_endpoint,
+                                        packet_tunnel::kFrameIpv4Packet,
+                                        packet.data(),
+                                        packet.size(),
+                                        NULL)) {
+                    PacketTunnelDebugLog(std::string(direct_path_fresh ? "udp wintun->peer "
+                                                                         : "udp wintun->peer-probe ")
+                                         + route_desc);
+                    if (direct_path_fresh) {
+                        continue;
                     }
-                    if (peer_link_manager_ != NULL) {
-                        peer_link_manager_->MarkPeerCooldown(dst_virtual_ip);
-                    }
-                    PacketTunnelDebugLog("udp peer send failure demote to cooldown " + desc);
-                    PacketTunnelDebugLog("udp peer send failed, fallback to relay " + desc);
+                    PacketTunnelDebugLog(std::string(active_direct
+                                                         ? "udp active direct stale, relay stays primary "
+                                                         : "udp direct evaluation mirror relay ")
+                                         + route_desc);
                 } else {
-                    MaybeLogDirectRouteFallback(dst_virtual_ip, "route_unavailable");
+                    PeerRouteStatus failed_status = {};
+                    const bool state_changed =
+                        peer_link_manager_ != NULL &&
+                        peer_link_manager_->RecordDirectSendFailure(dst_virtual_ip,
+                                                                    0,
+                                                                    active_direct,
+                                                                    &failed_status);
+                    if (active_direct) {
+                        PacketTunnelDebugLog("udp active direct send failed, fallback to relay " +
+                                             route_desc);
+                    } else {
+                        PacketTunnelDebugLog("udp direct probe send failed, keep relay primary " +
+                                             route_desc);
+                    }
+                    if (state_changed && failed_status.state == PeerRouteState::Cooldown) {
+                        PacketTunnelDebugLog("udp direct route entered cooldown peer=" +
+                                             failed_status.peer_virtual_ip);
+                    }
                 }
+            } else {
+                MaybeLogDirectRouteFallback(dst_virtual_ip, "route_unavailable");
             }
         }
 
@@ -855,8 +887,7 @@ void PacketTunnelClient::WintunReadLoop() {
             break;
         }
 
-        if (!IsNoisyUdpForLogging(packet.data(), packet.size()) &&
-            TryDescribeUdpPacket(packet.data(), packet.size(), &desc)) {
+        if (has_desc) {
             PacketTunnelDebugLog("udp wintun->tunnel " + desc);
         }
     }
@@ -1104,7 +1135,8 @@ bool PacketTunnelClient::SendPeerDisableFrame(const std::string& target_peer_vir
 
 bool PacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtual_ip,
                                               UdpEndpoint* endpoint,
-                                              bool* direct_path_fresh) const {
+                                              bool* direct_path_fresh,
+                                              bool* active_direct) const {
     if (endpoint == NULL || peer_link_manager_ == NULL) {
         return false;
     }
@@ -1119,6 +1151,9 @@ bool PacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtual_ip
     }
     if (direct_path_fresh != NULL) {
         *direct_path_fresh = IsDirectPathFresh(route, GetTickCount64());
+    }
+    if (active_direct != NULL) {
+        *active_direct = route.active_direct;
     }
 
     ZeroMemory(&endpoint->addr, sizeof(endpoint->addr));

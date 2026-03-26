@@ -22,7 +22,7 @@ const int kHeartbeatIntervalMs = 3000;
 const int kHeartbeatTimeoutMs = 12000;
 const int kPeerOfferTimeoutMs = 9000;
 const int kPeerDirectReadyTimeoutMs = 15000;
-const int kPeerCooldownTimeoutMs = 12000;
+const int kPeerCooldownTimeoutMs = 30000;
 const int kPeerDirectProbeGraceMs = 3000;
 const int kPeerDirectDataTimeoutMs = 5000;
 const int kPeerSnapshotLogIntervalMs = 15000;
@@ -32,15 +32,14 @@ const int kTunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
 
 bool IsDirectPathFresh(const LinuxPeerRouteStatus& route, unsigned long long now_tick) {
-    const bool has_fresh_direct_data =
+    if (!route.active_direct) {
+        return false;
+    }
+
+    return
         route.last_direct_data_ms != 0 &&
         now_tick >= route.last_direct_data_ms &&
         (now_tick - route.last_direct_data_ms) <= kPeerDirectDataTimeoutMs;
-    const bool in_probe_grace =
-        route.last_state_change_ms != 0 &&
-        now_tick >= route.last_state_change_ms &&
-        (now_tick - route.last_state_change_ms) <= kPeerDirectProbeGraceMs;
-    return has_fresh_direct_data || in_probe_grace;
 }
 
 unsigned long long now_ms() {
@@ -101,8 +100,8 @@ const char* LinuxPeerRouteStateName(LinuxPeerRouteState state) {
         return "offer_received";
     case LinuxPeerRouteState::Probing:
         return "probing";
-    case LinuxPeerRouteState::DirectReady:
-        return "direct_ready";
+    case LinuxPeerRouteState::DirectActive:
+        return "direct_active";
     case LinuxPeerRouteState::Cooldown:
         return "cooldown";
     default:
@@ -132,10 +131,15 @@ std::string BuildLinuxPeerRouteSnapshotSummary(const std::vector<LinuxPeerRouteS
         ss << peers[i].peer_virtual_ip
            << "[" << LinuxPeerRouteStateName(peers[i].state)
            << " v=" << peers[i].endpoint_version
+           << " ready=" << (peers[i].direct_ready ? "y" : "n")
+           << " eligible=" << (peers[i].direct_eligible ? "y" : "n")
+           << " active=" << (peers[i].active_direct ? "y" : "n")
            << " obs=" << observed_age << "ms"
            << " direct=" << ((peers[i].last_direct_data_ms != 0 && now_ms_value > peers[i].last_direct_data_ms)
                                 ? (now_ms_value - peers[i].last_direct_data_ms)
                                 : 0) << "ms"
+           << " sample=" << peers[i].direct_sample_count
+           << " fail=" << peers[i].active_failures << "/" << peers[i].probe_failures
            << " state=" << state_age << "ms]";
     }
     return ss.str();
@@ -164,10 +168,15 @@ std::string DescribeSingleLinuxPeerRoute(const std::vector<LinuxPeerRouteStatus>
            << " v=" << peers[i].endpoint_version
            << " family=" << static_cast<int>(peers[i].endpoint_family)
            << " port=" << peers[i].endpoint_port
+           << " ready=" << (peers[i].direct_ready ? "y" : "n")
+           << " eligible=" << (peers[i].direct_eligible ? "y" : "n")
+           << " active=" << (peers[i].active_direct ? "y" : "n")
            << " obs=" << observed_age << "ms"
            << " direct=" << ((peers[i].last_direct_data_ms != 0 && now_ms_value > peers[i].last_direct_data_ms)
                                 ? (now_ms_value - peers[i].last_direct_data_ms)
                                 : 0) << "ms"
+           << " sample=" << peers[i].direct_sample_count
+           << " fail=" << peers[i].active_failures << "/" << peers[i].probe_failures
            << " state=" << state_age << "ms]";
         return ss.str();
     }
@@ -181,6 +190,59 @@ std::string LinuxIpv4ToString(const uint8_t* addr) {
         return "?";
     }
     return std::string(buffer);
+}
+
+bool IsLinuxNoisyUdpPacket(const uint8_t* packet, size_t packet_len) {
+    if (packet == NULL || packet_len < 20) {
+        return true;
+    }
+    if (((packet[0] >> 4) & 0x0F) != 4 || packet[9] != IPPROTO_UDP) {
+        return true;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len + 8) {
+        return true;
+    }
+
+    const uint16_t src_port = ntohs(*(const uint16_t*)(packet + ip_header_len));
+    const uint16_t dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
+    const uint8_t* dst_ip = packet + 16;
+
+    const bool is_multicast = (dst_ip[0] >= 224 && dst_ip[0] <= 239);
+    const bool is_limited_broadcast =
+        (dst_ip[0] == 255 && dst_ip[1] == 255 && dst_ip[2] == 255 && dst_ip[3] == 255);
+    const bool is_likely_subnet_broadcast = (dst_ip[3] == 255);
+    const bool is_common_noise_port =
+        (src_port == 137 || dst_port == 137 ||
+         src_port == 138 || dst_port == 138 ||
+         src_port == 1900 || dst_port == 1900 ||
+         src_port == 5355 || dst_port == 5355);
+
+    return is_multicast || is_limited_broadcast || is_likely_subnet_broadcast || is_common_noise_port;
+}
+
+bool TryDescribeLinuxUdpPacket(const uint8_t* packet, size_t packet_len, std::string* out_desc) {
+    if (out_desc == NULL || packet == NULL || packet_len < 20) {
+        return false;
+    }
+    if (((packet[0] >> 4) & 0x0F) != 4 || packet[9] != IPPROTO_UDP) {
+        return false;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len + 8) {
+        return false;
+    }
+
+    const uint16_t src_port = ntohs(*(const uint16_t*)(packet + ip_header_len));
+    const uint16_t dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
+    std::ostringstream ss;
+    ss << "src=" << LinuxIpv4ToString(packet + 12) << ":" << src_port
+       << " dst=" << LinuxIpv4ToString(packet + 16) << ":" << dst_port
+       << " len=" << packet_len;
+    *out_desc = ss.str();
+    return true;
 }
 
 bool ParseLinuxIpv4StringToBe(const std::string& value, uint32_t* out_ip_be) {
@@ -807,7 +869,8 @@ bool LinuxPacketTunnelClient::SendPeerDisableFrame(const std::string& target_pee
 
 bool LinuxPacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtual_ip,
                                                    UdpEndpoint* endpoint,
-                                                   bool* direct_path_fresh) const {
+                                                   bool* direct_path_fresh,
+                                                   bool* active_direct) const {
     if (endpoint == NULL || peer_link_manager_ == NULL) {
         return false;
     }
@@ -822,6 +885,9 @@ bool LinuxPacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtu
     }
     if (direct_path_fresh != NULL) {
         *direct_path_fresh = IsDirectPathFresh(route, now_ms());
+    }
+    if (active_direct != NULL) {
+        *active_direct = route.active_direct;
     }
 
     memset(&endpoint->addr, 0, sizeof(endpoint->addr));
@@ -1024,23 +1090,52 @@ void LinuxPacketTunnelClient::TunReadLoop() {
             }
         }
 
+        std::string desc;
+        const bool has_desc =
+            !IsLinuxNoisyUdpPacket(packet.data(), packet.size()) &&
+            TryDescribeLinuxUdpPacket(packet.data(), packet.size(), &desc);
         const bool is_udp = packet.size() >= 20 && packet[9] == IPPROTO_UDP;
         if (is_udp) {
             const std::string dst_virtual_ip = LinuxIpv4ToString(packet.data() + 16);
+            const std::string route_desc =
+                has_desc ? desc : ("dst=" + dst_virtual_ip + " len=" + std::to_string(packet.size()));
             UdpEndpoint peer_endpoint;
             bool direct_path_fresh = false;
-            if (TryBuildPeerEndpoint(dst_virtual_ip, &peer_endpoint, &direct_path_fresh)) {
+            bool active_direct = false;
+            if (TryBuildPeerEndpoint(dst_virtual_ip,
+                                     &peer_endpoint,
+                                     &direct_path_fresh,
+                                     &active_direct)) {
                 if (SendFrameToEndpoint(peer_endpoint,
                                         packet_tunnel::kFrameIpv4Packet,
                                         packet.data(),
                                         packet.size(),
                                         NULL)) {
+                    LogInfo(std::string(direct_path_fresh ? "udp tun->peer "
+                                                          : "udp tun->peer-probe ") + route_desc);
                     if (direct_path_fresh) {
                         continue;
                     }
-                }
-                if (peer_link_manager_ != NULL) {
-                    peer_link_manager_->MarkPeerCooldown(dst_virtual_ip);
+                    LogInfo(std::string(active_direct
+                                            ? "udp active direct stale, relay stays primary "
+                                            : "udp direct evaluation mirror relay ") + route_desc);
+                } else {
+                    LinuxPeerRouteStatus failed_status = {};
+                    const bool state_changed =
+                        peer_link_manager_ != NULL &&
+                        peer_link_manager_->RecordDirectSendFailure(dst_virtual_ip,
+                                                                    0,
+                                                                    active_direct,
+                                                                    &failed_status);
+                    if (active_direct) {
+                        LogWarn("udp active direct send failed, fallback to relay " + route_desc);
+                    } else {
+                        LogInfo("udp direct probe send failed, keep relay primary " + route_desc);
+                    }
+                    if (state_changed && failed_status.state == LinuxPeerRouteState::Cooldown) {
+                        LogInfo("udp direct route entered cooldown peer=" +
+                                failed_status.peer_virtual_ip);
+                    }
                 }
             } else {
                 MaybeLogDirectRouteFallback(dst_virtual_ip, "route_unavailable");
@@ -1049,6 +1144,10 @@ void LinuxPacketTunnelClient::TunReadLoop() {
 
         if (!SendFrame(packet_tunnel::kFrameIpv4Packet, packet.data(), packet.size(), NULL)) {
             break;
+        }
+
+        if (has_desc) {
+            LogInfo("udp tun->tunnel " + desc);
         }
     }
 
