@@ -5,6 +5,7 @@
 #include "wintun_manager.h"
 
 #include <windows.h>
+#include <windns.h>
 #include <iphlpapi.h>
 #include <mstcpip.h>
 #include <netioapi.h>
@@ -15,6 +16,8 @@
 #include <cstring>
 #include <sstream>
 #include <vector>
+
+#pragma comment(lib, "dnsapi.lib")
 
 void PacketTunnelDebugLog(const std::string& msg);
 
@@ -67,6 +70,21 @@ std::string WideToUtf8(const std::wstring& value) {
     std::string utf8(required - 1, '\0');
     WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, &utf8[0], required, NULL, NULL);
     return utf8;
+}
+
+std::wstring Utf8ToWideString(const std::string& value) {
+    if (value.empty()) {
+        return std::wstring();
+    }
+
+    int required = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, NULL, 0);
+    if (required <= 1) {
+        return std::wstring();
+    }
+
+    std::wstring wide(required - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, &wide[0], required);
+    return wide;
 }
 
 std::string Ipv4ToString(const uint8_t* addr) {
@@ -325,6 +343,18 @@ void ClearSockaddrPort(sockaddr_storage* addr) {
     }
 }
 
+void SetSockaddrPort(sockaddr_storage* addr, uint16_t port_host_order) {
+    if (addr == NULL) {
+        return;
+    }
+
+    if (addr->ss_family == AF_INET) {
+        reinterpret_cast<sockaddr_in*>(addr)->sin_port = htons(port_host_order);
+    } else if (addr->ss_family == AF_INET6) {
+        reinterpret_cast<sockaddr_in6*>(addr)->sin6_port = htons(port_host_order);
+    }
+}
+
 bool IsUsableBindAddress(const sockaddr* addr) {
     if (addr == NULL) {
         return false;
@@ -394,6 +424,145 @@ bool IsPublicInternetAddress(const sockaddr* addr) {
     return false;
 }
 
+bool SockaddrEquals(const sockaddr_storage& left,
+                    int left_len,
+                    const sockaddr_storage& right,
+                    int right_len);
+
+bool BuildEndpointForSocketFamily(const sockaddr* source_addr,
+                                  int source_addr_len,
+                                  int socket_family,
+                                  sockaddr_storage* endpoint_addr,
+                                  int* endpoint_addr_len);
+
+struct RelayEndpointCandidate {
+    sockaddr_storage endpoint_addr;
+    int endpoint_addr_len;
+    int socket_family;
+    bool public_internet;
+    size_t original_order;
+};
+
+int RelayEndpointPriority(const RelayEndpointCandidate& candidate) {
+    if (candidate.public_internet) {
+        return (candidate.socket_family == AF_INET6) ? 0 : 1;
+    }
+    return (candidate.socket_family == AF_INET6) ? 2 : 3;
+}
+
+const char* RelayEndpointScopeName(const RelayEndpointCandidate& candidate) {
+    if (candidate.public_internet) {
+        return (candidate.socket_family == AF_INET6) ? "public_ipv6" : "public_ipv4";
+    }
+    return (candidate.socket_family == AF_INET6) ? "non_public_ipv6" : "non_public_ipv4";
+}
+
+bool HasPublicRelayEndpointCandidate(const std::vector<RelayEndpointCandidate>& candidates) {
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (candidates[i].public_internet) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void SortRelayEndpointCandidates(std::vector<RelayEndpointCandidate>* candidates) {
+    if (candidates == NULL) {
+        return;
+    }
+
+    std::stable_sort(candidates->begin(),
+                     candidates->end(),
+                     [](const RelayEndpointCandidate& left, const RelayEndpointCandidate& right) {
+                         const int left_priority = RelayEndpointPriority(left);
+                         const int right_priority = RelayEndpointPriority(right);
+                         if (left_priority != right_priority) {
+                             return left_priority < right_priority;
+                         }
+                         return left.original_order < right.original_order;
+                     });
+}
+
+std::string BuildRelayEndpointCandidateSummary(const std::vector<RelayEndpointCandidate>& candidates) {
+    if (candidates.empty()) {
+        return "none";
+    }
+
+    std::ostringstream ss;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (i != 0) {
+            ss << "; ";
+        }
+        ss << RelayEndpointScopeName(candidates[i]) << "="
+           << SockaddrToString(candidates[i].endpoint_addr, candidates[i].endpoint_addr_len);
+    }
+    return ss.str();
+}
+
+bool AppendRelayEndpointCandidate(const sockaddr* source_addr,
+                                  int source_addr_len,
+                                  int socket_family,
+                                  size_t original_order,
+                                  std::vector<RelayEndpointCandidate>* out_candidates) {
+    if (source_addr == NULL || out_candidates == NULL) {
+        return false;
+    }
+
+    RelayEndpointCandidate candidate = {};
+    if (!BuildEndpointForSocketFamily(source_addr,
+                                      source_addr_len,
+                                      socket_family,
+                                      &candidate.endpoint_addr,
+                                      &candidate.endpoint_addr_len)) {
+        return false;
+    }
+
+    candidate.socket_family = socket_family;
+    candidate.public_internet =
+        IsPublicInternetAddress(reinterpret_cast<const sockaddr*>(&candidate.endpoint_addr));
+    candidate.original_order = original_order;
+
+    for (size_t i = 0; i < out_candidates->size(); ++i) {
+        if (SockaddrEquals((*out_candidates)[i].endpoint_addr,
+                           (*out_candidates)[i].endpoint_addr_len,
+                           candidate.endpoint_addr,
+                           candidate.endpoint_addr_len)) {
+            return false;
+        }
+    }
+
+    out_candidates->push_back(candidate);
+    return true;
+}
+
+void BuildRelayEndpointCandidates(addrinfo* result,
+                                  std::vector<RelayEndpointCandidate>* out_candidates) {
+    if (out_candidates == NULL) {
+        return;
+    }
+
+    out_candidates->clear();
+    size_t order = 0;
+    for (addrinfo* rp = result; rp != NULL; rp = rp->ai_next, ++order) {
+        if (rp->ai_addr == NULL) {
+            continue;
+        }
+
+        const int family = rp->ai_addr->sa_family;
+        if (family != AF_INET && family != AF_INET6) {
+            continue;
+        }
+
+        AppendRelayEndpointCandidate(rp->ai_addr,
+                                     static_cast<int>(rp->ai_addrlen),
+                                     family,
+                                     order,
+                                     out_candidates);
+    }
+
+    SortRelayEndpointCandidates(out_candidates);
+}
+
 bool SockaddrAddressEquals(const sockaddr_storage& left, const sockaddr* right) {
     if (right == NULL || left.ss_family != right->sa_family) {
         return false;
@@ -414,14 +583,15 @@ bool SockaddrAddressEquals(const sockaddr_storage& left, const sockaddr* right) 
     return false;
 }
 
-bool LoadAdapterAddresses(ULONG family,
-                          std::vector<unsigned char>* buffer,
-                          IP_ADAPTER_ADDRESSES** adapters) {
+bool LoadAdapterAddressesInternal(ULONG family,
+                                  ULONG flags,
+                                  std::vector<unsigned char>* buffer,
+                                  IP_ADAPTER_ADDRESSES** adapters) {
     if (buffer == NULL || adapters == NULL) {
         return false;
     }
 
-    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    flags |= GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST;
     ULONG buffer_size = 16 * 1024;
     buffer->assign(buffer_size, 0);
 
@@ -443,6 +613,21 @@ bool LoadAdapterAddresses(ULONG family,
 
     *adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(&(*buffer)[0]);
     return true;
+}
+
+bool LoadAdapterAddresses(ULONG family,
+                          std::vector<unsigned char>* buffer,
+                          IP_ADAPTER_ADDRESSES** adapters) {
+    return LoadAdapterAddressesInternal(family,
+                                        GAA_FLAG_SKIP_DNS_SERVER,
+                                        buffer,
+                                        adapters);
+}
+
+bool LoadAdapterAddressesForDns(ULONG family,
+                                std::vector<unsigned char>* buffer,
+                                IP_ADAPTER_ADDRESSES** adapters) {
+    return LoadAdapterAddressesInternal(family, 0, buffer, adapters);
 }
 
 std::string AdapterDisplayName(const IP_ADAPTER_ADDRESSES* adapter) {
@@ -478,6 +663,255 @@ bool IsPreferredPhysicalAdapter(const IP_ADAPTER_ADDRESSES* adapter) {
     }
 
     return true;
+}
+
+bool IsUsableDnsServerAddress(const sockaddr* addr) {
+    if (addr == NULL) {
+        return false;
+    }
+
+    if (addr->sa_family == AF_INET) {
+        const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(addr);
+        uint32_t ip = ntohl(addr4->sin_addr.S_un.S_addr);
+        if (ip == 0 ||
+            (ip & 0xff000000u) == 0x7f000000u ||
+            (ip & 0xffff0000u) == 0xa9fe0000u) {
+            return false;
+        }
+        return true;
+    }
+
+    if (addr->sa_family == AF_INET6) {
+        const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(addr);
+        if (IN6_IS_ADDR_UNSPECIFIED(&addr6->sin6_addr) ||
+            IN6_IS_ADDR_LOOPBACK(&addr6->sin6_addr) ||
+            IN6_IS_ADDR_MULTICAST(&addr6->sin6_addr)) {
+            return false;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+bool IsNumericHostLiteral(const std::string& value) {
+    IN_ADDR addr4 = {};
+    if (InetPtonA(AF_INET, value.c_str(), &addr4) == 1) {
+        return true;
+    }
+
+    IN6_ADDR addr6 = {};
+    return InetPtonA(AF_INET6, value.c_str(), &addr6) == 1;
+}
+
+struct PhysicalDnsServer {
+    sockaddr_storage server_addr;
+    int server_addr_len;
+    ULONG interface_index;
+    std::string adapter_name;
+    size_t original_order;
+};
+
+std::string BuildPhysicalDnsServerSummary(const std::vector<PhysicalDnsServer>& servers) {
+    if (servers.empty()) {
+        return "none";
+    }
+
+    std::ostringstream ss;
+    for (size_t i = 0; i < servers.size(); ++i) {
+        if (i != 0) {
+            ss << "; ";
+        }
+        ss << SockaddrToString(servers[i].server_addr, servers[i].server_addr_len)
+           << "@if" << servers[i].interface_index;
+        if (!servers[i].adapter_name.empty()) {
+            ss << "(" << servers[i].adapter_name << ")";
+        }
+    }
+    return ss.str();
+}
+
+void CollectPhysicalDnsServers(std::vector<PhysicalDnsServer>* out_servers) {
+    if (out_servers == NULL) {
+        return;
+    }
+
+    out_servers->clear();
+
+    std::vector<unsigned char> buffer;
+    IP_ADAPTER_ADDRESSES* adapters = NULL;
+    if (!LoadAdapterAddressesForDns(AF_UNSPEC, &buffer, &adapters)) {
+        return;
+    }
+
+    size_t order = 0;
+    for (IP_ADAPTER_ADDRESSES* adapter = adapters; adapter != NULL; adapter = adapter->Next) {
+        if (!IsPreferredPhysicalAdapter(adapter)) {
+            continue;
+        }
+
+        const std::string adapter_name = AdapterDisplayName(adapter);
+        for (IP_ADAPTER_DNS_SERVER_ADDRESS* dns = adapter->FirstDnsServerAddress;
+             dns != NULL;
+             dns = dns->Next) {
+            if (dns->Address.lpSockaddr == NULL ||
+                !IsUsableDnsServerAddress(dns->Address.lpSockaddr)) {
+                continue;
+            }
+
+            const int family = dns->Address.lpSockaddr->sa_family;
+            if (family != AF_INET && family != AF_INET6) {
+                continue;
+            }
+
+            PhysicalDnsServer server = {};
+            if (family == AF_INET) {
+                server.server_addr_len = sizeof(sockaddr_in);
+                memcpy(&server.server_addr, dns->Address.lpSockaddr, sizeof(sockaddr_in));
+                server.interface_index = adapter->IfIndex;
+            } else {
+                server.server_addr_len = sizeof(sockaddr_in6);
+                memcpy(&server.server_addr, dns->Address.lpSockaddr, sizeof(sockaddr_in6));
+                server.interface_index = (adapter->Ipv6IfIndex != 0)
+                    ? adapter->Ipv6IfIndex
+                    : adapter->IfIndex;
+            }
+
+            ClearSockaddrPort(&server.server_addr);
+            SetSockaddrPort(&server.server_addr, 53);
+            server.adapter_name = adapter_name;
+            server.original_order = order++;
+
+            bool duplicate = false;
+            for (size_t i = 0; i < out_servers->size(); ++i) {
+                if (SockaddrAddressEquals((*out_servers)[i].server_addr,
+                                          reinterpret_cast<const sockaddr*>(&server.server_addr))) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                out_servers->push_back(server);
+            }
+        }
+    }
+}
+
+const char* DnsRecordTypeName(WORD type) {
+    switch (type) {
+    case DNS_TYPE_A:
+        return "A";
+    case DNS_TYPE_AAAA:
+        return "AAAA";
+    default:
+        return "?";
+    }
+}
+
+bool QueryRelayEndpointsViaPhysicalDns(const std::string& host_name,
+                                       uint16_t tunnel_port,
+                                       const std::vector<PhysicalDnsServer>& dns_servers,
+                                       std::vector<RelayEndpointCandidate>* out_candidates) {
+    if (out_candidates == NULL || dns_servers.empty()) {
+        return false;
+    }
+
+    const std::wstring query_name = Utf8ToWideString(host_name);
+    if (query_name.empty()) {
+        return false;
+    }
+
+    bool added_any = false;
+    size_t next_order = out_candidates->size();
+    for (size_t server_index = 0; server_index < dns_servers.size(); ++server_index) {
+        const PhysicalDnsServer& dns_server = dns_servers[server_index];
+
+        std::vector<unsigned char> server_list_storage(sizeof(DNS_ADDR_ARRAY), 0);
+        DNS_ADDR_ARRAY* server_list =
+            reinterpret_cast<DNS_ADDR_ARRAY*>(&server_list_storage[0]);
+        server_list->MaxCount = 1;
+        server_list->AddrCount = 1;
+        server_list->Family = static_cast<WORD>(dns_server.server_addr.ss_family);
+        memcpy(server_list->AddrArray[0].MaxSa,
+               &dns_server.server_addr,
+               static_cast<size_t>(dns_server.server_addr_len));
+
+        for (int type_index = 0; type_index < 2; ++type_index) {
+            const WORD query_type = (type_index == 0) ? DNS_TYPE_AAAA : DNS_TYPE_A;
+            DNS_QUERY_REQUEST request = {};
+            DNS_QUERY_RESULT results = {};
+            request.Version = DNS_QUERY_REQUEST_VERSION1;
+            request.QueryName = query_name.c_str();
+            request.QueryType = query_type;
+            request.QueryOptions = DNS_QUERY_BYPASS_CACHE | DNS_QUERY_NO_HOSTS_FILE;
+            request.pDnsServerList = server_list;
+            request.InterfaceIndex = dns_server.interface_index;
+
+            results.Version = DNS_QUERY_RESULTS_VERSION1;
+            DNS_STATUS status = DnsQueryEx(&request, &results, NULL);
+            if (status == ERROR_SUCCESS) {
+                status = results.QueryStatus;
+            }
+
+            if (status != ERROR_SUCCESS &&
+                status != DNS_INFO_NO_RECORDS &&
+                status != DNS_ERROR_RCODE_NAME_ERROR) {
+                PacketTunnelDebugLog("physical dns query failed: server=" +
+                                     SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
+                                     " if=" + std::to_string(dns_server.interface_index) +
+                                     " type=" + DnsRecordTypeName(query_type) +
+                                     " status=" + std::to_string(static_cast<unsigned long>(status)));
+            }
+
+            if (status == ERROR_SUCCESS && results.pQueryRecords != NULL) {
+                for (PDNS_RECORD record = results.pQueryRecords; record != NULL; record = record->pNext) {
+                    if (record->wType == DNS_TYPE_A) {
+                        sockaddr_in addr4 = {};
+                        addr4.sin_family = AF_INET;
+                        addr4.sin_port = htons(tunnel_port);
+                        addr4.sin_addr.S_un.S_addr = record->Data.A.IpAddress;
+                        if (AppendRelayEndpointCandidate(reinterpret_cast<const sockaddr*>(&addr4),
+                                                         sizeof(addr4),
+                                                         AF_INET,
+                                                         next_order,
+                                                         out_candidates)) {
+                            ++next_order;
+                            added_any = true;
+                        }
+                    } else if (record->wType == DNS_TYPE_AAAA) {
+                        sockaddr_in6 addr6 = {};
+                        addr6.sin6_family = AF_INET6;
+                        addr6.sin6_port = htons(tunnel_port);
+                        memcpy(&addr6.sin6_addr,
+                               &record->Data.AAAA.Ip6Address,
+                               sizeof(addr6.sin6_addr));
+                        if (AppendRelayEndpointCandidate(reinterpret_cast<const sockaddr*>(&addr6),
+                                                         sizeof(addr6),
+                                                         AF_INET6,
+                                                         next_order,
+                                                         out_candidates)) {
+                            ++next_order;
+                            added_any = true;
+                        }
+                    }
+                }
+            }
+
+            if (results.pQueryRecords != NULL) {
+                DnsRecordListFree(results.pQueryRecords, DnsFreeRecordList);
+                results.pQueryRecords = NULL;
+            }
+        }
+
+        if (HasPublicRelayEndpointCandidate(*out_candidates)) {
+            break;
+        }
+    }
+
+    if (added_any) {
+        SortRelayEndpointCandidates(out_candidates);
+    }
+    return added_any;
 }
 
 bool TryResolveBindAdapter(const sockaddr_storage& addr,
@@ -782,12 +1216,48 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
 
     std::string port_str = std::to_string(tunnel_port_);
     int ret = getaddrinfo(tunnel_server_ip_.c_str(), port_str.c_str(), &hints, &result);
-    if (ret != 0) {
+    std::vector<RelayEndpointCandidate> relay_candidates;
+    if (ret == 0) {
+        BuildRelayEndpointCandidates(result, &relay_candidates);
+        freeaddrinfo(result);
+        result = NULL;
+    } else {
+        PacketTunnelDebugLog("system dns resolve failed for relay host " + tunnel_server_ip_ +
+                             " status=" + std::to_string(ret));
+    }
+
+    if (!IsNumericHostLiteral(tunnel_server_ip_) &&
+        !HasPublicRelayEndpointCandidate(relay_candidates)) {
+        std::vector<PhysicalDnsServer> physical_dns_servers;
+        CollectPhysicalDnsServers(&physical_dns_servers);
+        if (!physical_dns_servers.empty()) {
+            PacketTunnelDebugLog("relay endpoint physical dns servers: " +
+                                 BuildPhysicalDnsServerSummary(physical_dns_servers));
+            if (QueryRelayEndpointsViaPhysicalDns(tunnel_server_ip_,
+                                                  tunnel_port_,
+                                                  physical_dns_servers,
+                                                  &relay_candidates)) {
+                PacketTunnelDebugLog("relay endpoint candidates after physical dns: " +
+                                     BuildRelayEndpointCandidateSummary(relay_candidates));
+            } else {
+                PacketTunnelDebugLog("relay endpoint physical dns returned no additional endpoint");
+            }
+        }
+    }
+
+    if (relay_candidates.empty()) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel DNS resolve failed: " + Utf8ToWide(tunnel_server_ip_);
+            if (ret != 0) {
+                *error_msg = L"IP Tunnel DNS resolve failed: " + Utf8ToWide(tunnel_server_ip_);
+            } else {
+                *error_msg = L"IP Tunnel resolve returned no usable endpoint: " + Utf8ToWide(tunnel_server_ip_);
+            }
         }
         return false;
     }
+
+    PacketTunnelDebugLog("relay endpoint candidates: " +
+                         BuildRelayEndpointCandidateSummary(relay_candidates));
 
     auto configure_socket = [&](SOCKET sock, int family) {
         if (family == AF_INET6) {
@@ -816,25 +1286,11 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
                  NULL);
     };
 
-    auto try_connect_family = [&](int preferred_family) -> bool {
-        sockaddr_storage endpoint_addr = {};
-        int endpoint_addr_len = 0;
-        for (addrinfo* rp = result; rp != NULL; rp = rp->ai_next) {
-            if (BuildEndpointForSocketFamily(rp->ai_addr,
-                                             static_cast<int>(rp->ai_addrlen),
-                                             preferred_family,
-                                             &endpoint_addr,
-                                             &endpoint_addr_len)) {
-                break;
-            }
-        }
-
-        if (endpoint_addr_len == 0) {
-            return false;
-        }
-
-        const bool public_relay_target =
-            IsPublicInternetAddress(reinterpret_cast<const sockaddr*>(&endpoint_addr));
+    auto try_connect_candidate = [&](const RelayEndpointCandidate& candidate) -> bool {
+        const sockaddr_storage endpoint_addr = candidate.endpoint_addr;
+        const int endpoint_addr_len = candidate.endpoint_addr_len;
+        const int preferred_family = candidate.socket_family;
+        const bool public_relay_target = candidate.public_internet;
         peer_direct_allowed_ = public_relay_target;
 
         sockaddr_storage local_bind_addr = {};
@@ -921,6 +1377,7 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         }
         PacketTunnelDebugLog("udp socket ready for relay server " + tunnel_server_ip_ +
                              ":" + std::to_string(tunnel_port_) +
+                             " scope=" + RelayEndpointScopeName(candidate) +
                              " family=" + std::to_string(socket_family_) +
                              ((public_relay_target && has_local_bind)
                                   ? (" local=" + SockaddrToString(local_bind_addr, local_bind_addr_len))
@@ -929,13 +1386,12 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
     };
 
     bool connected = false;
-    if (try_connect_family(AF_INET6)) {
-        connected = true;
-    } else if (try_connect_family(AF_INET)) {
-        connected = true;
+    for (size_t i = 0; i < relay_candidates.size(); ++i) {
+        if (try_connect_candidate(relay_candidates[i])) {
+            connected = true;
+            break;
+        }
     }
-
-    freeaddrinfo(result);
 
     if (!connected) {
         if (error_msg != NULL) {

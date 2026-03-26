@@ -302,6 +302,154 @@ void LinuxClearSockaddrPort(sockaddr_storage* addr) {
     }
 }
 
+bool LinuxIsPublicInternetAddress(const sockaddr* addr) {
+    if (addr == NULL) {
+        return false;
+    }
+
+    if (addr->sa_family == AF_INET) {
+        const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(addr);
+        const uint32_t ip = ntohl(addr4->sin_addr.s_addr);
+        if (ip == 0 ||
+            (ip & 0xff000000u) == 0x0a000000u ||
+            (ip & 0xfff00000u) == 0xac100000u ||
+            (ip & 0xffff0000u) == 0xc0a80000u ||
+            (ip & 0xff000000u) == 0x7f000000u ||
+            (ip & 0xffff0000u) == 0xa9fe0000u ||
+            (ip & 0xffc00000u) == 0x64400000u ||
+            (ip & 0xfffe0000u) == 0xc6120000u) {
+            return false;
+        }
+        return true;
+    }
+
+    if (addr->sa_family == AF_INET6) {
+        const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(addr);
+        if (IN6_IS_ADDR_UNSPECIFIED(&addr6->sin6_addr) ||
+            IN6_IS_ADDR_LOOPBACK(&addr6->sin6_addr) ||
+            IN6_IS_ADDR_MULTICAST(&addr6->sin6_addr) ||
+            IN6_IS_ADDR_LINKLOCAL(&addr6->sin6_addr)) {
+            return false;
+        }
+        if ((addr6->sin6_addr.s6_addr[0] & 0xfe) == 0xfc) {
+            return false;
+        }
+        return (addr6->sin6_addr.s6_addr[0] & 0xe0) == 0x20;
+    }
+
+    return false;
+}
+
+bool LinuxSockaddrEquals(const sockaddr_storage& left,
+                         socklen_t left_len,
+                         const sockaddr_storage& right,
+                         socklen_t right_len);
+
+bool BuildEndpointForSocketFamily(const sockaddr* source_addr,
+                                  socklen_t source_addr_len,
+                                  int socket_family,
+                                  sockaddr_storage* endpoint_addr,
+                                  socklen_t* endpoint_addr_len);
+
+struct LinuxRelayEndpointCandidate {
+    sockaddr_storage endpoint_addr;
+    socklen_t endpoint_addr_len;
+    int socket_family;
+    bool public_internet;
+    size_t original_order;
+};
+
+int LinuxRelayEndpointPriority(const LinuxRelayEndpointCandidate& candidate) {
+    if (candidate.public_internet) {
+        return (candidate.socket_family == AF_INET6) ? 0 : 1;
+    }
+    return (candidate.socket_family == AF_INET6) ? 2 : 3;
+}
+
+const char* LinuxRelayEndpointScopeName(const LinuxRelayEndpointCandidate& candidate) {
+    if (candidate.public_internet) {
+        return (candidate.socket_family == AF_INET6) ? "public_ipv6" : "public_ipv4";
+    }
+    return (candidate.socket_family == AF_INET6) ? "non_public_ipv6" : "non_public_ipv4";
+}
+
+std::string BuildLinuxRelayEndpointCandidateSummary(
+    const std::vector<LinuxRelayEndpointCandidate>& candidates) {
+    if (candidates.empty()) {
+        return "none";
+    }
+
+    std::ostringstream ss;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (i != 0) {
+            ss << "; ";
+        }
+        ss << LinuxRelayEndpointScopeName(candidates[i]) << "="
+           << LinuxSockaddrToString(candidates[i].endpoint_addr, candidates[i].endpoint_addr_len);
+    }
+    return ss.str();
+}
+
+void BuildLinuxRelayEndpointCandidates(addrinfo* result,
+                                       std::vector<LinuxRelayEndpointCandidate>* out_candidates) {
+    if (out_candidates == NULL) {
+        return;
+    }
+
+    out_candidates->clear();
+    size_t order = 0;
+    for (addrinfo* rp = result; rp != NULL; rp = rp->ai_next, ++order) {
+        if (rp->ai_addr == NULL) {
+            continue;
+        }
+
+        const int family = rp->ai_addr->sa_family;
+        if (family != AF_INET && family != AF_INET6) {
+            continue;
+        }
+
+        LinuxRelayEndpointCandidate candidate = {};
+        if (!BuildEndpointForSocketFamily(rp->ai_addr,
+                                          static_cast<socklen_t>(rp->ai_addrlen),
+                                          family,
+                                          &candidate.endpoint_addr,
+                                          &candidate.endpoint_addr_len)) {
+            continue;
+        }
+
+        candidate.socket_family = family;
+        candidate.public_internet =
+            LinuxIsPublicInternetAddress(reinterpret_cast<const sockaddr*>(&candidate.endpoint_addr));
+        candidate.original_order = order;
+
+        bool duplicate = false;
+        for (size_t i = 0; i < out_candidates->size(); ++i) {
+            if (LinuxSockaddrEquals((*out_candidates)[i].endpoint_addr,
+                                    (*out_candidates)[i].endpoint_addr_len,
+                                    candidate.endpoint_addr,
+                                    candidate.endpoint_addr_len)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            out_candidates->push_back(candidate);
+        }
+    }
+
+    std::stable_sort(out_candidates->begin(),
+                     out_candidates->end(),
+                     [](const LinuxRelayEndpointCandidate& left,
+                        const LinuxRelayEndpointCandidate& right) {
+                         const int left_priority = LinuxRelayEndpointPriority(left);
+                         const int right_priority = LinuxRelayEndpointPriority(right);
+                         if (left_priority != right_priority) {
+                             return left_priority < right_priority;
+                         }
+                         return left.original_order < right.original_order;
+                     });
+}
+
 bool ParseLinuxPeerOfferPayload(const uint8_t* payload, size_t length, ParsedLinuxPeerOffer* out_offer) {
     if (payload == NULL || out_offer == NULL || length != packet_tunnel::kPeerOfferPayloadSize) {
         return false;
@@ -522,6 +670,21 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
         return false;
     }
 
+    std::vector<LinuxRelayEndpointCandidate> relay_candidates;
+    BuildLinuxRelayEndpointCandidates(result, &relay_candidates);
+    freeaddrinfo(result);
+    result = NULL;
+
+    if (relay_candidates.empty()) {
+        if (error != NULL) {
+            *error = "packet tunnel resolve returned no usable endpoint: " + tunnel_host_;
+        }
+        return false;
+    }
+
+    LogInfo("packet tunnel relay endpoint candidates: " +
+            BuildLinuxRelayEndpointCandidateSummary(relay_candidates));
+
     auto configure_socket = [&](int sock, int family) {
         if (family == AF_INET6) {
             int dual_stack = 0;
@@ -541,22 +704,10 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
     };
 
-    auto try_connect_family = [&](int preferred_family) -> bool {
-        sockaddr_storage endpoint_addr = {};
-        socklen_t endpoint_addr_len = 0;
-        for (addrinfo* rp = result; rp != NULL; rp = rp->ai_next) {
-            if (BuildEndpointForSocketFamily(rp->ai_addr,
-                                             static_cast<socklen_t>(rp->ai_addrlen),
-                                             preferred_family,
-                                             &endpoint_addr,
-                                             &endpoint_addr_len)) {
-                break;
-            }
-        }
-
-        if (endpoint_addr_len == 0) {
-            return false;
-        }
+    auto try_connect_candidate = [&](const LinuxRelayEndpointCandidate& candidate) -> bool {
+        const sockaddr_storage endpoint_addr = candidate.endpoint_addr;
+        const socklen_t endpoint_addr_len = candidate.endpoint_addr_len;
+        const int preferred_family = candidate.socket_family;
 
         sockaddr_storage local_bind_addr = {};
         socklen_t local_bind_addr_len = 0;
@@ -601,6 +752,7 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
         server_endpoint_.valid = true;
         LogInfo("packet tunnel udp socket ready for relay server " + tunnel_host_ +
                 ":" + std::to_string(tunnel_port_) +
+                " scope=" + LinuxRelayEndpointScopeName(candidate) +
                 " family=" + std::to_string(socket_family_) +
                 (has_local_bind
                      ? (" local=" + LinuxSockaddrToString(local_bind_addr, local_bind_addr_len))
@@ -609,13 +761,12 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
     };
 
     bool connected = false;
-    if (try_connect_family(AF_INET6)) {
-        connected = true;
-    } else if (try_connect_family(AF_INET)) {
-        connected = true;
+    for (size_t i = 0; i < relay_candidates.size(); ++i) {
+        if (try_connect_candidate(relay_candidates[i])) {
+            connected = true;
+            break;
+        }
     }
-
-    freeaddrinfo(result);
 
     if (!connected) {
         if (error != NULL) {
