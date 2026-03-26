@@ -1271,6 +1271,7 @@ private:
         atomic<bool> active;
         uint64_t established_ms;
         uint64_t last_peer_offer_announce_ms;
+        atomic<uint64_t> last_activity_ms;
         mutex send_mutex;
 
         PacketTunnelSession(int fd,
@@ -1287,7 +1288,8 @@ private:
               udp_addr_len(0),
               active(true),
               established_ms(monotonic_millis()),
-              last_peer_offer_announce_ms(0) {}
+              last_peer_offer_announce_ms(0),
+              last_activity_ms(established_ms) {}
     };
 
     ServerConfig config;
@@ -1368,6 +1370,7 @@ private:
 
     const uint64_t kPeerOfferTimeoutMs = 9000;
     const uint64_t kPeerActiveTimeoutMs = 15000;
+    const uint64_t kPacketTunnelUdpIdleTimeoutMs = 30000;
 
     const char* peer_endpoint_state_name(PeerEndpointState state) {
         switch (state) {
@@ -1468,10 +1471,93 @@ private:
         return true;
     }
 
+    static void touch_packet_tunnel_session(const shared_ptr<PacketTunnelSession>& session,
+                                            uint64_t now_ms = 0) {
+        if (!session) {
+            return;
+        }
+        if (now_ms == 0) {
+            now_ms = monotonic_millis();
+        }
+        session->last_activity_ms.store(now_ms);
+    }
+
+    void erase_packet_tunnel_session_locked(const shared_ptr<PacketTunnelSession>& session) {
+        if (!session) {
+            return;
+        }
+
+        session->active = false;
+
+        map<uint32_t, shared_ptr<PacketTunnelSession>>::iterator by_virtual_it =
+            packet_tunnel_sessions.find(session->virtual_ip_be);
+        if (by_virtual_it != packet_tunnel_sessions.end() && by_virtual_it->second == session) {
+            packet_tunnel_sessions.erase(by_virtual_it);
+        }
+
+        if (!session->udp_endpoint_key.empty()) {
+            map<string, shared_ptr<PacketTunnelSession>>::iterator by_endpoint_it =
+                packet_tunnel_sessions_by_endpoint.find(session->udp_endpoint_key);
+            if (by_endpoint_it != packet_tunnel_sessions_by_endpoint.end() &&
+                by_endpoint_it->second == session) {
+                packet_tunnel_sessions_by_endpoint.erase(by_endpoint_it);
+            }
+        }
+    }
+
+    vector<shared_ptr<PacketTunnelSession>> cleanup_idle_packet_tunnel_sessions(uint64_t now_ms) {
+        vector<shared_ptr<PacketTunnelSession>> removed;
+        lock_guard<mutex> lock(packet_tunnel_mutex);
+
+        for (map<uint32_t, shared_ptr<PacketTunnelSession>>::iterator it = packet_tunnel_sessions.begin();
+             it != packet_tunnel_sessions.end();) {
+            const shared_ptr<PacketTunnelSession>& session = it->second;
+            bool should_remove = !session || !session->active;
+            if (!should_remove && session->use_udp) {
+                const uint64_t last_activity_ms = session->last_activity_ms.load();
+                should_remove =
+                    last_activity_ms == 0 ||
+                    now_ms < last_activity_ms ||
+                    (now_ms - last_activity_ms) >= kPacketTunnelUdpIdleTimeoutMs;
+            }
+
+            if (!should_remove) {
+                ++it;
+                continue;
+            }
+
+            shared_ptr<PacketTunnelSession> removed_session = session;
+            ++it;
+            if (session) {
+                removed.push_back(session);
+                erase_packet_tunnel_session_locked(removed_session);
+            }
+        }
+
+        for (map<string, shared_ptr<PacketTunnelSession>>::iterator it = packet_tunnel_sessions_by_endpoint.begin();
+             it != packet_tunnel_sessions_by_endpoint.end();) {
+            if (!it->second || !it->second->active) {
+                it = packet_tunnel_sessions_by_endpoint.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        return removed;
+    }
+
     void announce_peer_offers_for_session(const shared_ptr<PacketTunnelSession>& session,
                                           bool force_new_version = true) {
         if (!session || !session->active || !session->use_udp) {
             return;
+        }
+
+        vector<shared_ptr<PacketTunnelSession>> expired_sessions =
+            cleanup_idle_packet_tunnel_sessions(monotonic_millis());
+        for (size_t i = 0; i < expired_sessions.size(); ++i) {
+            Logger::info("[" + server_name + "|IP Tunnel] drop stale UDP session: virtual_ip=" +
+                         ipv4_be_to_string(expired_sessions[i]->virtual_ip_be) +
+                         " endpoint=" + expired_sessions[i]->client_str);
         }
 
         log_expired_peer_coord_states(&peer_coord_, server_name);
@@ -1844,6 +1930,10 @@ public:
 
         int udp_v6only = 0;
         setsockopt(udp_fd, IPPROTO_IPV6, IPV6_V6ONLY, &udp_v6only, sizeof(udp_v6only));
+        timeval udp_timeout{};
+        udp_timeout.tv_sec = 1;
+        udp_timeout.tv_usec = 0;
+        setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &udp_timeout, sizeof(udp_timeout));
 
         sockaddr_in6 udp_addr{};
         udp_addr.sin6_family = AF_INET6;
@@ -1998,6 +2088,16 @@ private:
                 if (!running) {
                     break;
                 }
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    vector<shared_ptr<PacketTunnelSession>> expired_sessions =
+                        cleanup_idle_packet_tunnel_sessions(monotonic_millis());
+                    for (size_t i = 0; i < expired_sessions.size(); ++i) {
+                        Logger::info("[" + server_name + "|IP Tunnel] drop stale UDP session: virtual_ip=" +
+                                     ipv4_be_to_string(expired_sessions[i]->virtual_ip_be) +
+                                     " endpoint=" + expired_sessions[i]->client_str);
+                    }
+                    continue;
+                }
                 if (errno == EINTR) {
                     continue;
                 }
@@ -2087,25 +2187,47 @@ private:
                     session->udp_addr = client_addr;
                     session->udp_addr_len = client_addr_len;
                     session->udp_endpoint_key = client_str;
+                    touch_packet_tunnel_session(session);
 
-                    shared_ptr<PacketTunnelSession> replaced_session;
+                    shared_ptr<PacketTunnelSession> replaced_by_virtual_ip;
+                    shared_ptr<PacketTunnelSession> replaced_by_endpoint;
                     {
                         lock_guard<mutex> lock(packet_tunnel_mutex);
                         auto it = packet_tunnel_sessions.find(virtual_ip_be);
                         if (it != packet_tunnel_sessions.end()) {
-                            replaced_session = it->second;
-                            if (!replaced_session->udp_endpoint_key.empty()) {
-                                packet_tunnel_sessions_by_endpoint.erase(replaced_session->udp_endpoint_key);
-                            }
+                            replaced_by_virtual_ip = it->second;
+                        }
+                        map<string, shared_ptr<PacketTunnelSession>>::iterator endpoint_it =
+                            packet_tunnel_sessions_by_endpoint.find(client_str);
+                        if (endpoint_it != packet_tunnel_sessions_by_endpoint.end()) {
+                            replaced_by_endpoint = endpoint_it->second;
+                        }
+
+                        erase_packet_tunnel_session_locked(replaced_by_virtual_ip);
+                        if (replaced_by_endpoint != replaced_by_virtual_ip) {
+                            erase_packet_tunnel_session_locked(replaced_by_endpoint);
                         }
                         packet_tunnel_sessions[virtual_ip_be] = session;
                         packet_tunnel_sessions_by_endpoint[client_str] = session;
                     }
                     peer_coord_.ObservePeerFrame(virtual_ip, 0, PeerEndpointState::RelayOnly);
 
-                    if (replaced_session && !replaced_session->use_udp && replaced_session->client_fd >= 0) {
-                        replaced_session->active = false;
-                        shutdown(replaced_session->client_fd, SHUT_RDWR);
+                    if (replaced_by_virtual_ip && !replaced_by_virtual_ip->use_udp && replaced_by_virtual_ip->client_fd >= 0) {
+                        shutdown(replaced_by_virtual_ip->client_fd, SHUT_RDWR);
+                    }
+                    if (replaced_by_endpoint && replaced_by_endpoint != replaced_by_virtual_ip &&
+                        !replaced_by_endpoint->use_udp && replaced_by_endpoint->client_fd >= 0) {
+                        shutdown(replaced_by_endpoint->client_fd, SHUT_RDWR);
+                    }
+
+                    if (replaced_by_virtual_ip && replaced_by_virtual_ip != session) {
+                        Logger::info("[" + server_name + "|IP Tunnel] replace session by virtual_ip: old=" +
+                                     replaced_by_virtual_ip->client_str + " virtual_ip=" + virtual_ip);
+                    }
+                    if (replaced_by_endpoint && replaced_by_endpoint != replaced_by_virtual_ip) {
+                        Logger::info("[" + server_name + "|IP Tunnel] replace session by endpoint: endpoint=" +
+                                     client_str + " old_virtual_ip=" +
+                                     ipv4_be_to_string(replaced_by_endpoint->virtual_ip_be));
                     }
 
                     Logger::info("[IP Tunnel|" + session_uuid + "] UDP session established: client=" +
@@ -2127,6 +2249,7 @@ private:
             if (!session || !session->active) {
                 continue;
             }
+            touch_packet_tunnel_session(session);
 
             if ((size_t)n < packet_tunnel::kFrameHeaderSize) {
                 continue;
@@ -2475,6 +2598,7 @@ private:
             }
 
             session = make_shared<PacketTunnelSession>(client_fd, client_str, session_uuid, virtual_ip_be, mtu);
+            touch_packet_tunnel_session(session);
 
             shared_ptr<PacketTunnelSession> replaced_session;
             {
@@ -2483,12 +2607,12 @@ private:
                 if (it != packet_tunnel_sessions.end()) {
                     replaced_session = it->second;
                 }
+                erase_packet_tunnel_session_locked(replaced_session);
                 packet_tunnel_sessions[virtual_ip_be] = session;
             }
             peer_coord_.ObservePeerFrame(virtual_ip, 0, PeerEndpointState::RelayOnly);
 
             if (replaced_session && replaced_session->client_fd != client_fd) {
-                replaced_session->active = false;
                 shutdown(replaced_session->client_fd, SHUT_RDWR);
                 Logger::warning("[IP Tunnel|" + session_uuid + "] 替换旧会话: virtual_ip=" + virtual_ip);
             }
@@ -2516,6 +2640,7 @@ private:
                     break;
                 }
 
+                touch_packet_tunnel_session(session);
                 if (frame_type == packet_tunnel::kFrameHeartbeat && payload_len == 0) {
                     if (!send_packet_tunnel_frame(session, packet_tunnel::kFrameHeartbeatAck, nullptr, 0)) {
                         Logger::warning("[IP Tunnel|" + session_uuid + "] 发送心跳确认失败");
@@ -2669,12 +2794,8 @@ private:
         }
 
         if (session) {
-            session->active = false;
             lock_guard<mutex> lock(packet_tunnel_mutex);
-            auto it = packet_tunnel_sessions.find(virtual_ip_be);
-            if (it != packet_tunnel_sessions.end() && it->second == session) {
-                packet_tunnel_sessions.erase(it);
-            }
+            erase_packet_tunnel_session_locked(session);
         }
 
         close(client_fd);

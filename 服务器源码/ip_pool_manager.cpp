@@ -58,6 +58,10 @@ bool IPPoolManager::AcquireLease(const std::string& pool_key, const ip_tunnel::L
         return true;
     }
 
+    if (TryAdoptLeaseByClientId(pool, request, now_ms, out_record)) {
+        return true;
+    }
+
     if (TryReuseStickyLease(pool, request, now_ms, out_record)) {
         return true;
     }
@@ -195,6 +199,21 @@ size_t IPPoolManager::CleanupExpired(uint64_t now_ms) {
     }
 
     return cleaned;
+}
+
+std::map<std::string, IPPoolManager::LeaseState>::iterator IPPoolManager::FindLeaseByClientId(
+    std::map<std::string, LeaseState>* leases,
+    const std::string& client_id) {
+    if (leases == NULL || client_id.empty()) {
+        return (leases != NULL) ? leases->end() : std::map<std::string, LeaseState>::iterator();
+    }
+
+    for (std::map<std::string, LeaseState>::iterator it = leases->begin(); it != leases->end(); ++it) {
+        if (it->second.record.client_id == client_id) {
+            return it;
+        }
+    }
+    return leases->end();
 }
 
 std::vector<IPPoolManager::LeaseRecord> IPPoolManager::Snapshot(const std::string& pool_key) const {
@@ -379,8 +398,46 @@ bool IPPoolManager::PreparePool(PoolState* pool, std::string* error) {
     return true;
 }
 
+bool IPPoolManager::TryAdoptLeaseByClientId(PoolState* pool,
+                                            const ip_tunnel::LeaseRequest& request,
+                                            uint64_t now_ms,
+                                            LeaseRecord* out_record) {
+    if (pool == NULL || request.client_id.empty()) {
+        return false;
+    }
+
+    std::map<std::string, LeaseState>::iterator it = FindLeaseByClientId(&pool->by_session, request.client_id);
+    if (it == pool->by_session.end() || it->first == request.session_uuid) {
+        return false;
+    }
+
+    LeaseState state = it->second;
+    state.record.session_uuid = request.session_uuid;
+    state.record.client_id = request.client_id;
+    state.record.server_key = request.server_key;
+    state.record.reused_previous_ip = true;
+    TouchLease(&state, pool->config.lease_seconds, now_ms);
+
+    uint32_t ip = 0;
+    ParseIPv4(state.record.virtual_ip, &ip);
+
+    pool->by_session.erase(it);
+    pool->by_session[request.session_uuid] = state;
+    if (ip != 0) {
+        pool->by_ip[ip] = request.session_uuid;
+    }
+
+    if (out_record) {
+        *out_record = state.record;
+    }
+    return true;
+}
+
 bool IPPoolManager::TryReuseStickyLease(PoolState* pool, const ip_tunnel::LeaseRequest& request, uint64_t now_ms, LeaseRecord* out_record) {
     std::map<std::string, LeaseState>::iterator it = pool->released_sessions.find(request.session_uuid);
+    if (it == pool->released_sessions.end()) {
+        it = FindLeaseByClientId(&pool->released_sessions, request.client_id);
+    }
     if (it == pool->released_sessions.end()) {
         return false;
     }

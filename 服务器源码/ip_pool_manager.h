@@ -94,11 +94,14 @@ private:
     static uint32_t HostCount(uint32_t mask);
 
     bool PreparePool(PoolState* pool, std::string* error);
+    bool TryAdoptLeaseByClientId(PoolState* pool, const ip_tunnel::LeaseRequest& request, uint64_t now_ms, LeaseRecord* out_record);
     bool TryReuseStickyLease(PoolState* pool, const ip_tunnel::LeaseRequest& request, uint64_t now_ms, LeaseRecord* out_record);
     bool TryAcquireSpecificIP(PoolState* pool, const ip_tunnel::LeaseRequest& request, uint32_t requested_ip, uint64_t now_ms, LeaseRecord* out_record, std::string* error);
     bool TryAcquireNextFreeIP(PoolState* pool, const ip_tunnel::LeaseRequest& request, uint64_t now_ms, LeaseRecord* out_record, std::string* error);
     LeaseRecord BuildLeaseRecord(const PoolState& pool, const ip_tunnel::LeaseRequest& request, uint32_t assigned_ip, uint64_t now_ms, bool reused_previous_ip) const;
     static void TouchLease(LeaseState* state, uint32_t lease_seconds, uint64_t now_ms);
+    static std::map<std::string, LeaseState>::iterator FindLeaseByClientId(std::map<std::string, LeaseState>* leases,
+                                                                           const std::string& client_id);
 
     std::map<std::string, PoolState> pools_;
 };
