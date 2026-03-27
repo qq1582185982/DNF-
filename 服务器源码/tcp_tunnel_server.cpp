@@ -1637,8 +1637,11 @@ private:
     }
 
     static string build_local_udp_sidecar_key(uint32_t client_virtual_ip_be,
-                                              uint16_t client_src_port) {
-        return ipv4_be_to_string(client_virtual_ip_be) + ":" + to_string(client_src_port);
+                                              uint16_t client_src_port,
+                                              uint32_t backend_dst_ip_be,
+                                              uint16_t backend_dst_port) {
+        return ipv4_be_to_string(client_virtual_ip_be) + ":" + to_string(client_src_port) +
+               "->" + ipv4_be_to_string(backend_dst_ip_be) + ":" + to_string(backend_dst_port);
     }
 
     static void encode_ipv4_dnf_order(uint32_t ip_be, uint8_t out_bytes[4]) {
@@ -1880,7 +1883,9 @@ private:
         uint16_t backend_dst_port,
         string* error) {
         const string key = build_local_udp_sidecar_key(client_virtual_ip_be,
-                                                       client_src_port);
+                                                       client_src_port,
+                                                       backend_dst_ip_be,
+                                                       backend_dst_port);
         {
             lock_guard<mutex> lock(local_udp_sidecar_mutex);
             map<string, shared_ptr<LocalUdpSidecarFlow>>::iterator it = local_udp_sidecar_flows.find(key);
@@ -1900,12 +1905,6 @@ private:
             return shared_ptr<LocalUdpSidecarFlow>();
         }
 
-        int opt = 1;
-        setsockopt(flow_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#ifdef SO_REUSEPORT
-        setsockopt(flow_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-#endif
-
         timeval timeout{};
         timeout.tv_sec = 1;
         timeout.tv_usec = 0;
@@ -1913,7 +1912,7 @@ private:
 
         sockaddr_in bind_addr{};
         bind_addr.sin_family = AF_INET;
-        bind_addr.sin_port = htons(client_src_port);
+        bind_addr.sin_port = htons(0);
         bind_addr.sin_addr.s_addr = has_server_virtual_ip_be ? server_virtual_ip_be : INADDR_ANY;
         if (bind(flow_fd, (sockaddr*)&bind_addr, sizeof(bind_addr)) < 0) {
             if (has_server_virtual_ip_be) {
@@ -1943,6 +1942,9 @@ private:
         flow->client_src_port = client_src_port;
         flow->backend_dst_ip_be = backend_dst_ip_be;
         flow->backend_dst_port = backend_dst_port;
+        flow->backend_addr.sin_family = AF_INET;
+        flow->backend_addr.sin_port = htons(backend_dst_port);
+        flow->backend_addr.sin_addr.s_addr = backend_dst_ip_be;
         flow->last_activity_ms.store(monotonic_millis());
 
         {
@@ -2140,17 +2142,12 @@ private:
 
         {
             lock_guard<mutex> send_lock(flow->send_mutex);
-            sockaddr_in backend_addr{};
-            backend_addr.sin_family = AF_INET;
-            backend_addr.sin_port = htons(dst_port);
-            backend_addr.sin_addr.s_addr = dst_ip_be;
-
             int sent = sendto(flow->fd,
                               (const char*)udp_payload,
                               udp_payload_len,
                               MSG_NOSIGNAL,
-                              (sockaddr*)&backend_addr,
-                              sizeof(backend_addr));
+                              (sockaddr*)&flow->backend_addr,
+                              sizeof(flow->backend_addr));
             if (sent != (int)udp_payload_len) {
                 Logger::warning("[IP Tunnel|" + session->session_uuid + "] local UDP sidecar proxy send failed: " +
                                 string(strerror(errno)) + " fallback=raw");
