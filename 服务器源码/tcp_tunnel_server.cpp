@@ -1435,6 +1435,42 @@ private:
             : session(s), reason(why) {}
     };
 
+    struct LocalUdpSidecarFlow {
+        int fd;
+        string key;
+        shared_ptr<PacketTunnelSession> session;
+        string session_uuid;
+        uint32_t client_virtual_ip_be;
+        uint16_t client_src_port;
+        uint32_t backend_dst_ip_be;
+        uint16_t backend_dst_port;
+        sockaddr_in backend_addr;
+        atomic<bool> active;
+        atomic<uint64_t> last_activity_ms;
+        shared_ptr<thread> recv_thread;
+        mutex send_mutex;
+
+        LocalUdpSidecarFlow()
+            : fd(-1),
+              client_virtual_ip_be(0),
+              client_src_port(0),
+              backend_dst_ip_be(0),
+              backend_dst_port(0),
+              active(true),
+              last_activity_ms(monotonic_millis()) {
+            memset(&backend_addr, 0, sizeof(backend_addr));
+        }
+    };
+
+    struct LocalUdpSidecarFlowRemoval {
+        shared_ptr<LocalUdpSidecarFlow> flow;
+        string reason;
+
+        LocalUdpSidecarFlowRemoval(const shared_ptr<LocalUdpSidecarFlow>& f,
+                                   const string& why)
+            : flow(f), reason(why) {}
+    };
+
     ServerConfig config;
     string server_name;
     PeerCoord peer_coord_;
@@ -1446,8 +1482,10 @@ private:
     shared_ptr<thread> udp_read_thread;
     map<uint32_t, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions;
     map<string, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions_by_endpoint;
+    map<string, shared_ptr<LocalUdpSidecarFlow>> local_udp_sidecar_flows;
 
     mutex packet_tunnel_mutex;
+    mutex local_udp_sidecar_mutex;
     int udp_fd;
     int local_raw_inject_fd;
     bool local_raw_inject_ready;
@@ -1592,6 +1630,92 @@ private:
                       " udp=" + to_string(src_port) + "->" + to_string(dst_port) +
                       " payload_len=" + to_string(udp_payload_len) +
                       " hex=" + format_hex_preview(udp_payload, udp_payload_len));
+    }
+
+    static bool is_local_sidecar_udp_proxy_port(uint16_t port) {
+        return port == 2311 || port == 2312 || port == 2313;
+    }
+
+    static string build_local_udp_sidecar_key(uint32_t client_virtual_ip_be,
+                                              uint16_t client_src_port,
+                                              uint32_t backend_dst_ip_be,
+                                              uint16_t backend_dst_port) {
+        return ipv4_be_to_string(client_virtual_ip_be) + ":" + to_string(client_src_port) +
+               "->" + ipv4_be_to_string(backend_dst_ip_be) + ":" + to_string(backend_dst_port);
+    }
+
+    static void encode_ipv4_dnf_order(uint32_t ip_be, uint8_t out_bytes[4]) {
+        const uint32_t host_ip = ntohl(ip_be);
+        const uint8_t a = static_cast<uint8_t>((host_ip >> 24) & 0xFF);
+        const uint8_t b = static_cast<uint8_t>((host_ip >> 16) & 0xFF);
+        const uint8_t c = static_cast<uint8_t>((host_ip >> 8) & 0xFF);
+        const uint8_t d = static_cast<uint8_t>(host_ip & 0xFF);
+        out_bytes[0] = d;
+        out_bytes[1] = c;
+        out_bytes[2] = b;
+        out_bytes[3] = a;
+    }
+
+    static bool rewrite_local_udp_handshake_payload(vector<uint8_t>* payload,
+                                                    uint32_t client_virtual_ip_be,
+                                                    uint16_t client_src_port) {
+        if (payload == nullptr || payload->size() != 7 || (*payload)[0] != 0x02) {
+            return false;
+        }
+
+        uint8_t ip_bytes[4] = {};
+        encode_ipv4_dnf_order(client_virtual_ip_be, ip_bytes);
+        (*payload)[1] = ip_bytes[0];
+        (*payload)[2] = ip_bytes[1];
+        (*payload)[3] = ip_bytes[2];
+        (*payload)[4] = ip_bytes[3];
+        (*payload)[5] = static_cast<uint8_t>(client_src_port & 0xFF);
+        (*payload)[6] = static_cast<uint8_t>((client_src_port >> 8) & 0xFF);
+        return true;
+    }
+
+    static vector<uint8_t> build_ipv4_udp_packet(uint32_t src_ip_be,
+                                                 uint32_t dst_ip_be,
+                                                 uint16_t src_port,
+                                                 uint16_t dst_port,
+                                                 const uint8_t* udp_payload,
+                                                 size_t udp_payload_len) {
+        const size_t total_len = 20 + 8 + udp_payload_len;
+        vector<uint8_t> packet(total_len, 0);
+        packet[0] = 0x45;
+        packet[1] = 0x00;
+        packet[2] = static_cast<uint8_t>((total_len >> 8) & 0xFF);
+        packet[3] = static_cast<uint8_t>(total_len & 0xFF);
+        packet[4] = 0x00;
+        packet[5] = 0x00;
+        packet[6] = 0x00;
+        packet[7] = 0x00;
+        packet[8] = 64;
+        packet[9] = IPPROTO_UDP;
+        memcpy(packet.data() + 12, &src_ip_be, sizeof(src_ip_be));
+        memcpy(packet.data() + 16, &dst_ip_be, sizeof(dst_ip_be));
+
+        const uint16_t ip_checksum = internet_checksum(packet.data(), 20);
+        packet[10] = static_cast<uint8_t>((ip_checksum >> 8) & 0xFF);
+        packet[11] = static_cast<uint8_t>(ip_checksum & 0xFF);
+
+        packet[20] = static_cast<uint8_t>((src_port >> 8) & 0xFF);
+        packet[21] = static_cast<uint8_t>(src_port & 0xFF);
+        packet[22] = static_cast<uint8_t>((dst_port >> 8) & 0xFF);
+        packet[23] = static_cast<uint8_t>(dst_port & 0xFF);
+        const uint16_t udp_len = static_cast<uint16_t>(8 + udp_payload_len);
+        packet[24] = static_cast<uint8_t>((udp_len >> 8) & 0xFF);
+        packet[25] = static_cast<uint8_t>(udp_len & 0xFF);
+        packet[26] = 0x00;
+        packet[27] = 0x00;
+        if (udp_payload_len > 0 && udp_payload != nullptr) {
+            memcpy(packet.data() + 28, udp_payload, udp_payload_len);
+        }
+
+        const uint16_t udp_checksum = ipv4_transport_checksum(packet.data(), packet.size());
+        packet[26] = static_cast<uint8_t>((udp_checksum >> 8) & 0xFF);
+        packet[27] = static_cast<uint8_t>(udp_checksum & 0xFF);
+        return packet;
     }
 
     const uint64_t kPeerOfferTimeoutMs = 9000;
@@ -1748,6 +1872,294 @@ private:
             (void)session;
         }
 
+        return true;
+    }
+
+    shared_ptr<LocalUdpSidecarFlow> find_or_create_local_udp_sidecar_flow(
+        const shared_ptr<PacketTunnelSession>& session,
+        uint32_t client_virtual_ip_be,
+        uint16_t client_src_port,
+        uint32_t backend_dst_ip_be,
+        uint16_t backend_dst_port,
+        string* error) {
+        const string key = build_local_udp_sidecar_key(client_virtual_ip_be,
+                                                       client_src_port,
+                                                       backend_dst_ip_be,
+                                                       backend_dst_port);
+        {
+            lock_guard<mutex> lock(local_udp_sidecar_mutex);
+            map<string, shared_ptr<LocalUdpSidecarFlow>>::iterator it = local_udp_sidecar_flows.find(key);
+            if (it != local_udp_sidecar_flows.end()) {
+                it->second->session = session;
+                it->second->session_uuid = session ? session->session_uuid : "";
+                it->second->last_activity_ms.store(monotonic_millis());
+                return it->second;
+            }
+        }
+
+        int flow_fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (flow_fd < 0) {
+            if (error) {
+                *error = string("create local UDP socket failed: ") + strerror(errno);
+            }
+            return shared_ptr<LocalUdpSidecarFlow>();
+        }
+
+        timeval timeout{};
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+        setsockopt(flow_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+        sockaddr_in bind_addr{};
+        bind_addr.sin_family = AF_INET;
+        bind_addr.sin_port = htons(0);
+        bind_addr.sin_addr.s_addr = has_server_virtual_ip_be ? server_virtual_ip_be : INADDR_ANY;
+        if (bind(flow_fd, (sockaddr*)&bind_addr, sizeof(bind_addr)) < 0) {
+            if (has_server_virtual_ip_be) {
+                bind_addr.sin_addr.s_addr = INADDR_ANY;
+                if (bind(flow_fd, (sockaddr*)&bind_addr, sizeof(bind_addr)) < 0) {
+                    if (error) {
+                        *error = string("bind local UDP socket failed: ") + strerror(errno);
+                    }
+                    close(flow_fd);
+                    return shared_ptr<LocalUdpSidecarFlow>();
+                }
+            } else {
+                if (error) {
+                    *error = string("bind local UDP socket failed: ") + strerror(errno);
+                }
+                close(flow_fd);
+                return shared_ptr<LocalUdpSidecarFlow>();
+            }
+        }
+
+        shared_ptr<LocalUdpSidecarFlow> flow = make_shared<LocalUdpSidecarFlow>();
+        flow->fd = flow_fd;
+        flow->key = key;
+        flow->session = session;
+        flow->session_uuid = session ? session->session_uuid : "";
+        flow->client_virtual_ip_be = client_virtual_ip_be;
+        flow->client_src_port = client_src_port;
+        flow->backend_dst_ip_be = backend_dst_ip_be;
+        flow->backend_dst_port = backend_dst_port;
+        flow->backend_addr.sin_family = AF_INET;
+        flow->backend_addr.sin_port = htons(backend_dst_port);
+        flow->backend_addr.sin_addr.s_addr = backend_dst_ip_be;
+        flow->last_activity_ms.store(monotonic_millis());
+
+        {
+            lock_guard<mutex> lock(local_udp_sidecar_mutex);
+            local_udp_sidecar_flows[key] = flow;
+        }
+
+        flow->recv_thread = make_shared<thread>([this, flow]() {
+            while (running && flow->active) {
+                uint8_t buffer[2048];
+                sockaddr_in from_addr{};
+                socklen_t from_len = sizeof(from_addr);
+                int n = recvfrom(flow->fd,
+                                 (char*)buffer,
+                                 sizeof(buffer),
+                                 0,
+                                 (sockaddr*)&from_addr,
+                                 &from_len);
+                if (n <= 0) {
+                    if (!running || !flow->active) {
+                        break;
+                    }
+                    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                        continue;
+                    }
+                    flow->active = false;
+                    break;
+                }
+
+                flow->last_activity_ms.store(monotonic_millis());
+                vector<uint8_t> udp_payload(buffer, buffer + n);
+                (void)rewrite_local_udp_handshake_payload(&udp_payload,
+                                                          flow->client_virtual_ip_be,
+                                                          flow->client_src_port);
+
+                const uint32_t reply_src_ip_be =
+                    has_server_virtual_ip_be ? server_virtual_ip_be : from_addr.sin_addr.s_addr;
+                const uint16_t reply_src_port = ntohs(from_addr.sin_port);
+                vector<uint8_t> packet = build_ipv4_udp_packet(reply_src_ip_be,
+                                                               flow->client_virtual_ip_be,
+                                                               reply_src_port,
+                                                               flow->client_src_port,
+                                                               udp_payload.data(),
+                                                               udp_payload.size());
+
+                shared_ptr<PacketTunnelSession> session = flow->session;
+                if (!session || !session->active) {
+                    flow->active = false;
+                    break;
+                }
+
+                maybe_log_short_sidecar_udp_payload("local-udp-proxy->client",
+                                                    flow->session_uuid,
+                                                    packet.data(),
+                                                    packet.size(),
+                                                    reply_src_port,
+                                                    flow->client_src_port);
+                if (!send_packet_tunnel_frame(session,
+                                              packet_tunnel::kFrameIpv4Packet,
+                                              packet.data(),
+                                              packet.size())) {
+                    flow->active = false;
+                    break;
+                }
+            }
+        });
+
+        return flow;
+    }
+
+    vector<LocalUdpSidecarFlowRemoval> cleanup_idle_local_udp_sidecar_flows(uint64_t now_ms) {
+        const uint64_t kLocalUdpSidecarIdleTimeoutMs = 30000;
+        vector<LocalUdpSidecarFlowRemoval> removed;
+        {
+            lock_guard<mutex> lock(local_udp_sidecar_mutex);
+            for (map<string, shared_ptr<LocalUdpSidecarFlow>>::iterator it = local_udp_sidecar_flows.begin();
+                 it != local_udp_sidecar_flows.end();) {
+                const shared_ptr<LocalUdpSidecarFlow>& flow = it->second;
+                bool should_remove = !flow || !flow->active;
+                string reason = should_remove ? "inactive" : "";
+                if (!should_remove) {
+                    const shared_ptr<PacketTunnelSession>& session = flow->session;
+                    if (!session || !session->active) {
+                        should_remove = true;
+                        reason = "session_inactive";
+                    }
+                }
+                if (!should_remove) {
+                    const uint64_t last_activity_ms = flow->last_activity_ms.load();
+                    if (last_activity_ms == 0 ||
+                        now_ms < last_activity_ms ||
+                        (now_ms - last_activity_ms) >= kLocalUdpSidecarIdleTimeoutMs) {
+                        should_remove = true;
+                        reason = "idle_timeout";
+                    }
+                }
+
+                if (!should_remove) {
+                    ++it;
+                    continue;
+                }
+
+                shared_ptr<LocalUdpSidecarFlow> removed_flow = flow;
+                if (removed_flow) {
+                    removed_flow->active = false;
+                    if (removed_flow->fd >= 0) {
+                        close(removed_flow->fd);
+                        removed_flow->fd = -1;
+                    }
+                }
+                it = local_udp_sidecar_flows.erase(it);
+                removed.push_back(LocalUdpSidecarFlowRemoval(removed_flow, reason));
+            }
+        }
+
+        for (size_t i = 0; i < removed.size(); ++i) {
+            if (removed[i].flow &&
+                removed[i].flow->recv_thread &&
+                removed[i].flow->recv_thread->joinable()) {
+                removed[i].flow->recv_thread->join();
+            }
+        }
+        return removed;
+    }
+
+    void cleanup_all_local_udp_sidecar_flows() {
+        vector<shared_ptr<LocalUdpSidecarFlow>> flows;
+        {
+            lock_guard<mutex> lock(local_udp_sidecar_mutex);
+            for (map<string, shared_ptr<LocalUdpSidecarFlow>>::iterator it = local_udp_sidecar_flows.begin();
+                 it != local_udp_sidecar_flows.end(); ++it) {
+                if (it->second) {
+                    it->second->active = false;
+                    if (it->second->fd >= 0) {
+                        close(it->second->fd);
+                        it->second->fd = -1;
+                    }
+                    flows.push_back(it->second);
+                }
+            }
+            local_udp_sidecar_flows.clear();
+        }
+
+        for (size_t i = 0; i < flows.size(); ++i) {
+            if (flows[i]->recv_thread && flows[i]->recv_thread->joinable()) {
+                flows[i]->recv_thread->join();
+            }
+        }
+    }
+
+    bool try_local_udp_sidecar_proxy(const shared_ptr<PacketTunnelSession>& session,
+                                     uint32_t src_ip_be,
+                                     uint32_t dst_ip_be,
+                                     const uint8_t* payload,
+                                     size_t payload_len) {
+        if (!session || !config.local_sidecar_raw_fastpath || !is_local_node_ip(dst_ip_be)) {
+            return false;
+        }
+        if (payload == nullptr || payload_len < 28 || payload[9] != IPPROTO_UDP) {
+            return false;
+        }
+
+        uint16_t src_port = 0;
+        uint16_t dst_port = 0;
+        if (!ipv4_udp_ports(payload, payload_len, &src_port, &dst_port) ||
+            !is_local_sidecar_udp_proxy_port(dst_port)) {
+            return false;
+        }
+
+        const uint8_t* udp_payload = nullptr;
+        size_t udp_payload_len = 0;
+        if (!ipv4_udp_payload_view(payload, payload_len, &udp_payload, &udp_payload_len)) {
+            return false;
+        }
+
+        string flow_error;
+        shared_ptr<LocalUdpSidecarFlow> flow =
+            find_or_create_local_udp_sidecar_flow(session,
+                                                  src_ip_be,
+                                                  src_port,
+                                                  dst_ip_be,
+                                                  dst_port,
+                                                  &flow_error);
+        if (!flow) {
+            Logger::warning("[IP Tunnel|" + session->session_uuid + "] local UDP sidecar proxy create failed: " +
+                            flow_error + " fallback=raw");
+            return false;
+        }
+
+        {
+            lock_guard<mutex> send_lock(flow->send_mutex);
+            int sent = sendto(flow->fd,
+                              (const char*)udp_payload,
+                              udp_payload_len,
+                              MSG_NOSIGNAL,
+                              (sockaddr*)&flow->backend_addr,
+                              sizeof(flow->backend_addr));
+            if (sent != (int)udp_payload_len) {
+                Logger::warning("[IP Tunnel|" + session->session_uuid + "] local UDP sidecar proxy send failed: " +
+                                string(strerror(errno)) + " fallback=raw");
+                return false;
+            }
+        }
+
+        flow->last_activity_ms.store(monotonic_millis());
+        Logger::debug("[IP Tunnel|" + session->session_uuid + "] client->local-udp-proxy src=" +
+                      ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
+                      " dst=" + ipv4_be_to_string(dst_ip_be) + ":" + to_string(dst_port) +
+                      " payload_len=" + to_string(udp_payload_len));
+        maybe_log_short_sidecar_udp_payload("client->local-udp-proxy",
+                                            session->session_uuid,
+                                            payload,
+                                            payload_len,
+                                            src_port,
+                                            dst_port);
         return true;
     }
 
@@ -2635,6 +3047,7 @@ public:
 
         tun_manager.Cleanup();
         cleanup_local_raw_fastpath();
+        cleanup_all_local_udp_sidecar_flows();
         if (udp_read_thread && udp_read_thread->joinable()) {
             udp_read_thread->join();
         }
@@ -2669,6 +3082,14 @@ private:
                                      ipv4_be_to_string(expired_sessions[i].session->virtual_ip_be) +
                                      " endpoint=" + expired_sessions[i].session->client_str +
                                      " reason=" + expired_sessions[i].reason);
+                    }
+                    vector<LocalUdpSidecarFlowRemoval> expired_flows =
+                        cleanup_idle_local_udp_sidecar_flows(monotonic_millis());
+                    for (size_t i = 0; i < expired_flows.size(); ++i) {
+                        if (expired_flows[i].flow) {
+                            Logger::debug("[" + server_name + "|IP Tunnel] drop local UDP sidecar flow: key=" +
+                                          expired_flows[i].flow->key + " reason=" + expired_flows[i].reason);
+                        }
                     }
                     continue;
                 }
@@ -2984,14 +3405,22 @@ private:
                 continue;
             }
 
-            if (dst_is_virtual_peer &&
-                relay_virtual_peer_packet(session, dst_ip_be, route_payload, route_payload_len)) {
-                continue;
-            }
+              if (dst_is_virtual_peer &&
+                  relay_virtual_peer_packet(session, dst_ip_be, route_payload, route_payload_len)) {
+                  continue;
+              }
 
-            if (try_local_sidecar_fastpath(session,
-                                           session->session_uuid,
-                                           src_ip_be,
+              if (try_local_udp_sidecar_proxy(session,
+                                              src_ip_be,
+                                              dst_ip_be,
+                                              route_payload,
+                                              route_payload_len)) {
+                  continue;
+              }
+
+              if (try_local_sidecar_fastpath(session,
+                                             session->session_uuid,
+                                             src_ip_be,
                                            dst_ip_be,
                                            route_payload,
                                            route_payload_len)) {
