@@ -27,9 +27,104 @@ const int kPeerDirectProbeGraceMs = 3000;
 const int kPeerDirectDataTimeoutMs = 5000;
 const int kPeerSnapshotLogIntervalMs = 15000;
 const int kPeerRouteDebugLogIntervalMs = 2000;
+const int kPeerDirectProbeIntervalMs = 500;
 const int kSocketReadTimeoutMs = 1000;
 const int kTunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
+const uint16_t kPeerDirectProbeSrcPort = 65401;
+const uint16_t kPeerDirectProbeDstPort = 65402;
+const uint8_t kPeerDirectProbeMagic[4] = {'P', 'T', 'D', 'P'};
+const uint8_t kPeerDirectProbeVersion = 1;
+const uint8_t kPeerDirectProbeRequest = 1;
+const uint8_t kPeerDirectProbeResponse = 2;
+
+uint16_t ComputeLinuxIpv4HeaderChecksum(const uint8_t* header, size_t header_len) {
+    uint32_t sum = 0;
+    for (size_t i = 0; i + 1 < header_len; i += 2) {
+        sum += static_cast<uint16_t>((header[i] << 8) | header[i + 1]);
+    }
+    while ((sum >> 16) != 0) {
+        sum = (sum & 0xFFFFu) + (sum >> 16);
+    }
+    return static_cast<uint16_t>(~sum);
+}
+
+bool BuildLinuxPeerDirectProbePacket(uint32_t src_ip_be,
+                                     uint32_t dst_ip_be,
+                                     uint8_t probe_type,
+                                     std::vector<uint8_t>* out_packet) {
+    if (out_packet == NULL ||
+        (probe_type != kPeerDirectProbeRequest &&
+         probe_type != kPeerDirectProbeResponse)) {
+        return false;
+    }
+
+    const size_t packet_len = 20 + 8 + 8;
+    out_packet->assign(packet_len, 0);
+    uint8_t* packet = out_packet->data();
+    packet[0] = 0x45;
+    packet[8] = 64;
+    packet[9] = IPPROTO_UDP;
+    packet_tunnel::write_u16_be(packet + 2, static_cast<uint16_t>(packet_len));
+    memcpy(packet + 12, &src_ip_be, sizeof(src_ip_be));
+    memcpy(packet + 16, &dst_ip_be, sizeof(dst_ip_be));
+
+    const size_t udp_offset = 20;
+    packet_tunnel::write_u16_be(packet + udp_offset,
+                                probe_type == kPeerDirectProbeRequest
+                                    ? kPeerDirectProbeSrcPort
+                                    : kPeerDirectProbeDstPort);
+    packet_tunnel::write_u16_be(packet + udp_offset + 2,
+                                probe_type == kPeerDirectProbeRequest
+                                    ? kPeerDirectProbeDstPort
+                                    : kPeerDirectProbeSrcPort);
+    packet_tunnel::write_u16_be(packet + udp_offset + 4, 16);
+
+    uint8_t* payload = packet + udp_offset + 8;
+    memcpy(payload, kPeerDirectProbeMagic, sizeof(kPeerDirectProbeMagic));
+    payload[4] = kPeerDirectProbeVersion;
+    payload[5] = probe_type;
+
+    packet_tunnel::write_u16_be(packet + 10, ComputeLinuxIpv4HeaderChecksum(packet, 20));
+    return true;
+}
+
+bool ParseLinuxPeerDirectProbePacket(const uint8_t* packet,
+                                     size_t packet_len,
+                                     uint8_t* out_probe_type) {
+    if (packet == NULL || packet_len < 36 || ((packet[0] >> 4) & 0x0F) != 4 || packet[9] != IPPROTO_UDP) {
+        return false;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len != 20 || packet_len < ip_header_len + 16) {
+        return false;
+    }
+
+    const uint16_t udp_len = ntohs(*(const uint16_t*)(packet + ip_header_len + 4));
+    if (udp_len < 16 || packet_len < ip_header_len + udp_len) {
+        return false;
+    }
+
+    const uint16_t src_port = ntohs(*(const uint16_t*)(packet + ip_header_len));
+    const uint16_t dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
+    const uint8_t* payload = packet + ip_header_len + 8;
+    if (!((src_port == kPeerDirectProbeSrcPort && dst_port == kPeerDirectProbeDstPort) ||
+          (src_port == kPeerDirectProbeDstPort && dst_port == kPeerDirectProbeSrcPort))) {
+        return false;
+    }
+    if (memcmp(payload, kPeerDirectProbeMagic, sizeof(kPeerDirectProbeMagic)) != 0 ||
+        payload[4] != kPeerDirectProbeVersion) {
+        return false;
+    }
+    if (payload[5] != kPeerDirectProbeRequest && payload[5] != kPeerDirectProbeResponse) {
+        return false;
+    }
+    if (out_probe_type != NULL) {
+        *out_probe_type = payload[5];
+    }
+    return true;
+}
 
 bool IsDirectPathFresh(const LinuxPeerRouteStatus& route, unsigned long long now_tick) {
     if (!route.active_direct) {
@@ -946,6 +1041,32 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
                 if (peer_link_manager_ != NULL) {
                     peer_link_manager_->TouchPeerDirectData(peer_virtual_ip, 0);
                 }
+                uint8_t probe_type = 0;
+                if (ParseLinuxPeerDirectProbePacket(payload, payload_len, &probe_type)) {
+                    if (probe_type == kPeerDirectProbeRequest) {
+                        uint32_t peer_virtual_ip_be = 0;
+                        uint32_t local_virtual_ip_be = ParseVirtualIp(NULL);
+                        if (local_virtual_ip_be != 0 &&
+                            ParseLinuxIpv4StringToBe(peer_virtual_ip, &peer_virtual_ip_be)) {
+                            std::vector<uint8_t> probe_response;
+                            if (BuildLinuxPeerDirectProbePacket(local_virtual_ip_be,
+                                                                peer_virtual_ip_be,
+                                                                kPeerDirectProbeResponse,
+                                                                &probe_response)) {
+                                UdpEndpoint reply_endpoint;
+                                reply_endpoint.addr = source_addr;
+                                reply_endpoint.addr_len = source_addr_len;
+                                reply_endpoint.valid = true;
+                                SendFrameToEndpoint(reply_endpoint,
+                                                    packet_tunnel::kFrameIpv4Packet,
+                                                    probe_response.data(),
+                                                    probe_response.size(),
+                                                    NULL);
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if (!has_fresh_direct_route(peer_virtual_ip)) {
                     continue;
                 }
@@ -1305,6 +1426,8 @@ int LinuxPacketTunnelClient::RecvDatagramFrom(uint8_t* data,
 }
 
 void LinuxPacketTunnelClient::TunReadLoop() {
+    uint32_t local_virtual_ip_be = 0;
+    ParseLinuxIpv4StringToBe(virtual_ip_, &local_virtual_ip_be);
     while (!stop_requested_) {
         std::vector<uint8_t> packet;
         std::string error;
@@ -1344,35 +1467,69 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                      &peer_endpoint,
                                      &direct_path_fresh,
                                      &active_direct)) {
-                if (SendFrameToEndpoint(peer_endpoint,
-                                        packet_tunnel::kFrameIpv4Packet,
-                                        packet.data(),
-                                        packet.size(),
-                                        NULL)) {
-                    LogInfo(std::string(direct_path_fresh ? "udp tun->peer "
-                                                          : "udp tun->peer-probe ") + route_desc);
-                    if (direct_path_fresh) {
+                if (direct_path_fresh) {
+                    if (SendFrameToEndpoint(peer_endpoint,
+                                            packet_tunnel::kFrameIpv4Packet,
+                                            packet.data(),
+                                            packet.size(),
+                                            NULL)) {
+                        LogInfo("udp tun->peer " + route_desc);
                         continue;
                     }
-                    LogInfo(std::string(active_direct
-                                            ? "udp active direct stale, relay stays primary "
-                                            : "udp direct evaluation mirror relay ") + route_desc);
-                } else {
                     LinuxPeerRouteStatus failed_status = {};
                     const bool state_changed =
                         peer_link_manager_ != NULL &&
                         peer_link_manager_->RecordDirectSendFailure(dst_virtual_ip,
                                                                     0,
-                                                                    active_direct,
+                                                                    true,
                                                                     &failed_status);
-                    if (active_direct) {
-                        LogWarn("udp active direct send failed, fallback to relay " + route_desc);
-                    } else {
-                        LogInfo("udp direct probe send failed, keep relay primary " + route_desc);
-                    }
+                    LogWarn("udp active direct send failed, fallback to relay " + route_desc);
                     if (state_changed && failed_status.state == LinuxPeerRouteState::Cooldown) {
                         LogInfo("udp direct route entered cooldown peer=" +
                                 failed_status.peer_virtual_ip);
+                    }
+                } else {
+                    const unsigned long long tick = now_ms();
+                    std::map<std::string, unsigned long long>::iterator probe_it =
+                        peer_probe_send_tick_.find(dst_virtual_ip);
+                    const bool should_send_probe =
+                        probe_it == peer_probe_send_tick_.end() ||
+                        tick < probe_it->second ||
+                        (tick - probe_it->second) >= static_cast<unsigned long long>(kPeerDirectProbeIntervalMs);
+                    if (should_send_probe) {
+                        uint32_t dst_virtual_ip_be = 0;
+                        std::vector<uint8_t> probe_packet;
+                        if (ParseLinuxIpv4StringToBe(virtual_ip_, &local_virtual_ip_be) &&
+                            ParseLinuxIpv4StringToBe(dst_virtual_ip, &dst_virtual_ip_be) &&
+                            BuildLinuxPeerDirectProbePacket(local_virtual_ip_be,
+                                                            dst_virtual_ip_be,
+                                                            kPeerDirectProbeRequest,
+                                                            &probe_packet) &&
+                            SendFrameToEndpoint(peer_endpoint,
+                                                packet_tunnel::kFrameIpv4Packet,
+                                                probe_packet.data(),
+                                                probe_packet.size(),
+                                                NULL)) {
+                            peer_probe_send_tick_[dst_virtual_ip] = tick;
+                            LogInfo("udp direct probe request " + route_desc);
+                        } else {
+                            LinuxPeerRouteStatus failed_status = {};
+                            const bool state_changed =
+                                peer_link_manager_ != NULL &&
+                                peer_link_manager_->RecordDirectSendFailure(dst_virtual_ip,
+                                                                            0,
+                                                                            active_direct,
+                                                                            &failed_status);
+                            if (active_direct) {
+                                LogWarn("udp active direct probe failed, fallback to relay " + route_desc);
+                            } else {
+                                LogInfo("udp direct probe send failed, keep relay primary " + route_desc);
+                            }
+                            if (state_changed && failed_status.state == LinuxPeerRouteState::Cooldown) {
+                                LogInfo("udp direct route entered cooldown peer=" +
+                                        failed_status.peer_virtual_ip);
+                            }
+                        }
                     }
                 }
             } else {
