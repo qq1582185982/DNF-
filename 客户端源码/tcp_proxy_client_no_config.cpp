@@ -691,9 +691,9 @@ string get_local_client_id() {
     string persisted_created_at;
     if (load_persisted_client_id(&persisted_client_id, &persisted_created_at) &&
         !persisted_client_id.empty()) {
-        Logger::info("[租约] client_id source=persisted created_at=" +
-                     (persisted_created_at.empty() ? string("unknown") : persisted_created_at) +
-                     " id=" + persisted_client_id.substr(0, min<size_t>(persisted_client_id.size(), 16)));
+        Logger::debug("[租约] client_id source=persisted created_at=" +
+                      (persisted_created_at.empty() ? string("unknown") : persisted_created_at) +
+                      " id=" + persisted_client_id.substr(0, min<size_t>(persisted_client_id.size(), 16)));
         return persisted_client_id;
     }
 
@@ -712,9 +712,9 @@ string get_local_client_id() {
     if (!persist_client_identity(client_id, created_at_ms, source)) {
         Logger::warning("[租约] client_id persist failed, source=" + source);
     } else {
-        Logger::info("[租约] client_id generated source=" + source +
-                     " created_at=" + to_string(created_at_ms) +
-                     " id=" + client_id.substr(0, min<size_t>(client_id.size(), 16)));
+        Logger::debug("[租约] client_id generated source=" + source +
+                      " created_at=" + to_string(created_at_ms) +
+                      " id=" + client_id.substr(0, min<size_t>(client_id.size(), 16)));
     }
 
     return client_id;
@@ -782,9 +782,10 @@ public:
         renew_failed_ = false;
         renew_thread_ = thread(&LeaseSessionGuard::RenewLoop, this);
 
-        Logger::info("[租约] 已申请虚拟IP: " + lease.virtual_ip +
-                     " 网关=" + lease.gateway_ip +
-                     " 租期=" + to_string(lease.lease_seconds) + "秒");
+        Logger::info("[租约] 虚拟IP租约申请成功");
+        Logger::debug("[租约] 已申请虚拟IP: " + lease.virtual_ip +
+                      " 网关=" + lease.gateway_ip +
+                      " 租期=" + to_string(lease.lease_seconds) + "秒");
         return true;
     }
 
@@ -1132,7 +1133,9 @@ int main(int argc, char* argv[]) {
     }
 
     cout << "✓ API配置读取成功" << endl;
-    cout << "  API地址: " << CONFIG_API_URL << ":" << CONFIG_API_PORT << endl;
+    if (Logger::is_debug_enabled()) {
+        cout << "  API地址: " << CONFIG_API_URL << ":" << CONFIG_API_PORT << endl;
+    }
     cout << endl;
 
     // ========== 步骤2: 从TCP服务器获取服务器列表 ==========
@@ -1226,10 +1229,12 @@ int main(int argc, char* argv[]) {
 
     if (worker_mode) {
         // Worker模式：使用命令行参数
-        cout << "[Worker模式] 使用命令行参数..." << endl;
-        cout << "  服务器ID: " << worker_server_id << endl;
-        cout << "  服务端虚拟IP: " << worker_game_ip << endl;
-        cout << "  隧道服务器: " << worker_tunnel_ip << ":" << worker_tunnel_port << endl;
+        if (Logger::is_debug_enabled()) {
+            cout << "[Worker模式] 使用命令行参数..." << endl;
+            cout << "  服务器ID: " << worker_server_id << endl;
+            cout << "  服务端虚拟IP: " << worker_game_ip << endl;
+            cout << "  隧道服务器: " << worker_tunnel_ip << ":" << worker_tunnel_port << endl;
+        }
         cout << endl;
 
         TUNNEL_SERVER_IP = worker_tunnel_ip;
@@ -1286,11 +1291,13 @@ int main(int argc, char* argv[]) {
 
     ip_tunnel::LeaseGrant granted_lease = lease_session.GetLease();
     cout << "✓ 租约申请成功" << endl;
-    cout << "  虚拟IP: " << granted_lease.virtual_ip << endl;
-    cout << "  网关: " << granted_lease.gateway_ip << endl;
-    cout << "  服务端虚拟IP: " << granted_lease.server_virtual_ip << endl;
-    if (!granted_lease.routes.empty()) {
-        cout << "  路由: " << granted_lease.routes[0].cidr << endl;
+    if (Logger::is_debug_enabled()) {
+        cout << "  虚拟IP: " << granted_lease.virtual_ip << endl;
+        cout << "  网关: " << granted_lease.gateway_ip << endl;
+        cout << "  服务端虚拟IP: " << granted_lease.server_virtual_ip << endl;
+        if (!granted_lease.routes.empty()) {
+            cout << "  路由: " << granted_lease.routes[0].cidr << endl;
+        }
     }
     cout << endl;
 

@@ -35,6 +35,16 @@ const int PAGE_CTRL_HEIGHT = 28;
 const int PAGE_PREV_X = 280;
 const int PAGE_INFO_X = PAGE_PREV_X + PAGE_BTN_WIDTH + 10;
 const int PAGE_NEXT_X = PAGE_INFO_X + PAGE_INFO_WIDTH + 10;
+
+bool IsDebugGuiLogEnabled() {
+    char level[16] = {};
+    DWORD len = GetEnvironmentVariableA("DNF_PROXY_LOG_LEVEL", level, static_cast<DWORD>(sizeof(level)));
+    if (len == 0 || len >= sizeof(level)) {
+        return false;
+    }
+    level[len] = '\0';
+    return _stricmp(level, "DEBUG") == 0;
+}
 }
 
 // 使用Windows API结束同名进程（避免创建控制台窗口）
@@ -821,15 +831,17 @@ bool ServerSelectorGUI::StartChildProcess(const ServerInfo& server) {
             server.tunnel_port,
             child_stop_event_name.c_str());
 
-    // 添加调试日志
-    AppendLog(L"启动命令: ");
-    int len = MultiByteToWideChar(CP_ACP, 0, cmdline, -1, NULL, 0);
-    if (len > 0) {
-        wchar_t* wcmdline = new wchar_t[len];
-        MultiByteToWideChar(CP_ACP, 0, cmdline, -1, wcmdline, len);
-        AppendLog(wcmdline);
-        AppendLog(L"\r\n\r\n");
-        delete[] wcmdline;
+    // 启动命令仅在调试模式下显示。
+    if (IsDebugGuiLogEnabled()) {
+        AppendLog(L"启动命令: ");
+        int len = MultiByteToWideChar(CP_ACP, 0, cmdline, -1, NULL, 0);
+        if (len > 0) {
+            wchar_t* wcmdline = new wchar_t[len];
+            MultiByteToWideChar(CP_ACP, 0, cmdline, -1, wcmdline, len);
+            AppendLog(wcmdline);
+            AppendLog(L"\r\n\r\n");
+            delete[] wcmdline;
+        }
     }
 
     // 启动子进程
