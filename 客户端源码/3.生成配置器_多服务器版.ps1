@@ -41,6 +41,7 @@ $stderrFile = Join-Path $env:TEMP "dnf-build-multi-server-injector.stderr.log"
 Remove-Item $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
 
 $outputExe = "DNFConfigInjector_MultiServer.exe"
+Remove-Item $outputExe -ErrorAction SilentlyContinue
 $startTime = Get-Date
 $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batchFile`"" -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
 while (-not $proc.HasExited) {
@@ -60,17 +61,13 @@ if ($stderr) { $outputParts += $stderr }
 $output = $outputParts -join [Environment]::NewLine
 Remove-Item $batchFile,$stdoutFile,$stderrFile -ErrorAction SilentlyContinue
 
-if ($exitCode -ne 0 -and -not (Test-Path $outputExe)) {
+if ($exitCode -ne 0) {
     Write-Host ""
     Write-Host "Compilation FAILED!" -ForegroundColor Red
     Write-Host ""
     Write-Host "Error output:" -ForegroundColor Yellow
     $output | ForEach-Object { Write-Host $_ }
     exit 1
-}
-
-if ($exitCode -ne 0 -and (Test-Path $outputExe)) {
-    Write-Host "Compiler returned non-zero, but output file was produced. Treating build as successful." -ForegroundColor Yellow
 }
 
 if ($output -match "warning") {

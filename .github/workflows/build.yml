@@ -1,11 +1,10 @@
 ﻿name: build
 
+run-name: build (${{ github.ref_name }} @ ${{ github.sha }})
+
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
   pull_request:
 
 jobs:
@@ -26,13 +25,24 @@ jobs:
           ./build.sh static
           file ./dnf-tunnel-server
 
+      - name: Write server build info
+        run: |
+          cat > build-info.txt <<EOF
+          ref_name=${{ github.ref_name }}
+          sha=${{ github.sha }}
+          run_number=${{ github.run_number }}
+          built_at_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          artifact=dnf-tunnel-server
+          EOF
+
       - name: Upload server artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dnf-tunnel-server-static
+          name: dnf-tunnel-server-static-${{ github.run_number }}
           path: |
             服务器源码/dnf-tunnel-server
             服务器源码/config.json
+            服务器源码/build-info.txt
 
   linux-client-build:
     name: Linux client build
@@ -51,16 +61,27 @@ jobs:
           ./build.sh static
           file ./dnf-linux-client
 
+      - name: Write linux client build info
+        run: |
+          cat > build-info.txt <<EOF
+          ref_name=${{ github.ref_name }}
+          sha=${{ github.sha }}
+          run_number=${{ github.run_number }}
+          built_at_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          artifact=dnf-linux-client
+          EOF
+
       - name: Upload linux client artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dnf-linux-client-static
+          name: dnf-linux-client-static-${{ github.run_number }}
           path: |
             linux客户端源码/dnf-linux-client
             linux客户端源码/dnf-linux-client.conf.example
             linux客户端源码/run.sh
             linux客户端源码/install.sh
             linux客户端源码/dnf-linux-client@.service
+            linux客户端源码/build-info.txt
 
   windows-client:
     name: Windows client build
@@ -105,11 +126,22 @@ jobs:
       - name: Build multi-server config injector
         run: .\build-multi-server-injector.ps1
 
+      - name: Write windows build info
+        run: |
+          @"
+          ref_name=${{ github.ref_name }}
+          sha=${{ github.sha }}
+          run_number=${{ github.run_number }}
+          built_at_utc=$((Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"))
+          artifact=dnf-windows-client
+          "@ | Set-Content -Path ".\build-info.txt" -Encoding UTF8
+
       - name: Upload windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dnf-windows-client
+          name: dnf-windows-client-${{ github.run_number }}
           path: |
             客户端源码/DNF_Proxy_Client_MultiServer_v12.4.0.exe
             客户端源码/DNFConfigInjector_MultiServer.exe
             客户端源码/embedded_client_multiserver.h
+            客户端源码/build-info.txt
