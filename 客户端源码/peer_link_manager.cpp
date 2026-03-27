@@ -8,6 +8,7 @@ namespace {
 const uint64_t kPeerDirectEligibilityStableMs = 3000;
 const uint32_t kPeerDirectEligibilitySamples = 3;
 const uint64_t kPeerDirectSampleResetMs = 8000;
+const uint64_t kPeerDirectActivationFreshMs = 5000;
 const uint32_t kPeerDirectProbeFailureThreshold = 6;
 const uint32_t kPeerDirectActiveFailureThreshold = 3;
 const uint64_t kPeerDirectRouteFreezeMs = 30000;
@@ -428,6 +429,18 @@ std::vector<PeerRouteStatus> PeerLinkManager::ExpireStalePeers(uint64_t now_ms,
     for (std::map<std::string, Entry>::iterator it = peers_.begin(); it != peers_.end(); ++it) {
         Entry& entry = it->second;
         const PeerRouteState previous_state = entry.state;
+
+        if (!entry.active_direct &&
+            entry.state == PeerRouteState::Probing &&
+            entry.last_direct_data_ms != 0 &&
+            now_ms >= entry.last_direct_data_ms &&
+            (now_ms - entry.last_direct_data_ms) <= kPeerDirectActivationFreshMs &&
+            CanActivateDirect(entry, now_ms)) {
+            entry.direct_eligible = true;
+            entry.active_direct = true;
+            entry.freeze_until_ms = now_ms + kPeerDirectRouteFreezeMs;
+            EnterState(&entry, PeerRouteState::DirectActive, now_ms);
+        }
 
         if ((entry.state == PeerRouteState::OfferReceived || entry.state == PeerRouteState::Probing) &&
             entry.last_observed_ms != 0 && now_ms > entry.last_observed_ms &&
