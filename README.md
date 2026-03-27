@@ -46,10 +46,9 @@
 │   └── Makefile                           # Makefile构建文件
 ├── 带配置的客户端源码/                      # 客户端代码和工具
 │   ├── tcp_proxy_client_no_config.cpp     # 无硬编码配置客户端
-│   ├── config_injector.cpp                # 配置注入工具源码
-│   ├── 1.编译空白客户端.ps1               # 步骤1：编译客户端
-│   ├── 2.生成客户端2进制编码.py           # 步骤2：生成客户端二进制
-│   ├── 3.生成配置器.ps1                   # 步骤3：编译配置注入工具
+│   ├── build-multi-server-client.ps1      # 多服务器客户端编译脚本
+│   ├── build-multi-server-injector.ps1    # 多服务器配置器编译脚本
+│   ├── config_injector_multiserver.cpp    # 多服务器配置注入工具源码
 │   ├── WinDivert.dll                      # WinDivert运行时
 │   ├── WinDivert64.sys                    # WinDivert驱动
 │   ├── windivert.h                        # WinDivert头文件
@@ -117,43 +116,21 @@ tail -f log/server_log_*.txt
 
 ### 客户端部署 (Windows)
 
-#### 方式一：使用配置注入工具（推荐）
+#### 当前仅保留多服务器客户端构建链路
 
-**步骤1**: 编译空白客户端
+单服务器客户端版本已移除。
+
+请使用多服务器版：
+
 ```powershell
-cd 带配置的客户端源码/
-.\1.编译空白客户端.ps1
-```
-生成 `tcp_proxy_client_blank.exe`
-
-**步骤2**: 生成客户端二进制编码
-```powershell
-python 2.生成客户端2进制编码.py
-```
-生成 `client_program_hex.txt`（客户端的十六进制编码）
-
-**步骤3**: 编译配置注入工具
-```powershell
-.\3.生成配置器.ps1
-```
-生成 `config_injector.exe`
-
-**步骤4**: 注入配置生成最终客户端
-```powershell
-# 语法：config_injector.exe <空白客户端> <游戏服务器IP> <隧道服务器IP> <隧道端口> <输出文件>
-
-# IPv4示例
-.\config_injector.exe tcp_proxy_client_blank.exe 192.168.1.100 10.0.0.50 33223 "DNF代理客户端-服务器1.exe"
-
-# IPv6示例 🆕
-.\config_injector.exe tcp_proxy_client_blank.exe 2001:db8::100 2001:db8::50 33224 "DNF代理客户端-IPv6.exe"
-
-# 域名示例 🆕
-.\config_injector.exe tcp_proxy_client_blank.exe game.local tunnel.example.com 33225 "DNF代理客户端-域名.exe"
+cd 客户端源码/
+.\build-multi-server-client.ps1
+.\build-multi-server-injector.ps1
 ```
 
-#### 方式二：直接修改源码编译
-修改 `tcp_proxy_client_no_config.cpp` 中的配置，然后编译。
+输出文件：
+- `DNF_Proxy_Client_MultiServer_v12.4.0.exe`
+- `DNFConfigInjector_MultiServer.exe`
 
 #### 运行客户端
 1. **必须以管理员权限运行**（右键→以管理员身份运行）
@@ -194,11 +171,11 @@ DNF游戏代理客户端 v5.0 (C++ 版本 - TCP)
   "listen_port": 33223
 }
 
-// 客户端配置（通过config_injector注入）
+// 客户端配置（通过 DNFConfigInjector_MultiServer.exe 注入）
 {
-  "game_server_ip": "2001:db8::100",
-  "tunnel_server_ip": "2001:db8::50",
-  "tunnel_port": 33223
+  "config_api_url": "config.example.com",
+  "config_api_port": 35000,
+  "version_name": "多服务器版"
 }
 ```
 
@@ -217,11 +194,11 @@ DNF游戏代理客户端 v5.0 (C++ 版本 - TCP)
   "listen_port": 33223
 }
 
-// 客户端配置
+// 客户端配置（通过 DNFConfigInjector_MultiServer.exe 注入）
 {
-  "game_server_ip": "game.local",           // 游戏服务器域名
-  "tunnel_server_ip": "tunnel.example.com", // 隧道服务器域名
-  "tunnel_port": 33223
+  "config_api_url": "config.example.com",  // 配置接口域名
+  "config_api_port": 35000,
+  "version_name": "多服务器版"
 }
 ```
 
@@ -279,10 +256,10 @@ DNF游戏代理客户端 v5.0 (C++ 版本 - TCP)
 
 ### 客户端配置
 
-客户端配置通过 `config_injector.exe` 注入到可执行文件末尾：
-- **game_server_ip**: 游戏服务器IP（客户端本地伪装的IP）
-- **tunnel_server_ip**: 隧道服务器公网IP
-- **tunnel_port**: 隧道服务器端口（对应 config.json 中的 listen_ports）
+客户端当前统一通过多服务器配置器注入 API 配置：
+- **config_api_url**: 配置接口地址
+- **config_api_port**: 配置接口端口
+- **version_name**: 客户端显示版本名
 
 ## 📊 日志系统
 
@@ -373,7 +350,7 @@ if (errno == EPIPE) {
 
 ```
 [EXE文件内容]
-[CONFIG_START]{"game_server_ip":"192.168.1.100","tunnel_server_ip":"10.0.0.50","tunnel_port":33223}[CONFIG_END]
+[CONFIG_START]{"config_api_url":"config.example.com","config_api_port":35000,"version_name":"多服务器版"}[CONFIG_END]
 ```
 
 客户端启动时：
