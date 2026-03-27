@@ -1296,6 +1296,15 @@ private:
               allow_peer_direct(true) {}
     };
 
+    struct PacketTunnelSessionRemoval {
+        shared_ptr<PacketTunnelSession> session;
+        string reason;
+
+        PacketTunnelSessionRemoval(const shared_ptr<PacketTunnelSession>& s,
+                                   const string& why)
+            : session(s), reason(why) {}
+    };
+
     ServerConfig config;
     string server_name;
     PeerCoord peer_coord_;
@@ -1393,6 +1402,43 @@ private:
 
     static bool session_allows_peer_direct(const shared_ptr<PacketTunnelSession>& session) {
         return session && session->allow_peer_direct;
+    }
+
+    bool session_has_active_lease(const shared_ptr<PacketTunnelSession>& session,
+                                  IPPoolManager::LeaseRecord* out_record = nullptr,
+                                  string* error = nullptr) const {
+        if (!session) {
+            if (error) *error = "null session";
+            return false;
+        }
+        if (session->session_uuid.empty()) {
+            if (error) *error = "missing session_uuid";
+            return false;
+        }
+
+        IPPoolManager::LeaseRecord active_lease;
+        string lease_error;
+        if (!query_active_tcp_config_lease(to_string(config.listen_port),
+                                           session->session_uuid,
+                                           &active_lease,
+                                           &lease_error)) {
+            if (error) *error = lease_error.empty() ? "lease not found" : lease_error;
+            return false;
+        }
+
+        const string virtual_ip = ipv4_be_to_string(session->virtual_ip_be);
+        if (active_lease.virtual_ip != virtual_ip) {
+            if (error) {
+                *error = "lease virtual_ip mismatch: lease=" + active_lease.virtual_ip +
+                         " session=" + virtual_ip;
+            }
+            return false;
+        }
+
+        if (out_record) {
+            *out_record = active_lease;
+        }
+        return true;
     }
 
     bool send_peer_disable_notice(const shared_ptr<PacketTunnelSession>& session,
@@ -1576,20 +1622,35 @@ private:
         }
     }
 
-    vector<shared_ptr<PacketTunnelSession>> cleanup_idle_packet_tunnel_sessions(uint64_t now_ms) {
-        vector<shared_ptr<PacketTunnelSession>> removed;
+    vector<PacketTunnelSessionRemoval> cleanup_idle_packet_tunnel_sessions(uint64_t now_ms) {
+        vector<PacketTunnelSessionRemoval> removed;
         lock_guard<mutex> lock(packet_tunnel_mutex);
 
         for (map<uint32_t, shared_ptr<PacketTunnelSession>>::iterator it = packet_tunnel_sessions.begin();
              it != packet_tunnel_sessions.end();) {
             const shared_ptr<PacketTunnelSession>& session = it->second;
             bool should_remove = !session || !session->active;
+            string remove_reason = should_remove ? "inactive" : "";
             if (!should_remove && session->use_udp) {
                 const uint64_t last_activity_ms = session->last_activity_ms.load();
                 should_remove =
                     last_activity_ms == 0 ||
                     now_ms < last_activity_ms ||
                     (now_ms - last_activity_ms) >= kPacketTunnelUdpIdleTimeoutMs;
+                if (should_remove) {
+                    remove_reason = "idle_timeout";
+                }
+            }
+
+            if (!should_remove && session) {
+                string lease_error;
+                if (!session_has_active_lease(session, nullptr, &lease_error)) {
+                    should_remove = true;
+                    remove_reason = "inactive_lease";
+                    if (!lease_error.empty()) {
+                        remove_reason += " (" + lease_error + ")";
+                    }
+                }
             }
 
             if (!should_remove) {
@@ -1600,7 +1661,7 @@ private:
             shared_ptr<PacketTunnelSession> removed_session = session;
             ++it;
             if (session) {
-                removed.push_back(session);
+                removed.push_back(PacketTunnelSessionRemoval(session, remove_reason));
                 erase_packet_tunnel_session_locked(removed_session);
             }
         }
@@ -1623,17 +1684,29 @@ private:
             return;
         }
 
-        vector<shared_ptr<PacketTunnelSession>> expired_sessions =
+        vector<PacketTunnelSessionRemoval> expired_sessions =
             cleanup_idle_packet_tunnel_sessions(monotonic_millis());
         for (size_t i = 0; i < expired_sessions.size(); ++i) {
-            Logger::info("[" + server_name + "|IP Tunnel] drop stale UDP session: virtual_ip=" +
-                         ipv4_be_to_string(expired_sessions[i]->virtual_ip_be) +
-                         " endpoint=" + expired_sessions[i]->client_str);
+            Logger::info("[" + server_name + "|IP Tunnel] drop invalid UDP session: virtual_ip=" +
+                         ipv4_be_to_string(expired_sessions[i].session->virtual_ip_be) +
+                         " endpoint=" + expired_sessions[i].session->client_str +
+                         " reason=" + expired_sessions[i].reason);
+        }
+
+        const string local_virtual_ip = ipv4_be_to_string(session->virtual_ip_be);
+        if (!session->active) {
+            return;
+        }
+
+        string session_lease_error;
+        if (!session_has_active_lease(session, nullptr, &session_lease_error)) {
+            Logger::debug("[" + server_name + "|IP Tunnel] skip peer offer for session without active lease: " +
+                          local_virtual_ip + " reason=" + session_lease_error);
+            return;
         }
 
         log_expired_peer_coord_states(&peer_coord_, server_name);
 
-        const string local_virtual_ip = ipv4_be_to_string(session->virtual_ip_be);
         uint64_t local_version = peer_coord_.GetEndpointVersion(local_virtual_ip);
         if (force_new_version || local_version == 0) {
             local_version = peer_coord_.BumpEndpointVersion(local_virtual_ip);
@@ -2201,12 +2274,13 @@ private:
                     break;
                 }
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    vector<shared_ptr<PacketTunnelSession>> expired_sessions =
+                    vector<PacketTunnelSessionRemoval> expired_sessions =
                         cleanup_idle_packet_tunnel_sessions(monotonic_millis());
                     for (size_t i = 0; i < expired_sessions.size(); ++i) {
-                        Logger::info("[" + server_name + "|IP Tunnel] drop stale UDP session: virtual_ip=" +
-                                     ipv4_be_to_string(expired_sessions[i]->virtual_ip_be) +
-                                     " endpoint=" + expired_sessions[i]->client_str);
+                        Logger::info("[" + server_name + "|IP Tunnel] drop invalid UDP session: virtual_ip=" +
+                                     ipv4_be_to_string(expired_sessions[i].session->virtual_ip_be) +
+                                     " endpoint=" + expired_sessions[i].session->client_str +
+                                     " reason=" + expired_sessions[i].reason);
                     }
                     continue;
                 }
