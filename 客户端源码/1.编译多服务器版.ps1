@@ -1,6 +1,9 @@
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\Resolve-VsVcvars.ps1"
 
+Push-Location $PSScriptRoot
+try {
+
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "Compiling DNF Proxy Client v12.4.0" -ForegroundColor Cyan
 Write-Host "Multi-Server Version with GUI Selector" -ForegroundColor Cyan
@@ -8,7 +11,7 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
 
 Write-Host "[1/4] Preparing embedded Wintun runtime..." -ForegroundColor Yellow
-python generate_embedded_wintun.py
+python (Join-Path $PSScriptRoot "generate_embedded_wintun.py")
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "Failed to prepare embedded Wintun runtime!" -ForegroundColor Red
@@ -58,7 +61,7 @@ Write-Host ""
 $outputExe = "DNF_Proxy_Client_MultiServer_v12.4.0.exe"
 Remove-Item $outputExe -ErrorAction SilentlyContinue
 $startTime = Get-Date
-$proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batchFile`"" -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+$proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batchFile`"" -WorkingDirectory $PSScriptRoot -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
 while (-not $proc.HasExited) {
     Start-Sleep -Seconds 15
     $proc.Refresh()
@@ -67,7 +70,9 @@ while (-not $proc.HasExited) {
         Write-Host ("  - Still compiling... {0}s" -f $elapsed) -ForegroundColor DarkGray
     }
 }
-$exitCode = $proc.ExitCode
+$proc.WaitForExit()
+$proc.Refresh()
+$exitCode = if ($null -eq $proc.ExitCode) { 0 } else { [int]$proc.ExitCode }
 $stdout = if (Test-Path $stdoutFile) { Get-Content $stdoutFile -Raw } else { "" }
 $stderr = if (Test-Path $stderrFile) { Get-Content $stderrFile -Raw } else { "" }
 $outputParts = @()
@@ -128,4 +133,8 @@ if (Test-Path $outputExe) {
 } else {
     Write-Host "ERROR: Output file not found!" -ForegroundColor Red
     exit 1
+}
+}
+finally {
+    Pop-Location
 }

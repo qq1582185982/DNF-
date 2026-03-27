@@ -1,6 +1,9 @@
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\Resolve-VsVcvars.ps1"
 
+Push-Location $PSScriptRoot
+try {
+
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "Compiling Multi-Server Config Injector" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
@@ -43,7 +46,7 @@ Remove-Item $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
 $outputExe = "DNFConfigInjector_MultiServer.exe"
 Remove-Item $outputExe -ErrorAction SilentlyContinue
 $startTime = Get-Date
-$proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batchFile`"" -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+$proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batchFile`"" -WorkingDirectory $PSScriptRoot -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
 while (-not $proc.HasExited) {
     Start-Sleep -Seconds 15
     $proc.Refresh()
@@ -52,7 +55,9 @@ while (-not $proc.HasExited) {
         Write-Host ("  - Still compiling... {0}s" -f $elapsed) -ForegroundColor DarkGray
     }
 }
-$exitCode = $proc.ExitCode
+$proc.WaitForExit()
+$proc.Refresh()
+$exitCode = if ($null -eq $proc.ExitCode) { 0 } else { [int]$proc.ExitCode }
 $stdout = if (Test-Path $stdoutFile) { Get-Content $stdoutFile -Raw } else { "" }
 $stderr = if (Test-Path $stderrFile) { Get-Content $stderrFile -Raw } else { "" }
 $outputParts = @()
@@ -96,4 +101,8 @@ if (Test-Path $outputExe) {
 } else {
     Write-Host "ERROR: Output file not found!" -ForegroundColor Red
     exit 1
+}
+}
+finally {
+    Pop-Location
 }
