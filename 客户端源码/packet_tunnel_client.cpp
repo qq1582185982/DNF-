@@ -37,6 +37,7 @@ const DWORD kPeerDirectDataTimeoutMs = 5000;
 const DWORD kPeerSnapshotLogIntervalMs = 15000;
 const DWORD kPeerRouteDebugLogIntervalMs = 2000;
 const DWORD kSocketReadTimeoutMs = 1000;
+const DWORD kPhysicalDnsQueryTimeoutMs = 1500;
 const DWORD kWintunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
 
@@ -429,6 +430,12 @@ bool SockaddrEquals(const sockaddr_storage& left,
                     const sockaddr_storage& right,
                     int right_len);
 
+bool TryFindBindAddressForInterface(ULONG interface_index,
+                                    int family,
+                                    sockaddr_storage* bind_addr,
+                                    int* bind_addr_len,
+                                    std::string* adapter_name);
+
 bool BuildEndpointForSocketFamily(const sockaddr* source_addr,
                                   int source_addr_len,
                                   int socket_family,
@@ -808,6 +815,309 @@ const char* DnsRecordTypeName(WORD type) {
     }
 }
 
+uint16_t ReadDnsUInt16(const uint8_t* data) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(data[0]) << 8) |
+                                 static_cast<uint16_t>(data[1]));
+}
+
+void AppendDnsUInt16(uint16_t value, std::vector<uint8_t>* out) {
+    if (out == NULL) {
+        return;
+    }
+    out->push_back(static_cast<uint8_t>((value >> 8) & 0xff));
+    out->push_back(static_cast<uint8_t>(value & 0xff));
+}
+
+bool AppendDnsQueryName(const std::string& host_name, std::vector<uint8_t>* out) {
+    if (out == NULL || host_name.empty()) {
+        return false;
+    }
+
+    size_t start = 0;
+    while (start < host_name.size()) {
+        size_t end = host_name.find('.', start);
+        if (end == std::string::npos) {
+            end = host_name.size();
+        }
+
+        const size_t label_len = end - start;
+        if (label_len == 0 || label_len > 63) {
+            return false;
+        }
+
+        out->push_back(static_cast<uint8_t>(label_len));
+        out->insert(out->end(),
+                    host_name.begin() + static_cast<std::ptrdiff_t>(start),
+                    host_name.begin() + static_cast<std::ptrdiff_t>(end));
+        start = end + 1;
+    }
+
+    out->push_back(0);
+    return true;
+}
+
+bool SkipDnsName(const uint8_t* packet, size_t packet_len, size_t* offset) {
+    if (packet == NULL || offset == NULL || *offset >= packet_len) {
+        return false;
+    }
+
+    size_t pos = *offset;
+    int steps = 0;
+    while (pos < packet_len && steps++ < 128) {
+        const uint8_t label = packet[pos];
+        if (label == 0) {
+            *offset = pos + 1;
+            return true;
+        }
+        if ((label & 0xc0) == 0xc0) {
+            if (pos + 1 >= packet_len) {
+                return false;
+            }
+            *offset = pos + 2;
+            return true;
+        }
+        if ((label & 0xc0) != 0x00) {
+            return false;
+        }
+
+        const size_t label_len = static_cast<size_t>(label);
+        ++pos;
+        if (pos + label_len > packet_len) {
+            return false;
+        }
+        pos += label_len;
+    }
+
+    return false;
+}
+
+bool ParseDnsResponseRecords(const uint8_t* packet,
+                             size_t packet_len,
+                             uint16_t expected_txid,
+                             uint16_t tunnel_port,
+                             size_t* next_order,
+                             std::vector<RelayEndpointCandidate>* out_candidates,
+                             size_t* out_added) {
+    if (packet == NULL || packet_len < 12 || next_order == NULL || out_candidates == NULL) {
+        return false;
+    }
+
+    if (ReadDnsUInt16(packet) != expected_txid) {
+        return false;
+    }
+
+    const uint16_t flags = ReadDnsUInt16(packet + 2);
+    if ((flags & 0x8000u) == 0) {
+        return false;
+    }
+    if ((flags & 0x000fu) != 0) {
+        return false;
+    }
+
+    const uint16_t question_count = ReadDnsUInt16(packet + 4);
+    const uint16_t answer_count = ReadDnsUInt16(packet + 6);
+    const uint16_t authority_count = ReadDnsUInt16(packet + 8);
+    const uint16_t additional_count = ReadDnsUInt16(packet + 10);
+
+    size_t offset = 12;
+    for (uint16_t i = 0; i < question_count; ++i) {
+        if (!SkipDnsName(packet, packet_len, &offset) || offset + 4 > packet_len) {
+            return false;
+        }
+        offset += 4;
+    }
+
+    size_t added = 0;
+    const uint32_t total_records =
+        static_cast<uint32_t>(answer_count) +
+        static_cast<uint32_t>(authority_count) +
+        static_cast<uint32_t>(additional_count);
+    for (uint32_t i = 0; i < total_records; ++i) {
+        if (!SkipDnsName(packet, packet_len, &offset) || offset + 10 > packet_len) {
+            return false;
+        }
+
+        const uint16_t record_type = ReadDnsUInt16(packet + offset);
+        const uint16_t record_class = ReadDnsUInt16(packet + offset + 2);
+        const uint16_t record_len = ReadDnsUInt16(packet + offset + 8);
+        offset += 10;
+        if (offset + record_len > packet_len) {
+            return false;
+        }
+
+        if (record_class == 1 && record_type == DNS_TYPE_A && record_len == 4) {
+            sockaddr_in addr4 = {};
+            addr4.sin_family = AF_INET;
+            addr4.sin_port = htons(tunnel_port);
+            memcpy(&addr4.sin_addr, packet + offset, 4);
+            if (AppendRelayEndpointCandidate(reinterpret_cast<const sockaddr*>(&addr4),
+                                             sizeof(addr4),
+                                             AF_INET,
+                                             *next_order,
+                                             out_candidates)) {
+                ++(*next_order);
+                ++added;
+            }
+        } else if (record_class == 1 && record_type == DNS_TYPE_AAAA && record_len == 16) {
+            sockaddr_in6 addr6 = {};
+            addr6.sin6_family = AF_INET6;
+            addr6.sin6_port = htons(tunnel_port);
+            memcpy(&addr6.sin6_addr, packet + offset, 16);
+            if (AppendRelayEndpointCandidate(reinterpret_cast<const sockaddr*>(&addr6),
+                                             sizeof(addr6),
+                                             AF_INET6,
+                                             *next_order,
+                                             out_candidates)) {
+                ++(*next_order);
+                ++added;
+            }
+        }
+
+        offset += record_len;
+    }
+
+    if (out_added != NULL) {
+        *out_added = added;
+    }
+    return true;
+}
+
+bool QueryRelayEndpointsViaSingleDnsServer(const std::string& host_name,
+                                           uint16_t tunnel_port,
+                                           const PhysicalDnsServer& dns_server,
+                                           WORD query_type,
+                                           size_t* next_order,
+                                           std::vector<RelayEndpointCandidate>* out_candidates) {
+    if (next_order == NULL || out_candidates == NULL) {
+        return false;
+    }
+
+    sockaddr_storage bind_addr = {};
+    int bind_addr_len = 0;
+    std::string bind_adapter_name;
+    if (!TryFindBindAddressForInterface(dns_server.interface_index,
+                                        dns_server.server_addr.ss_family,
+                                        &bind_addr,
+                                        &bind_addr_len,
+                                        &bind_adapter_name)) {
+        PacketTunnelDebugLog("physical dns bind address not found: server=" +
+                             SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
+                             " if=" + std::to_string(dns_server.interface_index));
+        return false;
+    }
+
+    SOCKET sock = socket(dns_server.server_addr.ss_family, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == INVALID_SOCKET) {
+        PacketTunnelDebugLog("physical dns socket create failed: server=" +
+                             SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
+                             " wsa=" + std::to_string(WSAGetLastError()));
+        return false;
+    }
+
+    DWORD timeout = kPhysicalDnsQueryTimeoutMs;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+
+    BOOL disable_udp_connreset = FALSE;
+    DWORD bytes_returned = 0;
+    WSAIoctl(sock,
+             SIO_UDP_CONNRESET,
+             &disable_udp_connreset,
+             sizeof(disable_udp_connreset),
+             NULL,
+             0,
+             &bytes_returned,
+             NULL,
+             NULL);
+
+    bool success = false;
+    do {
+        if (bind(sock, reinterpret_cast<const sockaddr*>(&bind_addr), bind_addr_len) != 0) {
+            PacketTunnelDebugLog("physical dns bind failed: server=" +
+                                 SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
+                                 " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
+                                 " wsa=" + std::to_string(WSAGetLastError()));
+            break;
+        }
+
+        if (connect(sock,
+                    reinterpret_cast<const sockaddr*>(&dns_server.server_addr),
+                    dns_server.server_addr_len) != 0) {
+            PacketTunnelDebugLog("physical dns connect failed: server=" +
+                                 SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
+                                 " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
+                                 " wsa=" + std::to_string(WSAGetLastError()));
+            break;
+        }
+
+        const uint16_t txid =
+            static_cast<uint16_t>((GetTickCount64() + (*next_order * 97) + query_type) & 0xffffu);
+        std::vector<uint8_t> query;
+        query.reserve(512);
+        AppendDnsUInt16(txid, &query);
+        AppendDnsUInt16(0x0100u, &query);
+        AppendDnsUInt16(1, &query);
+        AppendDnsUInt16(0, &query);
+        AppendDnsUInt16(0, &query);
+        AppendDnsUInt16(0, &query);
+        if (!AppendDnsQueryName(host_name, &query)) {
+            break;
+        }
+        AppendDnsUInt16(query_type, &query);
+        AppendDnsUInt16(1, &query);
+
+        const int sent = send(sock,
+                              reinterpret_cast<const char*>(query.data()),
+                              static_cast<int>(query.size()),
+                              0);
+        if (sent != static_cast<int>(query.size())) {
+            PacketTunnelDebugLog("physical dns send failed: server=" +
+                                 SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
+                                 " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
+                                 " type=" + DnsRecordTypeName(query_type) +
+                                 " wsa=" + std::to_string(WSAGetLastError()));
+            break;
+        }
+
+        uint8_t response[2048] = {};
+        const int received = recv(sock, reinterpret_cast<char*>(response), sizeof(response), 0);
+        if (received <= 0) {
+            PacketTunnelDebugLog("physical dns recv failed: server=" +
+                                 SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
+                                 " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
+                                 " type=" + DnsRecordTypeName(query_type) +
+                                 " wsa=" + std::to_string(WSAGetLastError()));
+            break;
+        }
+
+        size_t added = 0;
+        if (!ParseDnsResponseRecords(response,
+                                     static_cast<size_t>(received),
+                                     txid,
+                                     tunnel_port,
+                                     next_order,
+                                     out_candidates,
+                                     &added)) {
+            PacketTunnelDebugLog("physical dns parse failed: server=" +
+                                 SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
+                                 " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
+                                 " type=" + DnsRecordTypeName(query_type) +
+                                 " bytes=" + std::to_string(received));
+            break;
+        }
+
+        PacketTunnelDebugLog("physical dns query result: server=" +
+                             SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
+                             " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
+                             " type=" + DnsRecordTypeName(query_type) +
+                             " added=" + std::to_string(added));
+        success = added > 0;
+    } while (false);
+
+    closesocket(sock);
+    return success;
+}
+
 bool QueryRelayEndpointsViaPhysicalDns(const std::string& host_name,
                                        uint16_t tunnel_port,
                                        const std::vector<PhysicalDnsServer>& dns_servers,
@@ -816,90 +1126,20 @@ bool QueryRelayEndpointsViaPhysicalDns(const std::string& host_name,
         return false;
     }
 
-    const std::wstring query_name = Utf8ToWideString(host_name);
-    if (query_name.empty()) {
-        return false;
-    }
-
     bool added_any = false;
     size_t next_order = out_candidates->size();
     for (size_t server_index = 0; server_index < dns_servers.size(); ++server_index) {
         const PhysicalDnsServer& dns_server = dns_servers[server_index];
 
-        std::vector<unsigned char> server_list_storage(sizeof(DNS_ADDR_ARRAY), 0);
-        DNS_ADDR_ARRAY* server_list =
-            reinterpret_cast<DNS_ADDR_ARRAY*>(&server_list_storage[0]);
-        server_list->MaxCount = 1;
-        server_list->AddrCount = 1;
-        server_list->Family = static_cast<WORD>(dns_server.server_addr.ss_family);
-        memcpy(server_list->AddrArray[0].MaxSa,
-               &dns_server.server_addr,
-               static_cast<size_t>(dns_server.server_addr_len));
-
         for (int type_index = 0; type_index < 2; ++type_index) {
             const WORD query_type = (type_index == 0) ? DNS_TYPE_AAAA : DNS_TYPE_A;
-            DNS_QUERY_REQUEST request = {};
-            DNS_QUERY_RESULT results = {};
-            request.Version = DNS_QUERY_REQUEST_VERSION1;
-            request.QueryName = query_name.c_str();
-            request.QueryType = query_type;
-            request.QueryOptions = DNS_QUERY_BYPASS_CACHE | DNS_QUERY_NO_HOSTS_FILE;
-            request.pDnsServerList = server_list;
-            request.InterfaceIndex = dns_server.interface_index;
-
-            results.Version = DNS_QUERY_RESULTS_VERSION1;
-            DNS_STATUS status = DnsQueryEx(&request, &results, NULL);
-            if (status == ERROR_SUCCESS) {
-                status = results.QueryStatus;
-            }
-
-            if (status != ERROR_SUCCESS &&
-                status != DNS_INFO_NO_RECORDS &&
-                status != DNS_ERROR_RCODE_NAME_ERROR) {
-                PacketTunnelDebugLog("physical dns query failed: server=" +
-                                     SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
-                                     " if=" + std::to_string(dns_server.interface_index) +
-                                     " type=" + DnsRecordTypeName(query_type) +
-                                     " status=" + std::to_string(static_cast<unsigned long>(status)));
-            }
-
-            if (status == ERROR_SUCCESS && results.pQueryRecords != NULL) {
-                for (PDNS_RECORD record = results.pQueryRecords; record != NULL; record = record->pNext) {
-                    if (record->wType == DNS_TYPE_A) {
-                        sockaddr_in addr4 = {};
-                        addr4.sin_family = AF_INET;
-                        addr4.sin_port = htons(tunnel_port);
-                        addr4.sin_addr.S_un.S_addr = record->Data.A.IpAddress;
-                        if (AppendRelayEndpointCandidate(reinterpret_cast<const sockaddr*>(&addr4),
-                                                         sizeof(addr4),
-                                                         AF_INET,
-                                                         next_order,
-                                                         out_candidates)) {
-                            ++next_order;
-                            added_any = true;
-                        }
-                    } else if (record->wType == DNS_TYPE_AAAA) {
-                        sockaddr_in6 addr6 = {};
-                        addr6.sin6_family = AF_INET6;
-                        addr6.sin6_port = htons(tunnel_port);
-                        memcpy(&addr6.sin6_addr,
-                               &record->Data.AAAA.Ip6Address,
-                               sizeof(addr6.sin6_addr));
-                        if (AppendRelayEndpointCandidate(reinterpret_cast<const sockaddr*>(&addr6),
-                                                         sizeof(addr6),
-                                                         AF_INET6,
-                                                         next_order,
-                                                         out_candidates)) {
-                            ++next_order;
-                            added_any = true;
-                        }
-                    }
-                }
-            }
-
-            if (results.pQueryRecords != NULL) {
-                DnsRecordListFree(results.pQueryRecords, DnsFreeRecordList);
-                results.pQueryRecords = NULL;
+            if (QueryRelayEndpointsViaSingleDnsServer(host_name,
+                                                      tunnel_port,
+                                                      dns_server,
+                                                      query_type,
+                                                      &next_order,
+                                                      out_candidates)) {
+                added_any = true;
             }
         }
 
@@ -941,6 +1181,63 @@ bool TryResolveBindAdapter(const sockaddr_storage& addr,
             }
             if (preferred != NULL) {
                 *preferred = IsPreferredPhysicalAdapter(adapter);
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool TryFindBindAddressForInterface(ULONG interface_index,
+                                    int family,
+                                    sockaddr_storage* bind_addr,
+                                    int* bind_addr_len,
+                                    std::string* adapter_name) {
+    if (bind_addr == NULL || bind_addr_len == NULL) {
+        return false;
+    }
+
+    std::vector<unsigned char> buffer;
+    IP_ADAPTER_ADDRESSES* adapters = NULL;
+    if (!LoadAdapterAddresses(static_cast<ULONG>(family), &buffer, &adapters)) {
+        return false;
+    }
+
+    for (IP_ADAPTER_ADDRESSES* adapter = adapters; adapter != NULL; adapter = adapter->Next) {
+        if (!IsPreferredPhysicalAdapter(adapter)) {
+            continue;
+        }
+
+        const ULONG adapter_index = (family == AF_INET6 && adapter->Ipv6IfIndex != 0)
+            ? adapter->Ipv6IfIndex
+            : adapter->IfIndex;
+        if (adapter_index != interface_index) {
+            continue;
+        }
+
+        for (IP_ADAPTER_UNICAST_ADDRESS* unicast = adapter->FirstUnicastAddress;
+             unicast != NULL;
+             unicast = unicast->Next) {
+            if (unicast->Address.lpSockaddr == NULL ||
+                unicast->Address.lpSockaddr->sa_family != family ||
+                !IsUsableBindAddress(unicast->Address.lpSockaddr)) {
+                continue;
+            }
+
+            if (family == AF_INET) {
+                *bind_addr_len = sizeof(sockaddr_in);
+                memcpy(bind_addr, unicast->Address.lpSockaddr, sizeof(sockaddr_in));
+            } else if (family == AF_INET6) {
+                *bind_addr_len = sizeof(sockaddr_in6);
+                memcpy(bind_addr, unicast->Address.lpSockaddr, sizeof(sockaddr_in6));
+            } else {
+                continue;
+            }
+
+            ClearSockaddrPort(bind_addr);
+            if (adapter_name != NULL) {
+                *adapter_name = AdapterDisplayName(adapter);
             }
             return true;
         }
