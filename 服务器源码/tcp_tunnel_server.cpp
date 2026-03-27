@@ -1514,86 +1514,6 @@ private:
                       " len=" + to_string(payload_len));
     }
 
-    bool is_short_sidecar_udp_trace(uint16_t src_port, uint16_t dst_port, size_t packet_len) const {
-        if (packet_len > 96) {
-            return false;
-        }
-
-        const bool client_to_backend =
-            src_port == 5063 && (dst_port == 2311 || dst_port == 2312 || dst_port == 2313);
-        const bool backend_to_client =
-            dst_port == 5063 && (src_port == 2311 || src_port == 2312 || src_port == 2313);
-        return client_to_backend || backend_to_client;
-    }
-
-    static bool ipv4_udp_payload_view(const uint8_t* packet,
-                                      size_t packet_len,
-                                      const uint8_t** out_payload,
-                                      size_t* out_payload_len) {
-        if (out_payload == nullptr || out_payload_len == nullptr) {
-            return false;
-        }
-        *out_payload = nullptr;
-        *out_payload_len = 0;
-        if (packet == nullptr || packet_len < 28) {
-            return false;
-        }
-        if (((packet[0] >> 4) & 0x0F) != 4 || packet[9] != IPPROTO_UDP) {
-            return false;
-        }
-
-        const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
-        if (ip_header_len < 20 || packet_len < ip_header_len + 8) {
-            return false;
-        }
-
-        *out_payload = packet + ip_header_len + 8;
-        *out_payload_len = packet_len - (ip_header_len + 8);
-        return true;
-    }
-
-    static string format_hex_preview(const uint8_t* data, size_t len, size_t max_bytes = 48) {
-        if (data == nullptr || len == 0) {
-            return "(empty)";
-        }
-
-        const size_t preview_len = min(len, max_bytes);
-        ostringstream oss;
-        oss << hex << setfill('0');
-        for (size_t i = 0; i < preview_len; ++i) {
-            if (i > 0) {
-                oss << ' ';
-            }
-            oss << setw(2) << static_cast<unsigned int>(data[i]);
-        }
-        if (preview_len < len) {
-            oss << " ...";
-        }
-        return oss.str();
-    }
-
-    void maybe_log_short_sidecar_udp_payload(const string& direction,
-                                             const string& session_uuid,
-                                             const uint8_t* packet,
-                                             size_t packet_len,
-                                             uint16_t src_port,
-                                             uint16_t dst_port) const {
-        if (!is_short_sidecar_udp_trace(src_port, dst_port, packet_len)) {
-            return;
-        }
-
-        const uint8_t* udp_payload = nullptr;
-        size_t udp_payload_len = 0;
-        if (!ipv4_udp_payload_view(packet, packet_len, &udp_payload, &udp_payload_len)) {
-            return;
-        }
-
-        Logger::debug("[IP Tunnel|" + session_uuid + "] short UDP payload " + direction +
-                      " udp=" + to_string(src_port) + "->" + to_string(dst_port) +
-                      " payload_len=" + to_string(udp_payload_len) +
-                      " hex=" + format_hex_preview(udp_payload, udp_payload_len));
-    }
-
     const uint64_t kPeerOfferTimeoutMs = 9000;
     const uint64_t kPeerActiveTimeoutMs = 15000;
     const uint64_t kPacketTunnelUdpIdleTimeoutMs = 30000;
@@ -1723,27 +1643,17 @@ private:
         if (payload_len >= 20) {
             uint8_t protocol = payload[9];
             string extra;
-            uint16_t udp_src_port = 0;
-            uint16_t udp_dst_port = 0;
-            bool has_udp_ports = false;
             if (protocol == IPPROTO_UDP) {
-                if (ipv4_udp_ports(payload, payload_len, &udp_src_port, &udp_dst_port)) {
-                    has_udp_ports = true;
-                    extra = " udp=" + to_string(udp_src_port) + "->" + to_string(udp_dst_port);
+                uint16_t src_port = 0;
+                uint16_t dst_port = 0;
+                if (ipv4_udp_ports(payload, payload_len, &src_port, &dst_port)) {
+                    extra = " udp=" + to_string(src_port) + "->" + to_string(dst_port);
                 }
             }
             Logger::debug("[IP Tunnel|" + session_uuid + "] client->local-sidecar src=" +
                           ipv4_be_to_string(src_ip_be) + " dst=" + ipv4_be_to_string(dst_ip_be) +
                           " proto=" + to_string((int)protocol) + extra +
                           " len=" + to_string(payload_len));
-            if (protocol == IPPROTO_UDP && has_udp_ports) {
-                maybe_log_short_sidecar_udp_payload("client->local-sidecar",
-                                                    session_uuid,
-                                                    payload,
-                                                    payload_len,
-                                                    udp_src_port,
-                                                    udp_dst_port);
-            }
         } else if (session) {
             (void)session;
         }
@@ -2433,14 +2343,6 @@ private:
                               ipv4_be_to_string(src_ip_be) + " dst=" + ipv4_be_to_string(dst_ip_be) +
                               " proto=" + to_string((int)protocol) + extra +
                               " len=" + to_string(packet.size()));
-                if (protocol == IPPROTO_UDP && src_port != 0 && dst_port != 0) {
-                    maybe_log_short_sidecar_udp_payload("TUN->client",
-                                                        session->session_uuid,
-                                                        packet.data(),
-                                                        packet.size(),
-                                                        src_port,
-                                                        dst_port);
-                }
             }
 
             if (!send_packet_tunnel_frame(session, packet_tunnel::kFrameIpv4Packet, packet.data(), packet.size())) {
