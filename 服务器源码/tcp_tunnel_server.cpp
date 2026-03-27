@@ -764,49 +764,6 @@ static bool rewrite_client_bound_udp_source_ip(vector<uint8_t>* packet,
     return true;
 }
 
-static bool rewrite_client_originated_udp_destination_ip(vector<uint8_t>* packet,
-                                                         uint32_t from_ip_be,
-                                                         uint32_t to_ip_be) {
-    if (packet == nullptr || packet->size() < 20) {
-        return false;
-    }
-
-    vector<uint8_t>& bytes = *packet;
-    if (((bytes[0] >> 4) & 0x0F) != 4) {
-        return false;
-    }
-
-    const size_t ip_header_len = static_cast<size_t>(bytes[0] & 0x0F) * 4;
-    if (ip_header_len < 20 || bytes.size() < ip_header_len + sizeof(udphdr)) {
-        return false;
-    }
-
-    if (bytes[9] != IPPROTO_UDP) {
-        return false;
-    }
-
-    uint32_t current_dst_ip_be = 0;
-    memcpy(&current_dst_ip_be, &bytes[16], sizeof(current_dst_ip_be));
-    if (current_dst_ip_be != from_ip_be || current_dst_ip_be == to_ip_be) {
-        return false;
-    }
-
-    memcpy(&bytes[16], &to_ip_be, sizeof(to_ip_be));
-
-    bytes[10] = 0;
-    bytes[11] = 0;
-    const uint16_t ip_checksum = internet_checksum(bytes.data(), ip_header_len);
-    bytes[10] = static_cast<uint8_t>((ip_checksum >> 8) & 0xFF);
-    bytes[11] = static_cast<uint8_t>(ip_checksum & 0xFF);
-
-    bytes[ip_header_len + 6] = 0;
-    bytes[ip_header_len + 7] = 0;
-    const uint16_t udp_checksum = ipv4_transport_checksum(bytes.data(), bytes.size());
-    bytes[ip_header_len + 6] = static_cast<uint8_t>((udp_checksum >> 8) & 0xFF);
-    bytes[ip_header_len + 7] = static_cast<uint8_t>(udp_checksum & 0xFF);
-    return true;
-}
-
 static bool ipv4_is_noisy_udp_for_logging(uint32_t dst_ip_be, uint16_t src_port, uint16_t dst_port) {
     const uint8_t* dst = reinterpret_cast<const uint8_t*>(&dst_ip_be);
     const bool is_multicast = (dst[0] >= 224 && dst[0] <= 239);
@@ -2752,29 +2709,6 @@ private:
                 continue;
             }
 
-            vector<uint8_t> normalized_packet;
-            const uint8_t* route_payload = payload;
-            size_t route_payload_len = payload_len;
-            if (payload[9] == IPPROTO_UDP &&
-                has_gateway_ip_be &&
-                has_server_virtual_ip_be &&
-                dst_ip_be == gateway_ip_be &&
-                server_virtual_ip_be != gateway_ip_be) {
-                normalized_packet.assign(payload, payload + payload_len);
-                if (rewrite_client_originated_udp_destination_ip(&normalized_packet,
-                                                                 gateway_ip_be,
-                                                                 server_virtual_ip_be)) {
-                    Logger::debug("[IP Tunnel|" + session->session_uuid + "] rewrite UDP request dst " +
-                                  ipv4_be_to_string(gateway_ip_be) + " -> " +
-                                  ipv4_be_to_string(server_virtual_ip_be));
-                    route_payload = normalized_packet.data();
-                    route_payload_len = normalized_packet.size();
-                    dst_ip_be = server_virtual_ip_be;
-                } else {
-                    normalized_packet.clear();
-                }
-            }
-
             const bool dst_is_game_server = has_game_server_ip_be && dst_ip_be == game_server_ip_be;
             const bool dst_is_virtual_peer = has_virtual_subnet_be &&
                                              ipv4_in_subnet_be(dst_ip_be, virtual_network_ip_be, virtual_subnet_mask_be);
@@ -2783,7 +2717,7 @@ private:
             }
 
             if (dst_is_virtual_peer &&
-                relay_virtual_peer_packet(session, dst_ip_be, route_payload, route_payload_len)) {
+                relay_virtual_peer_packet(session, dst_ip_be, payload, payload_len)) {
                 continue;
             }
 
@@ -2791,21 +2725,21 @@ private:
                                            session->session_uuid,
                                            src_ip_be,
                                            dst_ip_be,
-                                           route_payload,
-                                           route_payload_len)) {
+                                           payload,
+                                           payload_len)) {
                 continue;
             }
 
-            if (route_payload[9] == IPPROTO_UDP) {
+            if (payload[9] == IPPROTO_UDP) {
                 uint16_t src_port = 0;
                 uint16_t dst_port = 0;
-                if (ipv4_udp_ports(route_payload, route_payload_len, &src_port, &dst_port)) {
-                    maybe_log_udp_flow_info(session, true, src_ip_be, dst_ip_be, src_port, dst_port, route_payload_len);
+                if (ipv4_udp_ports(payload, payload_len, &src_port, &dst_port)) {
+                    maybe_log_udp_flow_info(session, true, src_ip_be, dst_ip_be, src_port, dst_port, payload_len);
                 }
             }
 
             string tun_error;
-            if (!tun_manager.WritePacket(route_payload, route_payload_len, &tun_error)) {
+            if (!tun_manager.WritePacket(payload, payload_len, &tun_error)) {
                 Logger::warning("[IP Tunnel|" + session->session_uuid + "] write TUN failed: " + tun_error);
                 session->active = false;
             }
@@ -3164,20 +3098,6 @@ private:
                         Logger::warning("[IP Tunnel|" + session_uuid + "] 源IP不匹配: src=" +
                                         ipv4_be_to_string(src_ip_be) + ", lease=" + virtual_ip);
                         continue;
-                    }
-
-                    if (payload[9] == IPPROTO_UDP &&
-                        has_gateway_ip_be &&
-                        has_server_virtual_ip_be &&
-                        dst_ip_be == gateway_ip_be &&
-                        server_virtual_ip_be != gateway_ip_be &&
-                        rewrite_client_originated_udp_destination_ip(&payload,
-                                                                     gateway_ip_be,
-                                                                     server_virtual_ip_be)) {
-                        Logger::debug("[IP Tunnel|" + session_uuid + "] rewrite UDP request dst " +
-                                      ipv4_be_to_string(gateway_ip_be) + " -> " +
-                                      ipv4_be_to_string(server_virtual_ip_be));
-                        dst_ip_be = server_virtual_ip_be;
                     }
 
                     const bool dst_is_game_server = has_game_server_ip_be && dst_ip_be == game_server_ip_be;
