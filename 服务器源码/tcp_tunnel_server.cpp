@@ -2120,6 +2120,12 @@ private:
             return false;
         }
 
+        if (dst_port == 2312 && udp_payload_len == 1 && udp_payload[0] == 0x00) {
+            Logger::debug("[IP Tunnel|" + session->session_uuid +
+                          "] local UDP sidecar proxy bypass for udp=5063->2312 hex=00 fallback=raw");
+            return false;
+        }
+
         string flow_error;
         shared_ptr<LocalUdpSidecarFlow> flow =
             find_or_create_local_udp_sidecar_flow(session,
