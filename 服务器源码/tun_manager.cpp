@@ -142,29 +142,27 @@ bool TunManager::ConfigureInterface(const TunRuntimeConfig& config, std::string*
         return false;
     }
 
-    std::ostringstream gateway_cmd;
-    gateway_cmd << "ip addr add " << config.gateway_ip << "/" << prefix_length
-                << " dev " << if_name_;
-    if (!RunCommand(gateway_cmd.str(), error)) {
-        return false;
+    // Keep the gateway address on the interface, but make the local node IP the
+    // primary address so kernel source selection converges to server_virtual_ip.
+    std::vector<std::string> interface_ips;
+    if (!config.server_virtual_ip.empty()) {
+        interface_ips.push_back(config.server_virtual_ip);
     }
-
-    std::vector<std::string> local_ips = config.local_node_ips;
-    if (!config.server_virtual_ip.empty() &&
-        config.server_virtual_ip != config.gateway_ip &&
-        !contains_ip(local_ips, config.server_virtual_ip)) {
-        local_ips.push_back(config.server_virtual_ip);
+    if (!config.gateway_ip.empty() && !contains_ip(interface_ips, config.gateway_ip)) {
+        interface_ips.push_back(config.gateway_ip);
     }
-
-    for (size_t i = 0; i < local_ips.size(); ++i) {
-        if (local_ips[i].empty() || local_ips[i] == config.gateway_ip) {
-            continue;
+    for (size_t i = 0; i < config.local_node_ips.size(); ++i) {
+        if (!config.local_node_ips[i].empty() &&
+            !contains_ip(interface_ips, config.local_node_ips[i])) {
+            interface_ips.push_back(config.local_node_ips[i]);
         }
+    }
 
-        std::ostringstream local_ip_cmd;
-        local_ip_cmd << "ip addr add " << local_ips[i] << "/" << prefix_length
-                     << " dev " << if_name_;
-        if (!RunCommand(local_ip_cmd.str(), error)) {
+    for (size_t i = 0; i < interface_ips.size(); ++i) {
+        std::ostringstream addr_cmd;
+        addr_cmd << "ip addr add " << interface_ips[i] << "/" << prefix_length
+                 << " dev " << if_name_;
+        if (!RunCommand(addr_cmd.str(), error)) {
             return false;
         }
     }
@@ -173,6 +171,16 @@ bool TunManager::ConfigureInterface(const TunRuntimeConfig& config, std::string*
     link_cmd << "ip link set dev " << if_name_ << " up mtu " << config.mtu;
     if (!RunCommand(link_cmd.str(), error)) {
         return false;
+    }
+
+    if (!config.server_virtual_ip.empty()) {
+        std::ostringstream route_cmd;
+        route_cmd << "ip route replace " << config.subnet_cidr
+                  << " dev " << if_name_
+                  << " src " << config.server_virtual_ip;
+        if (!RunCommand(route_cmd.str(), error)) {
+            return false;
+        }
     }
 
     if (!RunCommand("sysctl -w net.ipv4.ip_forward=1 >/dev/null", error)) {
