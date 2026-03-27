@@ -214,6 +214,7 @@
 #include <netdb.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
+#include <set>
 #include <execinfo.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -238,6 +239,7 @@ struct ServerConfig {
     string game_server_ip = "";
     string server_virtual_ip = "";
     vector<string> local_node_ips;
+    bool local_sidecar_raw_fastpath = true;
     int max_connections = 100;
     string virtual_subnet = "";
     string virtual_gateway = "";
@@ -1319,6 +1321,8 @@ private:
 
     mutex packet_tunnel_mutex;
     int udp_fd;
+    int local_raw_inject_fd;
+    bool local_raw_inject_ready;
     uint32_t game_server_ip_be;
     bool has_game_server_ip_be;
     uint32_t gateway_ip_be;
@@ -1328,6 +1332,7 @@ private:
     uint32_t virtual_network_ip_be;
     uint32_t virtual_subnet_mask_be;
     bool has_virtual_subnet_be;
+    set<uint32_t> local_node_ips_be;
 
 
     static string build_endpoint_key(const sockaddr_storage& addr, socklen_t addr_len) {
@@ -1402,6 +1407,130 @@ private:
 
     static bool session_allows_peer_direct(const shared_ptr<PacketTunnelSession>& session) {
         return session && session->allow_peer_direct;
+    }
+
+    void rebuild_local_node_ip_cache() {
+        local_node_ips_be.clear();
+        for (size_t i = 0; i < config.local_node_ips.size(); ++i) {
+            uint32_t ip_be = 0;
+            if (parse_ipv4_be(config.local_node_ips[i], &ip_be)) {
+                local_node_ips_be.insert(ip_be);
+            }
+        }
+        if (has_server_virtual_ip_be) {
+            local_node_ips_be.insert(server_virtual_ip_be);
+        }
+    }
+
+    bool is_local_node_ip(uint32_t ip_be) const {
+        return local_node_ips_be.find(ip_be) != local_node_ips_be.end();
+    }
+
+    bool setup_local_raw_fastpath(string* error) {
+        if (!config.local_sidecar_raw_fastpath || local_node_ips_be.empty()) {
+            return false;
+        }
+
+        local_raw_inject_fd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+        if (local_raw_inject_fd < 0) {
+            if (error) {
+                *error = string("create raw socket failed: ") + strerror(errno);
+            }
+            return false;
+        }
+
+        int opt = 1;
+        if (setsockopt(local_raw_inject_fd, IPPROTO_IP, IP_HDRINCL, &opt, sizeof(opt)) < 0) {
+            if (error) {
+                *error = string("setsockopt(IP_HDRINCL) failed: ") + strerror(errno);
+            }
+            close(local_raw_inject_fd);
+            local_raw_inject_fd = -1;
+            return false;
+        }
+
+        local_raw_inject_ready = true;
+        return true;
+    }
+
+    void cleanup_local_raw_fastpath() {
+        local_raw_inject_ready = false;
+        if (local_raw_inject_fd >= 0) {
+            close(local_raw_inject_fd);
+            local_raw_inject_fd = -1;
+        }
+    }
+
+    bool inject_local_sidecar_packet(const uint8_t* payload,
+                                     size_t payload_len,
+                                     string* error) {
+        if (!local_raw_inject_ready || local_raw_inject_fd < 0 || payload == nullptr || payload_len < 20) {
+            if (error) {
+                *error = "local raw injector is not ready";
+            }
+            return false;
+        }
+
+        uint32_t dst_ip_be = 0;
+        memcpy(&dst_ip_be, payload + 16, sizeof(dst_ip_be));
+
+        sockaddr_in dst_addr{};
+        dst_addr.sin_family = AF_INET;
+        dst_addr.sin_addr.s_addr = dst_ip_be;
+
+        int sent = sendto(local_raw_inject_fd,
+                          (const char*)payload,
+                          payload_len,
+                          MSG_NOSIGNAL,
+                          (sockaddr*)&dst_addr,
+                          sizeof(dst_addr));
+        if (sent != (int)payload_len) {
+            if (error) {
+                *error = string("raw inject sendto failed: ") + strerror(errno);
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    bool try_local_sidecar_fastpath(const shared_ptr<PacketTunnelSession>& session,
+                                    const string& session_uuid,
+                                    uint32_t src_ip_be,
+                                    uint32_t dst_ip_be,
+                                    const uint8_t* payload,
+                                    size_t payload_len) {
+        if (!config.local_sidecar_raw_fastpath || !is_local_node_ip(dst_ip_be)) {
+            return false;
+        }
+
+        string inject_error;
+        if (!inject_local_sidecar_packet(payload, payload_len, &inject_error)) {
+            Logger::warning("[IP Tunnel|" + session_uuid + "] local sidecar raw fast-path failed: dst=" +
+                            ipv4_be_to_string(dst_ip_be) + " src=" + ipv4_be_to_string(src_ip_be) +
+                            " reason=" + inject_error + "，fallback=TUN");
+            return false;
+        }
+
+        if (payload_len >= 20) {
+            uint8_t protocol = payload[9];
+            string extra;
+            if (protocol == IPPROTO_UDP) {
+                uint16_t src_port = 0;
+                uint16_t dst_port = 0;
+                if (ipv4_udp_ports(payload, payload_len, &src_port, &dst_port)) {
+                    extra = " udp=" + to_string(src_port) + "->" + to_string(dst_port);
+                }
+            }
+            Logger::debug("[IP Tunnel|" + session_uuid + "] client->local-sidecar src=" +
+                          ipv4_be_to_string(src_ip_be) + " dst=" + ipv4_be_to_string(dst_ip_be) +
+                          " proto=" + to_string((int)protocol) + extra +
+                          " len=" + to_string(payload_len));
+        } else if (session) {
+            (void)session;
+        }
+
+        return true;
     }
 
     bool session_has_active_lease(const shared_ptr<PacketTunnelSession>& session,
@@ -2089,6 +2218,8 @@ public:
           tun_read_thread(nullptr),
           udp_read_thread(nullptr),
           udp_fd(-1),
+          local_raw_inject_fd(-1),
+          local_raw_inject_ready(false),
           game_server_ip_be(0),
           has_game_server_ip_be(parse_ipv4_be(cfg.game_server_ip, &game_server_ip_be)),
           gateway_ip_be(0),
@@ -2097,7 +2228,9 @@ public:
           has_server_virtual_ip_be(parse_ipv4_be(cfg.server_virtual_ip, &server_virtual_ip_be)),
           virtual_network_ip_be(0),
           virtual_subnet_mask_be(0),
-          has_virtual_subnet_be(false) {}
+          has_virtual_subnet_be(false) {
+        rebuild_local_node_ip_cache();
+    }
 
     ~TunnelServer() {
         stop();
@@ -2192,6 +2325,7 @@ public:
         has_gateway_ip_be = parse_ipv4_be(tun_config.gateway_ip, &gateway_ip_be);
         has_server_virtual_ip_be = parse_ipv4_be(tun_config.server_virtual_ip, &server_virtual_ip_be);
         has_virtual_subnet_be = parse_cidr_be(tun_config.subnet_cidr, &virtual_network_ip_be, &virtual_subnet_mask_be);
+        rebuild_local_node_ip_cache();
 
         string tun_error;
         if (tun_manager.Setup(tun_config, &tun_error)) {
@@ -2209,6 +2343,14 @@ public:
             });
         } else {
             Logger::warning("[" + server_name + "] IP Tunnel TUN init failed: " + tun_error);
+        }
+        string local_fastpath_error;
+        if (setup_local_raw_fastpath(&local_fastpath_error)) {
+            Logger::info("[" + server_name + "] local sidecar raw fast-path ready: local_nodes=" +
+                         to_string(local_node_ips_be.size()));
+        } else if (config.local_sidecar_raw_fastpath && !local_node_ips_be.empty()) {
+            Logger::warning("[" + server_name + "] local sidecar raw fast-path unavailable: " +
+                            local_fastpath_error + "，将继续使用TUN");
         }
         Logger::info("[" + server_name + "] 服务器启动成功，监听端口: " + to_string(config.listen_port) + " (IPv4/IPv6双栈)");
         Logger::info("[" + server_name + "] 虚拟网段: " + tun_config.subnet_cidr +
@@ -2247,6 +2389,7 @@ public:
         }
 
         tun_manager.Cleanup();
+        cleanup_local_raw_fastpath();
         if (udp_read_thread && udp_read_thread->joinable()) {
             udp_read_thread->join();
         }
@@ -2575,6 +2718,15 @@ private:
 
             if (dst_is_virtual_peer &&
                 relay_virtual_peer_packet(session, dst_ip_be, payload, payload_len)) {
+                continue;
+            }
+
+            if (try_local_sidecar_fastpath(session,
+                                           session->session_uuid,
+                                           src_ip_be,
+                                           dst_ip_be,
+                                           payload,
+                                           payload_len)) {
                 continue;
             }
 
@@ -2963,6 +3115,15 @@ private:
                         continue;
                     }
 
+                    if (try_local_sidecar_fastpath(session,
+                                                   session_uuid,
+                                                   src_ip_be,
+                                                   dst_ip_be,
+                                                   payload.data(),
+                                                   payload_len)) {
+                        continue;
+                    }
+
                     const uint8_t protocol = ipv4_protocol(payload);
                     if (protocol == IPPROTO_ICMP || protocol == IPPROTO_UDP ||
                         dst_ip_be == server_virtual_ip_be || dst_ip_be == gateway_ip_be) {
@@ -3119,6 +3280,12 @@ GlobalConfig load_config(const string& filename) {
     if (runtime_server.lease_seconds <= 0) {
         runtime_server.lease_seconds = (int)ip_tunnel::kDefaultLeaseSeconds;
     }
+    bool local_fastpath_found = false;
+    runtime_server.local_sidecar_raw_fastpath =
+        extract_json_bool(network_obj, "local_sidecar_raw_fastpath", &local_fastpath_found);
+    if (!local_fastpath_found) {
+        runtime_server.local_sidecar_raw_fastpath = true;
+    }
     runtime_server.game_server_ip.clear();
     runtime_server.server_virtual_ip.clear();
     runtime_server.name = "虚拟局域网";
@@ -3211,7 +3378,8 @@ bool generate_default_config(const string& filename) {
     file << "    \"virtual_gateway\": \"10.0.11.1\",\n";
     file << "    \"tunnel_server_ip\": \"61.sviplk.com\",\n";
     file << "    \"max_connections\": 100,\n";
-    file << "    \"lease_seconds\": 120\n";
+    file << "    \"lease_seconds\": 120,\n";
+    file << "    \"local_sidecar_raw_fastpath\": true\n";
     file << "  },\n";
     file << "  \"nodes\": [\n";
     file << "    {\n";
