@@ -764,6 +764,91 @@ static bool rewrite_client_bound_udp_source_ip(vector<uint8_t>* packet,
     return true;
 }
 
+static int replace_embedded_ipv4_bytes(uint8_t* data,
+                                       size_t len,
+                                       uint32_t from_ip_be,
+                                       uint32_t to_ip_be) {
+    if (data == nullptr || len < 4) {
+        return 0;
+    }
+
+    uint8_t from_bytes[4] = {};
+    uint8_t to_bytes[4] = {};
+    memcpy(from_bytes, &from_ip_be, sizeof(from_bytes));
+    memcpy(to_bytes, &to_ip_be, sizeof(to_bytes));
+
+    uint8_t from_rev[4] = {};
+    uint8_t to_rev[4] = {};
+    for (size_t i = 0; i < 4; ++i) {
+        from_rev[i] = from_bytes[3 - i];
+        to_rev[i] = to_bytes[3 - i];
+    }
+
+    int replaced = 0;
+    for (size_t i = 0; i + 4 <= len; ++i) {
+        if (memcmp(data + i, from_bytes, 4) == 0) {
+            memcpy(data + i, to_bytes, 4);
+            ++replaced;
+            i += 3;
+            continue;
+        }
+        if (memcmp(data + i, from_rev, 4) == 0) {
+            memcpy(data + i, to_rev, 4);
+            ++replaced;
+            i += 3;
+        }
+    }
+
+    return replaced;
+}
+
+static int rewrite_client_bound_udp_payload_ip(vector<uint8_t>* packet,
+                                               uint32_t from_ip_be,
+                                               uint32_t to_ip_be) {
+    if (packet == nullptr || packet->size() < 28) {
+        return 0;
+    }
+
+    vector<uint8_t>& bytes = *packet;
+    if (((bytes[0] >> 4) & 0x0F) != 4 || bytes[9] != IPPROTO_UDP) {
+        return 0;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(bytes[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || bytes.size() < ip_header_len + 8) {
+        return 0;
+    }
+
+    uint16_t src_port = 0;
+    uint16_t dst_port = 0;
+    if (!ipv4_udp_ports(bytes.data(), bytes.size(), &src_port, &dst_port)) {
+        return 0;
+    }
+
+    // Narrow the rewrite to the short server-side coordination replies that
+    // still appear to carry the gateway IP semantics inside the UDP payload.
+    if (!(src_port == 2311 || src_port == 2312 || src_port == 2313)) {
+        return 0;
+    }
+
+    uint8_t* udp_payload = bytes.data() + ip_header_len + 8;
+    const size_t udp_payload_len = bytes.size() - (ip_header_len + 8);
+    const int replaced = replace_embedded_ipv4_bytes(udp_payload,
+                                                     udp_payload_len,
+                                                     from_ip_be,
+                                                     to_ip_be);
+    if (replaced <= 0) {
+        return 0;
+    }
+
+    bytes[ip_header_len + 6] = 0;
+    bytes[ip_header_len + 7] = 0;
+    const uint16_t udp_checksum = ipv4_transport_checksum(bytes.data(), bytes.size());
+    bytes[ip_header_len + 6] = static_cast<uint8_t>((udp_checksum >> 8) & 0xFF);
+    bytes[ip_header_len + 7] = static_cast<uint8_t>(udp_checksum & 0xFF);
+    return replaced;
+}
+
 static bool rewrite_client_originated_udp_destination_ip(vector<uint8_t>* packet,
                                                          uint32_t from_ip_be,
                                                          uint32_t to_ip_be) {
@@ -2220,6 +2305,25 @@ private:
                                   ipv4_be_to_string(gateway_ip_be) + " -> " +
                                   ipv4_be_to_string(server_virtual_ip_be));
                     src_ip_be = server_virtual_ip_be;
+                }
+            }
+            if (protocol == IPPROTO_UDP &&
+                has_gateway_ip_be &&
+                has_server_virtual_ip_be &&
+                server_virtual_ip_be != gateway_ip_be) {
+                const int payload_rewrites =
+                    rewrite_client_bound_udp_payload_ip(&packet, gateway_ip_be, server_virtual_ip_be);
+                if (payload_rewrites > 0) {
+                    uint16_t src_port = 0;
+                    uint16_t dst_port = 0;
+                    string extra;
+                    if (ipv4_udp_ports(packet.data(), packet.size(), &src_port, &dst_port)) {
+                        extra = " udp=" + to_string(src_port) + "->" + to_string(dst_port);
+                    }
+                    Logger::debug("[IP Tunnel|" + session->session_uuid + "] rewrite UDP reply payload ip " +
+                                  ipv4_be_to_string(gateway_ip_be) + " -> " +
+                                  ipv4_be_to_string(server_virtual_ip_be) +
+                                  " count=" + to_string(payload_rewrites) + extra);
                 }
             }
 
