@@ -75,9 +75,11 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <wincrypt.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <mstcpip.h>
+#include <shlobj.h>
 
 #include <iostream>
 #include <fstream>
@@ -105,6 +107,7 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "shell32.lib")
 using namespace std;
 
 class LeaseSessionGuard;
@@ -484,13 +487,237 @@ string wstring_to_utf8(const wstring& wstr) {
     return result;
 }
 
-string get_local_client_id() {
+wstring utf8_to_wstring(const string& str) {
+    if (str.empty()) {
+        return wstring();
+    }
+
+    int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, NULL, 0);
+    if (len <= 1) {
+        return wstring();
+    }
+
+    wstring result(len - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &result[0], len);
+    return result;
+}
+
+string get_computer_name_string() {
     char computer_name[MAX_COMPUTERNAME_LENGTH + 1] = {0};
     DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
     if (GetComputerNameA(computer_name, &size) && size > 0) {
         return string(computer_name, size);
     }
     return "unknown-client";
+}
+
+wstring get_client_identity_dir() {
+    wchar_t appdata_path[MAX_PATH] = {0};
+    if (!SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appdata_path))) {
+        return L"";
+    }
+    return wstring(appdata_path) + L"\\DNFProxy";
+}
+
+bool ensure_directory_exists(const wstring& dir_path) {
+    if (dir_path.empty()) {
+        return false;
+    }
+
+    DWORD attr = GetFileAttributesW(dir_path.c_str());
+    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        return true;
+    }
+
+    if (CreateDirectoryW(dir_path.c_str(), NULL)) {
+        return true;
+    }
+
+    return GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+wstring get_client_identity_file_path() {
+    const wstring identity_dir = get_client_identity_dir();
+    if (identity_dir.empty()) {
+        return L"";
+    }
+    return identity_dir + L"\\client_identity.ini";
+}
+
+uint64_t get_current_time_ms_utc() {
+    FILETIME file_time;
+    GetSystemTimeAsFileTime(&file_time);
+
+    ULARGE_INTEGER ticks;
+    ticks.LowPart = file_time.dwLowDateTime;
+    ticks.HighPart = file_time.dwHighDateTime;
+
+    static const uint64_t kUnixEpochOffset100ns = 116444736000000000ULL;
+    if (ticks.QuadPart <= kUnixEpochOffset100ns) {
+        return 0;
+    }
+    return (ticks.QuadPart - kUnixEpochOffset100ns) / 10000ULL;
+}
+
+string read_machine_guid() {
+    HKEY key = NULL;
+    LONG open_result = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                                     L"SOFTWARE\\Microsoft\\Cryptography",
+                                     0,
+                                     KEY_READ | KEY_WOW64_64KEY,
+                                     &key);
+    if (open_result != ERROR_SUCCESS) {
+        open_result = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                                    L"SOFTWARE\\Microsoft\\Cryptography",
+                                    0,
+                                    KEY_READ,
+                                    &key);
+    }
+    if (open_result != ERROR_SUCCESS) {
+        return string();
+    }
+
+    wchar_t value[256] = {0};
+    DWORD type = 0;
+    DWORD value_size = sizeof(value);
+    LONG query_result = RegQueryValueExW(key,
+                                         L"MachineGuid",
+                                         NULL,
+                                         &type,
+                                         reinterpret_cast<LPBYTE>(value),
+                                         &value_size);
+    RegCloseKey(key);
+
+    if (query_result != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) || value[0] == L'\0') {
+        return string();
+    }
+
+    return wstring_to_utf8(value);
+}
+
+string bytes_to_hex(const BYTE* data, size_t size) {
+    static const char* kHex = "0123456789abcdef";
+    string result;
+    result.reserve(size * 2);
+    for (size_t i = 0; i < size; ++i) {
+        result.push_back(kHex[(data[i] >> 4) & 0x0F]);
+        result.push_back(kHex[data[i] & 0x0F]);
+    }
+    return result;
+}
+
+string compute_sha256_hex(const string& input) {
+    HCRYPTPROV provider = 0;
+    HCRYPTHASH hash = 0;
+    BYTE digest[32] = {0};
+    DWORD digest_size = sizeof(digest);
+
+    if (!CryptAcquireContextW(&provider, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        return string();
+    }
+    if (!CryptCreateHash(provider, CALG_SHA_256, 0, 0, &hash)) {
+        CryptReleaseContext(provider, 0);
+        return string();
+    }
+    if (!input.empty() &&
+        !CryptHashData(hash,
+                       reinterpret_cast<const BYTE*>(input.data()),
+                       static_cast<DWORD>(input.size()),
+                       0)) {
+        CryptDestroyHash(hash);
+        CryptReleaseContext(provider, 0);
+        return string();
+    }
+    if (!CryptGetHashParam(hash, HP_HASHVAL, digest, &digest_size, 0)) {
+        CryptDestroyHash(hash);
+        CryptReleaseContext(provider, 0);
+        return string();
+    }
+
+    CryptDestroyHash(hash);
+    CryptReleaseContext(provider, 0);
+    return bytes_to_hex(digest, digest_size);
+}
+
+bool load_persisted_client_id(string* client_id, string* created_at_ms = nullptr) {
+    const wstring identity_file = get_client_identity_file_path();
+    if (identity_file.empty()) {
+        return false;
+    }
+
+    DWORD attr = GetFileAttributesW(identity_file.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES) {
+        return false;
+    }
+
+    wchar_t client_id_buf[256] = {0};
+    GetPrivateProfileStringW(L"DNFProxy", L"ClientId", L"", client_id_buf, 256, identity_file.c_str());
+    if (client_id_buf[0] == L'\0') {
+        return false;
+    }
+
+    if (client_id != nullptr) {
+        *client_id = wstring_to_utf8(client_id_buf);
+    }
+
+    if (created_at_ms != nullptr) {
+        wchar_t created_at_buf[64] = {0};
+        GetPrivateProfileStringW(L"DNFProxy", L"CreatedAtMs", L"", created_at_buf, 64, identity_file.c_str());
+        *created_at_ms = wstring_to_utf8(created_at_buf);
+    }
+    return true;
+}
+
+bool persist_client_identity(const string& client_id,
+                             uint64_t created_at_ms,
+                             const string& source) {
+    const wstring identity_dir = get_client_identity_dir();
+    const wstring identity_file = get_client_identity_file_path();
+    if (identity_dir.empty() || identity_file.empty() || !ensure_directory_exists(identity_dir)) {
+        return false;
+    }
+
+    wchar_t created_at_buf[64] = {0};
+    swprintf(created_at_buf, 64, L"%llu", static_cast<unsigned long long>(created_at_ms));
+
+    return WritePrivateProfileStringW(L"DNFProxy", L"Version", L"1", identity_file.c_str()) == TRUE &&
+           WritePrivateProfileStringW(L"DNFProxy", L"ClientId", utf8_to_wstring(client_id).c_str(), identity_file.c_str()) == TRUE &&
+           WritePrivateProfileStringW(L"DNFProxy", L"CreatedAtMs", created_at_buf, identity_file.c_str()) == TRUE &&
+           WritePrivateProfileStringW(L"DNFProxy", L"Source", utf8_to_wstring(source).c_str(), identity_file.c_str()) == TRUE;
+}
+
+string get_local_client_id() {
+    string persisted_client_id;
+    string persisted_created_at;
+    if (load_persisted_client_id(&persisted_client_id, &persisted_created_at) &&
+        !persisted_client_id.empty()) {
+        Logger::info("[租约] client_id source=persisted created_at=" +
+                     (persisted_created_at.empty() ? string("unknown") : persisted_created_at) +
+                     " id=" + persisted_client_id.substr(0, min<size_t>(persisted_client_id.size(), 16)));
+        return persisted_client_id;
+    }
+
+    const string machine_guid = read_machine_guid();
+    const string machine_identity = machine_guid.empty() ? get_computer_name_string() : machine_guid;
+    const string source = machine_guid.empty() ? "computer_name_fallback" : "machine_guid";
+    const uint64_t created_at_ms = get_current_time_ms_utc();
+    const string salt = "dnf-proxy-client-id-v1::20260327";
+    string client_id = compute_sha256_hex(machine_identity + "|" +
+                                          to_string(created_at_ms) + "|" +
+                                          salt);
+    if (client_id.empty()) {
+        client_id = machine_identity;
+    }
+
+    if (!persist_client_identity(client_id, created_at_ms, source)) {
+        Logger::warning("[租约] client_id persist failed, source=" + source);
+    } else {
+        Logger::info("[租约] client_id generated source=" + source +
+                     " created_at=" + to_string(created_at_ms) +
+                     " id=" + client_id.substr(0, min<size_t>(client_id.size(), 16)));
+    }
+
+    return client_id;
 }
 
 // 生成简单的UUID (格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
@@ -839,8 +1066,8 @@ int main(int argc, char* argv[]) {
 
     // 初始化日志系统
     Logger::init(log_filename);
-    Logger::set_log_level("DEBUG");
-    Logger::info("[Log] Default log level: DEBUG");
+    Logger::set_log_level("INFO");
+    Logger::info("[Log] Default log level: INFO");
 
     // 生成会话UUID
     g_session_uuid = generate_session_uuid();
