@@ -1,7 +1,7 @@
 /*
  * DNF tunnel server.
  *
- * Active local sidecar logic currently covers ingress only:
+ * Optional local sidecar logic currently covers ingress only:
  * - client -> local node: raw sidecar fast-path
  * - local node -> client: still returned through the TUN read loop
  *
@@ -63,7 +63,7 @@ struct ServerConfig {
     string game_server_ip = "";
     string server_virtual_ip = "";
     vector<string> local_node_ips;
-    bool local_sidecar_raw_fastpath = true;
+    bool local_sidecar_raw_fastpath = false;
     int max_connections = 100;
     string virtual_subnet = "";
     string virtual_gateway = "";
@@ -588,21 +588,6 @@ static bool rewrite_client_bound_udp_source_ip(vector<uint8_t>* packet,
     return true;
 }
 
-static bool ipv4_is_noisy_udp_for_logging(uint32_t dst_ip_be, uint16_t src_port, uint16_t dst_port) {
-    const uint8_t* dst = reinterpret_cast<const uint8_t*>(&dst_ip_be);
-    const bool is_multicast = (dst[0] >= 224 && dst[0] <= 239);
-    const bool is_limited_broadcast =
-        (dst[0] == 255 && dst[1] == 255 && dst[2] == 255 && dst[3] == 255);
-    const bool is_likely_subnet_broadcast = (dst[3] == 255);
-    const bool is_common_noise_port =
-        (src_port == 137 || dst_port == 137 ||
-         src_port == 138 || dst_port == 138 ||
-         src_port == 1900 || dst_port == 1900 ||
-         src_port == 5355 || dst_port == 5355);
-
-    return is_multicast || is_limited_broadcast || is_likely_subnet_broadcast || is_common_noise_port;
-}
-
 static uint64_t monotonic_millis() {
     return static_cast<uint64_t>(
         chrono::duration_cast<chrono::milliseconds>(
@@ -1053,35 +1038,6 @@ private:
         return "unknown";
     }
 
-    void maybe_log_udp_flow_info(const shared_ptr<PacketTunnelSession>& session,
-                                 bool client_to_tun,
-                                 uint32_t src_ip_be,
-                                 uint32_t dst_ip_be,
-                                 uint16_t src_port,
-                                 uint16_t dst_port,
-                                 size_t payload_len) {
-        if (!session) {
-            return;
-        }
-
-        if (ipv4_is_noisy_udp_for_logging(dst_ip_be, src_port, dst_port)) {
-            return;
-        }
-
-        uint64_t elapsed_ms = 0;
-        uint64_t now_ms = monotonic_millis();
-        if (now_ms >= session->established_ms) {
-            elapsed_ms = now_ms - session->established_ms;
-        }
-
-        Logger::debug("[IP Tunnel|" + session->session_uuid + "] UDP " +
-                      string(client_to_tun ? "client->TUN" : "TUN->client") +
-                      " +" + to_string(elapsed_ms) + "ms src=" +
-                      ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
-                      " dst=" + ipv4_be_to_string(dst_ip_be) + ":" + to_string(dst_port) +
-                      " len=" + to_string(payload_len));
-    }
-
     const uint64_t kPeerOfferTimeoutMs = 9000;
     const uint64_t kPeerActiveTimeoutMs = 15000;
     const uint64_t kPacketTunnelUdpIdleTimeoutMs = 30000;
@@ -1206,24 +1162,6 @@ private:
                             ipv4_be_to_string(dst_ip_be) + " src=" + ipv4_be_to_string(src_ip_be) +
                             " reason=" + inject_error + "，fallback=TUN");
             return false;
-        }
-
-        if (payload_len >= 20) {
-            uint8_t protocol = payload[9];
-            string extra;
-            if (protocol == IPPROTO_UDP) {
-                uint16_t src_port = 0;
-                uint16_t dst_port = 0;
-                if (ipv4_udp_ports(payload, payload_len, &src_port, &dst_port)) {
-                    extra = " udp=" + to_string(src_port) + "->" + to_string(dst_port);
-                }
-            }
-            Logger::debug("[IP Tunnel|" + session_uuid + "] client->local-sidecar src=" +
-                          ipv4_be_to_string(src_ip_be) + " dst=" + ipv4_be_to_string(dst_ip_be) +
-                          " proto=" + to_string((int)protocol) + extra +
-                          " len=" + to_string(payload_len));
-        } else if (session) {
-            (void)session;
         }
 
         return true;
@@ -1885,7 +1823,6 @@ private:
                 if (protocol == IPPROTO_UDP) {
                     if (ipv4_udp_ports(packet, &src_port, &dst_port)) {
                         extra = " udp=" + to_string(src_port) + "->" + to_string(dst_port);
-                        maybe_log_udp_flow_info(session, false, src_ip_be, dst_ip_be, src_port, dst_port, packet.size());
                     }
                 }
                 Logger::debug("[IP Tunnel|" + session->session_uuid + "] TUN->client src=" +
@@ -2430,7 +2367,6 @@ private:
                 uint16_t src_port = 0;
                 uint16_t dst_port = 0;
                 if (ipv4_udp_ports(payload, payload_len, &src_port, &dst_port)) {
-                    maybe_log_udp_flow_info(session, true, src_ip_be, dst_ip_be, src_port, dst_port, payload_len);
                 }
             }
 
@@ -2976,12 +2912,8 @@ GlobalConfig load_config(const string& filename) {
     if (runtime_server.lease_seconds <= 0) {
         runtime_server.lease_seconds = (int)ip_tunnel::kDefaultLeaseSeconds;
     }
-    bool local_fastpath_found = false;
     runtime_server.local_sidecar_raw_fastpath =
-        extract_json_bool(network_obj, "local_sidecar_raw_fastpath", &local_fastpath_found);
-    if (!local_fastpath_found) {
-        runtime_server.local_sidecar_raw_fastpath = true;
-    }
+        extract_json_bool(network_obj, "local_sidecar_raw_fastpath", nullptr);
     runtime_server.game_server_ip.clear();
     runtime_server.server_virtual_ip.clear();
     runtime_server.name = "虚拟局域网";
@@ -3075,7 +3007,7 @@ bool generate_default_config(const string& filename) {
     file << "    \"tunnel_server_ip\": \"61.sviplk.com\",\n";
     file << "    \"max_connections\": 100,\n";
     file << "    \"lease_seconds\": 120,\n";
-    file << "    \"local_sidecar_raw_fastpath\": true\n";
+    file << "    \"local_sidecar_raw_fastpath\": false\n";
     file << "  },\n";
     file << "  \"nodes\": [\n";
     file << "    {\n";
