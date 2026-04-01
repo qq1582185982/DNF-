@@ -16,6 +16,18 @@ std::vector<std::string> Split(const std::string& input, char delim) {
     return result;
 }
 
+void InsertAvailableIPSorted(std::vector<uint32_t>* available_ips, uint32_t ip) {
+    if (available_ips == NULL) {
+        return;
+    }
+
+    std::vector<uint32_t>::iterator it = std::lower_bound(available_ips->begin(), available_ips->end(), ip);
+    if (it != available_ips->end() && *it == ip) {
+        return;
+    }
+    available_ips->insert(it, ip);
+}
+
 }  // namespace
 
 IPPoolManager::IPPoolManager() {}
@@ -147,7 +159,7 @@ bool IPPoolManager::ReleaseLease(const std::string& pool_key, const std::string&
     pool->by_session.erase(lease_it);
     if (pool->requestable_reserved_ips.count(ip) == 0 &&
         pool->reserved_ips.count(ip) == 0) {
-        pool->available_ips.push_back(ip);
+        InsertAvailableIPSorted(&pool->available_ips, ip);
     }
     return true;
 }
@@ -180,7 +192,7 @@ size_t IPPoolManager::CleanupExpired(uint64_t now_ms) {
             pool->by_session.erase(lease_it);
             if (pool->requestable_reserved_ips.count(ip) == 0 &&
                 pool->reserved_ips.count(ip) == 0) {
-                pool->available_ips.push_back(ip);
+                InsertAvailableIPSorted(&pool->available_ips, ip);
             }
             ++cleaned;
         }
