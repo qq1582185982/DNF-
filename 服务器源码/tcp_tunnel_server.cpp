@@ -238,6 +238,7 @@ struct ServerConfig {
     string game_server_ip = "";
     string server_virtual_ip = "";
     vector<string> local_node_ips;
+    map<string, string> local_node_server_keys;
     int max_connections = 100;
     string virtual_subnet = "";
     string virtual_gateway = "";
@@ -1262,6 +1263,7 @@ private:
         int client_fd;
         string client_str;
         string session_uuid;
+        string server_key;
         uint32_t virtual_ip_be;
         uint16_t mtu;
         bool use_udp;
@@ -1279,11 +1281,13 @@ private:
         PacketTunnelSession(int fd,
                             const string& client,
                             const string& session,
+                            const string& scoped_server_key,
                             uint32_t virtual_ip,
                             uint16_t session_mtu)
             : client_fd(fd),
               client_str(client),
               session_uuid(session),
+              server_key(scoped_server_key),
               virtual_ip_be(virtual_ip),
               mtu(session_mtu),
               use_udp(false),
@@ -1314,8 +1318,9 @@ private:
     TunManager tun_manager;
     shared_ptr<thread> tun_read_thread;
     shared_ptr<thread> udp_read_thread;
-    map<uint32_t, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions;
+    map<string, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions;
     map<string, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions_by_endpoint;
+    map<uint32_t, string> local_node_server_keys_by_ip_be;
 
     mutex packet_tunnel_mutex;
     int udp_fd;
@@ -1350,6 +1355,32 @@ private:
         }
 
         return "unknown";
+    }
+
+    static string build_scoped_virtual_ip_key(const string& server_key, const string& virtual_ip) {
+        if (server_key.empty()) {
+            return virtual_ip;
+        }
+        return server_key + "|" + virtual_ip;
+    }
+
+    static string build_scoped_virtual_ip_key(const string& server_key, uint32_t virtual_ip_be) {
+        return build_scoped_virtual_ip_key(server_key, ipv4_be_to_string(virtual_ip_be));
+    }
+
+    static string describe_scoped_virtual_ip(const string& server_key, uint32_t virtual_ip_be) {
+        const string virtual_ip = ipv4_be_to_string(virtual_ip_be);
+        if (server_key.empty()) {
+            return virtual_ip;
+        }
+        return server_key + "/" + virtual_ip;
+    }
+
+    static string describe_scoped_virtual_ip(const shared_ptr<PacketTunnelSession>& session) {
+        if (!session) {
+            return "unknown";
+        }
+        return describe_scoped_virtual_ip(session->server_key, session->virtual_ip_be);
     }
 
     void maybe_log_udp_flow_info(const shared_ptr<PacketTunnelSession>& session,
@@ -1418,7 +1449,7 @@ private:
 
         IPPoolManager::LeaseRecord active_lease;
         string lease_error;
-        if (!query_active_tcp_config_lease(to_string(config.listen_port),
+        if (!query_active_tcp_config_lease(session->server_key,
                                            session->session_uuid,
                                            &active_lease,
                                            &lease_error)) {
@@ -1559,8 +1590,9 @@ private:
         shared_ptr<PacketTunnelSession> target_session;
         {
             lock_guard<mutex> lock(packet_tunnel_mutex);
-            map<uint32_t, shared_ptr<PacketTunnelSession>>::const_iterator it =
-                packet_tunnel_sessions.find(dst_ip_be);
+            map<string, shared_ptr<PacketTunnelSession>>::const_iterator it =
+                packet_tunnel_sessions.find(build_scoped_virtual_ip_key(sender_session->server_key,
+                                                                        dst_ip_be));
             if (it != packet_tunnel_sessions.end()) {
                 target_session = it->second;
             }
@@ -1576,7 +1608,7 @@ private:
                                       payload_len)) {
             Logger::warning("[IP Tunnel|" + sender_session->session_uuid +
                             "] failed to relay virtual peer packet to " +
-                            ipv4_be_to_string(target_session->virtual_ip_be));
+                            describe_scoped_virtual_ip(target_session));
             target_session->active = false;
             if (!target_session->use_udp && target_session->client_fd >= 0) {
                 shutdown(target_session->client_fd, SHUT_RDWR);
@@ -1606,8 +1638,9 @@ private:
 
         session->active = false;
 
-        map<uint32_t, shared_ptr<PacketTunnelSession>>::iterator by_virtual_it =
-            packet_tunnel_sessions.find(session->virtual_ip_be);
+        map<string, shared_ptr<PacketTunnelSession>>::iterator by_virtual_it =
+            packet_tunnel_sessions.find(build_scoped_virtual_ip_key(session->server_key,
+                                                                    session->virtual_ip_be));
         if (by_virtual_it != packet_tunnel_sessions.end() && by_virtual_it->second == session) {
             packet_tunnel_sessions.erase(by_virtual_it);
         }
@@ -1626,7 +1659,7 @@ private:
         vector<PacketTunnelSessionRemoval> removed;
         lock_guard<mutex> lock(packet_tunnel_mutex);
 
-        for (map<uint32_t, shared_ptr<PacketTunnelSession>>::iterator it = packet_tunnel_sessions.begin();
+        for (map<string, shared_ptr<PacketTunnelSession>>::iterator it = packet_tunnel_sessions.begin();
              it != packet_tunnel_sessions.end();) {
             const shared_ptr<PacketTunnelSession>& session = it->second;
             bool should_remove = !session || !session->active;
@@ -1694,6 +1727,9 @@ private:
         }
 
         const string local_virtual_ip = ipv4_be_to_string(session->virtual_ip_be);
+        const string local_peer_coord_key =
+            build_scoped_virtual_ip_key(session->server_key, local_virtual_ip);
+        const string local_scope_label = describe_scoped_virtual_ip(session);
         if (!session->active) {
             return;
         }
@@ -1701,17 +1737,17 @@ private:
         string session_lease_error;
         if (!session_has_active_lease(session, nullptr, &session_lease_error)) {
             Logger::debug("[" + server_name + "|IP Tunnel] skip peer offer for session without active lease: " +
-                          local_virtual_ip + " reason=" + session_lease_error);
+                          local_scope_label + " reason=" + session_lease_error);
             return;
         }
 
         log_expired_peer_coord_states(&peer_coord_, server_name);
 
-        uint64_t local_version = peer_coord_.GetEndpointVersion(local_virtual_ip);
+        uint64_t local_version = peer_coord_.GetEndpointVersion(local_peer_coord_key);
         if (force_new_version || local_version == 0) {
-            local_version = peer_coord_.BumpEndpointVersion(local_virtual_ip);
+            local_version = peer_coord_.BumpEndpointVersion(local_peer_coord_key);
         }
-        peer_coord_.SetState(local_virtual_ip,
+        peer_coord_.SetState(local_peer_coord_key,
                              session_allows_peer_direct(session)
                                  ? PeerEndpointState::OfferPending
                                  : PeerEndpointState::RelayOnly);
@@ -1720,10 +1756,11 @@ private:
         vector<shared_ptr<PacketTunnelSession>> peers;
         {
             lock_guard<mutex> lock(packet_tunnel_mutex);
-            for (map<uint32_t, shared_ptr<PacketTunnelSession>>::const_iterator it = packet_tunnel_sessions.begin();
+            for (map<string, shared_ptr<PacketTunnelSession>>::const_iterator it = packet_tunnel_sessions.begin();
                  it != packet_tunnel_sessions.end(); ++it) {
                 const shared_ptr<PacketTunnelSession>& peer = it->second;
-                if (!peer || peer == session || !peer->active || !peer->use_udp) {
+                if (!peer || peer == session || !peer->active || !peer->use_udp ||
+                    peer->server_key != session->server_key) {
                     continue;
                 }
                 peers.push_back(peer);
@@ -1737,17 +1774,20 @@ private:
                                        session->udp_addr_len,
                                        &local_offer_payload)) {
             Logger::warning("[" + server_name + "|IP Tunnel] failed to encode peer offer for " +
-                            local_virtual_ip);
+                            local_scope_label);
             return;
         }
 
         for (size_t i = 0; i < peers.size(); ++i) {
             const shared_ptr<PacketTunnelSession>& peer = peers[i];
             const string peer_virtual_ip = ipv4_be_to_string(peer->virtual_ip_be);
-            uint64_t peer_version = peer_coord_.GetEndpointVersion(peer_virtual_ip);
+            const string peer_peer_coord_key =
+                build_scoped_virtual_ip_key(peer->server_key, peer_virtual_ip);
+            const string peer_scope_label = describe_scoped_virtual_ip(peer);
+            uint64_t peer_version = peer_coord_.GetEndpointVersion(peer_peer_coord_key);
             if (force_new_version || peer_version == 0) {
-                peer_version = peer_coord_.BumpEndpointVersion(peer_virtual_ip);
-                peer_coord_.SetState(peer_virtual_ip,
+                peer_version = peer_coord_.BumpEndpointVersion(peer_peer_coord_key);
+                peer_coord_.SetState(peer_peer_coord_key,
                                      session_allows_peer_direct(peer)
                                          ? PeerEndpointState::OfferPending
                                          : PeerEndpointState::RelayOnly);
@@ -1767,7 +1807,7 @@ private:
                                              packet_tunnel::kPeerDisableReasonCooldown);
                 }
                 Logger::debug("[" + server_name + "|IP Tunnel] skip peer offer for relay-only pair " +
-                              local_virtual_ip + " <-> " + peer_virtual_ip);
+                              local_scope_label + " <-> " + peer_scope_label);
                 continue;
             }
 
@@ -1778,7 +1818,7 @@ private:
                                            peer->udp_addr_len,
                                            &peer_offer_payload)) {
                 Logger::warning("[" + server_name + "|IP Tunnel] failed to encode peer offer for " +
-                                peer_virtual_ip);
+                                peer_scope_label);
                 continue;
             }
 
@@ -1787,11 +1827,11 @@ private:
                                          local_offer_payload.data(),
                                          local_offer_payload.size())) {
                 Logger::debug("[" + server_name + "|IP Tunnel] announce peer offer " +
-                              local_virtual_ip + " -> " + peer_virtual_ip +
+                              local_scope_label + " -> " + peer_scope_label +
                               " version=" + to_string(local_version));
             } else {
                 Logger::warning("[" + server_name + "|IP Tunnel] failed to send peer offer " +
-                                local_virtual_ip + " -> " + peer_virtual_ip);
+                                local_scope_label + " -> " + peer_scope_label);
             }
 
             if (send_packet_tunnel_frame(session,
@@ -1799,11 +1839,11 @@ private:
                                          peer_offer_payload.data(),
                                          peer_offer_payload.size())) {
                 Logger::debug("[" + server_name + "|IP Tunnel] announce peer offer " +
-                              peer_virtual_ip + " -> " + local_virtual_ip +
+                              peer_scope_label + " -> " + local_scope_label +
                               " version=" + to_string(peer_version));
             } else {
                 Logger::warning("[" + server_name + "|IP Tunnel] failed to send peer offer " +
-                                peer_virtual_ip + " -> " + local_virtual_ip);
+                                peer_scope_label + " -> " + local_scope_label);
             }
         }
 
@@ -1849,8 +1889,9 @@ private:
         shared_ptr<PacketTunnelSession> target_session;
         {
             lock_guard<mutex> lock(packet_tunnel_mutex);
-            map<uint32_t, shared_ptr<PacketTunnelSession>>::const_iterator it =
-                packet_tunnel_sessions.find(signal.peer_virtual_ip_be);
+            map<string, shared_ptr<PacketTunnelSession>>::const_iterator it =
+                packet_tunnel_sessions.find(build_scoped_virtual_ip_key(sender_session->server_key,
+                                                                        signal.peer_virtual_ip_be));
             if (it != packet_tunnel_sessions.end()) {
                 target_session = it->second;
             }
@@ -1861,11 +1902,17 @@ private:
         }
 
         const string sender_virtual_ip = ipv4_be_to_string(sender_session->virtual_ip_be);
+        const string sender_scope_key =
+            build_scoped_virtual_ip_key(sender_session->server_key, sender_virtual_ip);
+        const string sender_scope_label = describe_scoped_virtual_ip(sender_session);
         const string target_virtual_ip = ipv4_be_to_string(target_session->virtual_ip_be);
+        const string target_scope_key =
+            build_scoped_virtual_ip_key(target_session->server_key, target_virtual_ip);
+        const string target_scope_label = describe_scoped_virtual_ip(target_session);
         if (!session_allows_peer_direct(sender_session) ||
             !session_allows_peer_direct(target_session)) {
             if (session_allows_peer_direct(sender_session)) {
-                const uint64_t target_version = peer_coord_.GetEndpointVersion(target_virtual_ip);
+                const uint64_t target_version = peer_coord_.GetEndpointVersion(target_scope_key);
                 send_peer_disable_notice(sender_session,
                                          target_session->virtual_ip_be,
                                          target_version,
@@ -1873,14 +1920,14 @@ private:
             }
             Logger::debug("[IP Tunnel|" + sender_session->session_uuid +
                           "] suppress " + packet_tunnel_frame_name(frame_type) +
-                          " for relay-only pair " + sender_virtual_ip + " -> " +
-                          target_virtual_ip);
+                          " for relay-only pair " + sender_scope_label + " -> " +
+                          target_scope_label);
             return true;
         }
 
-        uint64_t sender_version = peer_coord_.GetEndpointVersion(sender_virtual_ip);
+        uint64_t sender_version = peer_coord_.GetEndpointVersion(sender_scope_key);
         if (sender_version == 0) {
-            sender_version = peer_coord_.BumpEndpointVersion(sender_virtual_ip);
+            sender_version = peer_coord_.BumpEndpointVersion(sender_scope_key);
         }
 
         vector<uint8_t> payload;
@@ -1896,9 +1943,9 @@ private:
         }
 
         if (frame_type == packet_tunnel::kFramePeerKeepalive) {
-            peer_coord_.TouchPeer(sender_virtual_ip, sender_version);
+            peer_coord_.TouchPeer(sender_scope_key, sender_version);
         } else {
-            peer_coord_.ObservePeerFrame(sender_virtual_ip,
+            peer_coord_.ObservePeerFrame(sender_scope_key,
                                          sender_version,
                                          frame_type == packet_tunnel::kFramePeerAck
                                              ? PeerEndpointState::Active
@@ -1907,8 +1954,8 @@ private:
 
         Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] relay " +
                       packet_tunnel_frame_name(frame_type) + " " +
-                      sender_virtual_ip + " -> " +
-                      target_virtual_ip +
+                      sender_scope_label + " -> " +
+                      target_scope_label +
                       " nonce=" + to_string(signal.nonce) +
                       " version=" + to_string(sender_version));
         {
@@ -1939,8 +1986,9 @@ private:
         shared_ptr<PacketTunnelSession> target_session;
         {
             lock_guard<mutex> lock(packet_tunnel_mutex);
-            map<uint32_t, shared_ptr<PacketTunnelSession>>::const_iterator it =
-                packet_tunnel_sessions.find(disable.peer_virtual_ip_be);
+            map<string, shared_ptr<PacketTunnelSession>>::const_iterator it =
+                packet_tunnel_sessions.find(build_scoped_virtual_ip_key(sender_session->server_key,
+                                                                        disable.peer_virtual_ip_be));
             if (it != packet_tunnel_sessions.end()) {
                 target_session = it->second;
             }
@@ -1951,9 +1999,12 @@ private:
         }
 
         const string sender_virtual_ip = ipv4_be_to_string(sender_session->virtual_ip_be);
-        uint64_t sender_version = peer_coord_.GetEndpointVersion(sender_virtual_ip);
+        const string sender_scope_key =
+            build_scoped_virtual_ip_key(sender_session->server_key, sender_virtual_ip);
+        const string sender_scope_label = describe_scoped_virtual_ip(sender_session);
+        uint64_t sender_version = peer_coord_.GetEndpointVersion(sender_scope_key);
         if (sender_version == 0) {
-            sender_version = peer_coord_.BumpEndpointVersion(sender_virtual_ip);
+            sender_version = peer_coord_.BumpEndpointVersion(sender_scope_key);
         }
 
         vector<uint8_t> payload(packet_tunnel::kPeerDisablePayloadSize, 0);
@@ -1968,10 +2019,10 @@ private:
             return false;
         }
 
-        peer_coord_.ObservePeerFrame(sender_virtual_ip, sender_version, PeerEndpointState::RelayOnly);
+        peer_coord_.ObservePeerFrame(sender_scope_key, sender_version, PeerEndpointState::RelayOnly);
         Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] relay peer_disable " +
-                      sender_virtual_ip + " -> " +
-                      ipv4_be_to_string(target_session->virtual_ip_be) +
+                      sender_scope_label + " -> " +
+                      describe_scoped_virtual_ip(target_session) +
                       " reason=" + to_string((int)disable.reason) +
                       " version=" + to_string(sender_version));
         {
@@ -2021,10 +2072,21 @@ private:
                 continue;
             }
 
+            string scoped_server_key;
+            map<uint32_t, string>::const_iterator local_node_it =
+                local_node_server_keys_by_ip_be.find(src_ip_be);
+            if (local_node_it != local_node_server_keys_by_ip_be.end()) {
+                scoped_server_key = local_node_it->second;
+            } else if (local_node_server_keys_by_ip_be.size() == 1) {
+                scoped_server_key = local_node_server_keys_by_ip_be.begin()->second;
+            }
+
             shared_ptr<PacketTunnelSession> session;
-            {
+            if (!scoped_server_key.empty()) {
                 lock_guard<mutex> lock(packet_tunnel_mutex);
-                auto it = packet_tunnel_sessions.find(dst_ip_be);
+                map<string, shared_ptr<PacketTunnelSession>>::const_iterator it =
+                    packet_tunnel_sessions.find(build_scoped_virtual_ip_key(scoped_server_key,
+                                                                            dst_ip_be));
                 if (it != packet_tunnel_sessions.end()) {
                     session = it->second;
                 }
@@ -2032,7 +2094,10 @@ private:
 
             if (!session) {
                 Logger::debug("[" + server_name + "|IP Tunnel] no session for dst virtual IP: " +
-                              ipv4_be_to_string(dst_ip_be) + " src=" + ipv4_be_to_string(src_ip_be) +
+                              (scoped_server_key.empty()
+                                   ? ipv4_be_to_string(dst_ip_be)
+                                   : describe_scoped_virtual_ip(scoped_server_key, dst_ip_be)) +
+                              " src=" + ipv4_be_to_string(src_ip_be) +
                               " proto=" + to_string((int)ipv4_protocol(packet)));
                 continue;
             }
@@ -2192,6 +2257,17 @@ public:
         has_gateway_ip_be = parse_ipv4_be(tun_config.gateway_ip, &gateway_ip_be);
         has_server_virtual_ip_be = parse_ipv4_be(tun_config.server_virtual_ip, &server_virtual_ip_be);
         has_virtual_subnet_be = parse_cidr_be(tun_config.subnet_cidr, &virtual_network_ip_be, &virtual_subnet_mask_be);
+        local_node_server_keys_by_ip_be.clear();
+        for (map<string, string>::const_iterator it = config.local_node_server_keys.begin();
+             it != config.local_node_server_keys.end(); ++it) {
+            uint32_t local_node_ip_be = 0;
+            if (!parse_ipv4_be(it->first, &local_node_ip_be)) {
+                Logger::warning("[" + server_name + "] invalid local node virtual_ip for server_key map: " +
+                                it->first);
+                continue;
+            }
+            local_node_server_keys_by_ip_be[local_node_ip_be] = it->second;
+        }
 
         string tun_error;
         if (tun_manager.Setup(tun_config, &tun_error)) {
@@ -2326,12 +2402,16 @@ private:
 
                     IPPoolManager::LeaseRecord active_lease;
                     string lease_error;
+                    string resolved_server_key;
                     bool has_active_lease = false;
                     if (!session_uuid.empty()) {
-                        has_active_lease = query_active_tcp_config_lease(to_string(config.listen_port),
+                        has_active_lease = query_active_tcp_config_lease("",
                                                                          session_uuid,
                                                                          &active_lease,
                                                                          &lease_error);
+                        if (has_active_lease) {
+                            resolved_server_key = active_lease.server_key;
+                        }
                     } else {
                         lease_error = "missing session_uuid";
                     }
@@ -2346,6 +2426,9 @@ private:
                         lease_error = "tun_manager is not active";
                     } else if (!has_active_lease) {
                         ack[1] = packet_tunnel::kStatusInvalidRequest;
+                    } else if (resolved_server_key.empty()) {
+                        ack[1] = packet_tunnel::kStatusInvalidRequest;
+                        lease_error = "lease server_key is missing";
                     } else if (active_lease.virtual_ip != virtual_ip) {
                         ack[1] = packet_tunnel::kStatusInvalidRequest;
                         lease_error = "lease virtual_ip mismatch";
@@ -2368,7 +2451,12 @@ private:
                     }
 
                     shared_ptr<PacketTunnelSession> session =
-                        make_shared<PacketTunnelSession>(-1, client_str, session_uuid, virtual_ip_be, mtu);
+                        make_shared<PacketTunnelSession>(-1,
+                                                         client_str,
+                                                         session_uuid,
+                                                         resolved_server_key,
+                                                         virtual_ip_be,
+                                                         mtu);
                     session->use_udp = true;
                     session->udp_addr = client_addr;
                     session->udp_addr_len = client_addr_len;
@@ -2382,7 +2470,8 @@ private:
                     shared_ptr<PacketTunnelSession> replaced_by_endpoint;
                     {
                         lock_guard<mutex> lock(packet_tunnel_mutex);
-                        auto it = packet_tunnel_sessions.find(virtual_ip_be);
+                        auto it = packet_tunnel_sessions.find(build_scoped_virtual_ip_key(resolved_server_key,
+                                                                                           virtual_ip_be));
                         if (it != packet_tunnel_sessions.end()) {
                             replaced_by_virtual_ip = it->second;
                         }
@@ -2396,10 +2485,13 @@ private:
                         if (replaced_by_endpoint != replaced_by_virtual_ip) {
                             erase_packet_tunnel_session_locked(replaced_by_endpoint);
                         }
-                        packet_tunnel_sessions[virtual_ip_be] = session;
+                        packet_tunnel_sessions[build_scoped_virtual_ip_key(resolved_server_key,
+                                                                           virtual_ip_be)] = session;
                         packet_tunnel_sessions_by_endpoint[client_str] = session;
                     }
-                    peer_coord_.ObservePeerFrame(virtual_ip, 0, PeerEndpointState::RelayOnly);
+                    peer_coord_.ObservePeerFrame(build_scoped_virtual_ip_key(resolved_server_key, virtual_ip),
+                                                 0,
+                                                 PeerEndpointState::RelayOnly);
 
                     if (replaced_by_virtual_ip && !replaced_by_virtual_ip->use_udp && replaced_by_virtual_ip->client_fd >= 0) {
                         shutdown(replaced_by_virtual_ip->client_fd, SHUT_RDWR);
@@ -2411,7 +2503,8 @@ private:
 
                     if (replaced_by_virtual_ip && replaced_by_virtual_ip != session) {
                         Logger::info("[" + server_name + "|IP Tunnel] replace session by virtual_ip: old=" +
-                                     replaced_by_virtual_ip->client_str + " virtual_ip=" + virtual_ip);
+                                     replaced_by_virtual_ip->client_str + " virtual_ip=" +
+                                     describe_scoped_virtual_ip(resolved_server_key, virtual_ip_be));
                     }
                     if (replaced_by_endpoint && replaced_by_endpoint != replaced_by_virtual_ip) {
                         Logger::info("[" + server_name + "|IP Tunnel] replace session by endpoint: endpoint=" +
@@ -2420,7 +2513,8 @@ private:
                     }
 
                     Logger::info("[IP Tunnel|" + session_uuid + "] UDP session established: client=" +
-                                 client_str + ", virtual_ip=" + virtual_ip +
+                                 client_str + ", virtual_ip=" +
+                                 describe_scoped_virtual_ip(resolved_server_key, virtual_ip_be) +
                                  ", direct=" +
                                  string(session->allow_peer_direct ? "enabled" : "relay_only"));
                     announce_peer_offers_for_session(session);
@@ -2470,7 +2564,8 @@ private:
                                         " payload_len=" + to_string(payload_len));
                         continue;
                     }
-                    peer_coord_.ObservePeerFrame(ipv4_be_to_string(offer.peer_virtual_ip_be),
+                    peer_coord_.ObservePeerFrame(build_scoped_virtual_ip_key(session->server_key,
+                                                                              offer.peer_virtual_ip_be),
                                                  offer.endpoint_version,
                                                  PeerEndpointState::OfferPending);
                     Logger::debug("[IP Tunnel|" + session->session_uuid + "] peer control " +
@@ -2490,7 +2585,8 @@ private:
                                         " payload_len=" + to_string(payload_len));
                         continue;
                     }
-                    peer_coord_.ObservePeerFrame(ipv4_be_to_string(disable.peer_virtual_ip_be),
+                    peer_coord_.ObservePeerFrame(build_scoped_virtual_ip_key(session->server_key,
+                                                                              disable.peer_virtual_ip_be),
                                                  disable.endpoint_version,
                                                  PeerEndpointState::RelayOnly);
                     Logger::debug("[IP Tunnel|" + session->session_uuid + "] peer control " +
@@ -2513,10 +2609,12 @@ private:
                     continue;
                 }
                 if (frame_type == packet_tunnel::kFramePeerKeepalive) {
-                    peer_coord_.TouchPeer(ipv4_be_to_string(signal.peer_virtual_ip_be),
+                    peer_coord_.TouchPeer(build_scoped_virtual_ip_key(session->server_key,
+                                                                      signal.peer_virtual_ip_be),
                                           signal.endpoint_version);
                 } else {
-                    peer_coord_.ObservePeerFrame(ipv4_be_to_string(signal.peer_virtual_ip_be),
+                    peer_coord_.ObservePeerFrame(build_scoped_virtual_ip_key(session->server_key,
+                                                                              signal.peer_virtual_ip_be),
                                                  signal.endpoint_version,
                                                  frame_type == packet_tunnel::kFramePeerAck
                                                      ? PeerEndpointState::Active
@@ -2575,6 +2673,20 @@ private:
 
             if (dst_is_virtual_peer &&
                 relay_virtual_peer_packet(session, dst_ip_be, payload, payload_len)) {
+                continue;
+            }
+
+            const bool route_to_local_gateway = has_gateway_ip_be && dst_ip_be == gateway_ip_be;
+            bool route_to_local_node = false;
+            map<uint32_t, string>::const_iterator local_dst_it =
+                local_node_server_keys_by_ip_be.find(dst_ip_be);
+            if (local_dst_it != local_node_server_keys_by_ip_be.end() &&
+                local_dst_it->second == session->server_key) {
+                route_to_local_node = true;
+            }
+            if (!route_to_local_gateway && !route_to_local_node) {
+                Logger::debug("[IP Tunnel|" + session->session_uuid + "] no peer/local route for dst=" +
+                              describe_scoped_virtual_ip(session->server_key, dst_ip_be));
                 continue;
             }
 
@@ -2719,6 +2831,7 @@ private:
 
         shared_ptr<PacketTunnelSession> session;
         uint32_t virtual_ip_be = 0;
+        string resolved_server_key;
 
         try {
             int flag = 1;
@@ -2749,10 +2862,13 @@ private:
             string lease_error;
             bool has_active_lease = false;
             if (!session_uuid.empty()) {
-                has_active_lease = query_active_tcp_config_lease(to_string(config.listen_port),
+                has_active_lease = query_active_tcp_config_lease("",
                                                                  session_uuid,
                                                                  &active_lease,
                                                                  &lease_error);
+                if (has_active_lease) {
+                    resolved_server_key = active_lease.server_key;
+                }
             } else {
                 lease_error = "missing session_uuid";
             }
@@ -2767,6 +2883,9 @@ private:
                 lease_error = "tun_manager is not active";
             } else if (!has_active_lease) {
                 ack[1] = packet_tunnel::kStatusInvalidRequest;
+            } else if (resolved_server_key.empty()) {
+                ack[1] = packet_tunnel::kStatusInvalidRequest;
+                lease_error = "lease server_key is missing";
             } else if (active_lease.virtual_ip != virtual_ip) {
                 ack[1] = packet_tunnel::kStatusInvalidRequest;
                 lease_error = "lease virtual_ip mismatch";
@@ -2793,7 +2912,12 @@ private:
                 return;
             }
 
-            session = make_shared<PacketTunnelSession>(client_fd, client_str, session_uuid, virtual_ip_be, mtu);
+            session = make_shared<PacketTunnelSession>(client_fd,
+                                                       client_str,
+                                                       session_uuid,
+                                                       resolved_server_key,
+                                                       virtual_ip_be,
+                                                       mtu);
             session->handshake_flags = flags;
             session->allow_peer_direct =
                 (flags & packet_tunnel::kHandshakeFlagRelayOnly) == 0;
@@ -2802,22 +2926,27 @@ private:
             shared_ptr<PacketTunnelSession> replaced_session;
             {
                 lock_guard<mutex> lock(packet_tunnel_mutex);
-                auto it = packet_tunnel_sessions.find(virtual_ip_be);
+                auto it = packet_tunnel_sessions.find(build_scoped_virtual_ip_key(resolved_server_key,
+                                                                                   virtual_ip_be));
                 if (it != packet_tunnel_sessions.end()) {
                     replaced_session = it->second;
                 }
                 erase_packet_tunnel_session_locked(replaced_session);
-                packet_tunnel_sessions[virtual_ip_be] = session;
+                packet_tunnel_sessions[build_scoped_virtual_ip_key(resolved_server_key,
+                                                                   virtual_ip_be)] = session;
             }
-            peer_coord_.ObservePeerFrame(virtual_ip, 0, PeerEndpointState::RelayOnly);
+            peer_coord_.ObservePeerFrame(build_scoped_virtual_ip_key(resolved_server_key, virtual_ip),
+                                         0,
+                                         PeerEndpointState::RelayOnly);
 
             if (replaced_session && replaced_session->client_fd != client_fd) {
                 shutdown(replaced_session->client_fd, SHUT_RDWR);
-                Logger::warning("[IP Tunnel|" + session_uuid + "] 替换旧会话: virtual_ip=" + virtual_ip);
+                Logger::warning("[IP Tunnel|" + session_uuid + "] 替换旧会话: virtual_ip=" +
+                                describe_scoped_virtual_ip(resolved_server_key, virtual_ip_be));
             }
 
             Logger::debug("[IP Tunnel|" + session_uuid + "] 专用会话已建立: 客户端=" + client_str +
-                         ", virtual_ip=" + virtual_ip);
+                         ", virtual_ip=" + describe_scoped_virtual_ip(resolved_server_key, virtual_ip_be));
 
             while (running && session->active) {
                 uint8_t header[packet_tunnel::kFrameHeaderSize] = {};
@@ -2857,7 +2986,8 @@ private:
                                             " payload_len=" + to_string(payload_len));
                             continue;
                         }
-                        peer_coord_.ObservePeerFrame(ipv4_be_to_string(offer.peer_virtual_ip_be),
+                        peer_coord_.ObservePeerFrame(build_scoped_virtual_ip_key(session->server_key,
+                                                                                  offer.peer_virtual_ip_be),
                                                      offer.endpoint_version,
                                                      PeerEndpointState::OfferPending);
                         Logger::debug("[IP Tunnel|" + session_uuid + "] peer control " +
@@ -2877,7 +3007,8 @@ private:
                                             " payload_len=" + to_string(payload_len));
                             continue;
                         }
-                        peer_coord_.ObservePeerFrame(ipv4_be_to_string(disable.peer_virtual_ip_be),
+                        peer_coord_.ObservePeerFrame(build_scoped_virtual_ip_key(session->server_key,
+                                                                                  disable.peer_virtual_ip_be),
                                                      disable.endpoint_version,
                                                      PeerEndpointState::RelayOnly);
                         Logger::debug("[IP Tunnel|" + session_uuid + "] peer control " +
@@ -2900,10 +3031,12 @@ private:
                         continue;
                     }
                     if (frame_type == packet_tunnel::kFramePeerKeepalive) {
-                        peer_coord_.TouchPeer(ipv4_be_to_string(signal.peer_virtual_ip_be),
+                        peer_coord_.TouchPeer(build_scoped_virtual_ip_key(session->server_key,
+                                                                          signal.peer_virtual_ip_be),
                                               signal.endpoint_version);
                     } else {
-                        peer_coord_.ObservePeerFrame(ipv4_be_to_string(signal.peer_virtual_ip_be),
+                        peer_coord_.ObservePeerFrame(build_scoped_virtual_ip_key(session->server_key,
+                                                                                  signal.peer_virtual_ip_be),
                                                      signal.endpoint_version,
                                                      frame_type == packet_tunnel::kFramePeerAck
                                                          ? PeerEndpointState::Active
@@ -2960,6 +3093,20 @@ private:
 
                     if (dst_is_virtual_peer &&
                         relay_virtual_peer_packet(session, dst_ip_be, payload.data(), payload_len)) {
+                        continue;
+                    }
+
+                    const bool route_to_local_gateway = has_gateway_ip_be && dst_ip_be == gateway_ip_be;
+                    bool route_to_local_node = false;
+                    map<uint32_t, string>::const_iterator local_dst_it =
+                        local_node_server_keys_by_ip_be.find(dst_ip_be);
+                    if (local_dst_it != local_node_server_keys_by_ip_be.end() &&
+                        local_dst_it->second == session->server_key) {
+                        route_to_local_node = true;
+                    }
+                    if (!route_to_local_gateway && !route_to_local_node) {
+                        Logger::debug("[IP Tunnel|" + session_uuid + "] no peer/local route for dst=" +
+                                      describe_scoped_virtual_ip(session->server_key, dst_ip_be));
                         continue;
                     }
 
@@ -3079,6 +3226,8 @@ GlobalConfig load_config(const string& filename) {
         default_node.bind_on_gateway = true;
         global_config.nodes.push_back(default_node);
         runtime_server.local_node_ips.push_back(default_node.server_virtual_ip);
+        runtime_server.local_node_server_keys[default_node.server_virtual_ip] =
+            to_string(default_node.id);
         runtime_server.server_virtual_ip = default_node.server_virtual_ip;
         runtime_server.game_server_ip = runtime_server.server_virtual_ip;
         global_config.servers.push_back(runtime_server);
@@ -3146,6 +3295,7 @@ GlobalConfig load_config(const string& filename) {
 
     vector<string> node_objects = extract_json_object_array_blocks(content, "nodes");
     bool has_explicit_gateway_binding = false;
+    bool has_any_bind_flag = false;
     for (size_t i = 0; i < node_objects.size(); ++i) {
         NodeConfig node;
         node.id = (int)i + 1;
@@ -3160,6 +3310,9 @@ GlobalConfig load_config(const string& filename) {
         node.download_url = extract_json_string(node_objects[i], "download_url");
         bool bind_found = false;
         node.bind_on_gateway = extract_json_bool(node_objects[i], "bind_on_gateway", &bind_found);
+        if (bind_found) {
+            has_any_bind_flag = true;
+        }
         if (node.bind_on_gateway) {
             has_explicit_gateway_binding = true;
         }
@@ -3174,7 +3327,7 @@ GlobalConfig load_config(const string& filename) {
         global_config.nodes.push_back(default_node);
     }
 
-    if (!has_explicit_gateway_binding && !global_config.nodes.empty()) {
+    if (!has_explicit_gateway_binding && !has_any_bind_flag && global_config.nodes.size() == 1) {
         global_config.nodes[0].bind_on_gateway = true;
     }
 
@@ -3183,6 +3336,8 @@ GlobalConfig load_config(const string& filename) {
             continue;
         }
         runtime_server.local_node_ips.push_back(global_config.nodes[i].server_virtual_ip);
+        runtime_server.local_node_server_keys[global_config.nodes[i].server_virtual_ip] =
+            to_string(global_config.nodes[i].id);
         if (runtime_server.server_virtual_ip.empty()) {
             runtime_server.server_virtual_ip = global_config.nodes[i].server_virtual_ip;
         }

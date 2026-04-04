@@ -32,6 +32,13 @@
 
 using namespace std;
 
+class Logger {
+public:
+    static void warning(const string& msg);
+    static void error(const string& msg);
+    static void debug(const string& msg);
+};
+
 // 前向声明
 void* config_monitor_thread(void* arg);
 
@@ -72,7 +79,6 @@ static string g_tunnel_server_ip;  // 隧道服务器IP
 static bool g_auto_reload = true;  // 自动重载开关
 static pthread_t g_monitor_thread = 0;  // 配置监控线程ID
 static IPPoolManager g_ip_pool_manager;
-static const char* kNetworkPoolKey = "network";
 
 // 版本更新配置
 static string g_latest_md5;  // 最新版本MD5
@@ -97,6 +103,14 @@ static void tcp_config_tracef(const char* fmt, ...) {
     va_start(args, fmt);
     vprintf(fmt, args);
     va_end(args);
+}
+
+static string tcp_config_errno_text(int err) {
+    return string(strerror(err));
+}
+
+static void tcp_config_log_warn(const string& msg) {
+    Logger::warning("[TCP配置] " + msg);
 }
 
 // 简单的JSON字符串提取函数
@@ -528,26 +542,26 @@ bool rebuild_ip_pools(const NetworkConfig& network,
     }
 
     IPPoolManager manager;
-    IPPoolManager::PoolConfig pool_config;
-    pool_config.pool_key = kNetworkPoolKey;
-    pool_config.cidr = network.virtual_subnet;
-    pool_config.gateway_ip = network.virtual_gateway;
-    pool_config.lease_seconds = network.lease_seconds > 0
-        ? (uint32_t)network.lease_seconds
-        : ip_tunnel::kDefaultLeaseSeconds;
-
     for (size_t i = 0; i < nodes.size(); ++i) {
+        IPPoolManager::PoolConfig pool_config;
+        pool_config.pool_key = canonical_node_key(nodes[i]);
+        pool_config.cidr = network.virtual_subnet;
+        pool_config.gateway_ip = network.virtual_gateway;
+        pool_config.lease_seconds = network.lease_seconds > 0
+            ? (uint32_t)network.lease_seconds
+            : ip_tunnel::kDefaultLeaseSeconds;
+
         if (!nodes[i].server_virtual_ip.empty()) {
             pool_config.additional_reserved_ips.push_back(nodes[i].server_virtual_ip);
         }
-    }
 
-    string pool_error;
-    if (!manager.ConfigurePool(pool_config, &pool_error)) {
-        if (error) {
-            *error = "network pool config failed: " + pool_error;
+        string pool_error;
+        if (!manager.ConfigurePool(pool_config, &pool_error)) {
+            if (error) {
+                *error = "pool[" + pool_config.pool_key + "] config failed: " + pool_error;
+            }
+            return false;
         }
-        return false;
     }
 
     *out_manager = manager;
@@ -669,6 +683,7 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
     }
 
     bool has_explicit_gateway_binding = false;
+    bool has_any_bind_flag = false;
     temp_nodes.reserve(node_objects.size());
     for (size_t i = 0; i < node_objects.size(); ++i) {
         NodeConfig node;
@@ -684,6 +699,9 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
         node.download_url = extract_json_string(node_objects[i], "download_url");
         bool bind_found = false;
         node.bind_on_gateway = extract_json_bool(node_objects[i], "bind_on_gateway", &bind_found);
+        if (bind_found) {
+            has_any_bind_flag = true;
+        }
         if (node.bind_on_gateway) {
             has_explicit_gateway_binding = true;
         }
@@ -700,7 +718,7 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
         temp_nodes.push_back(node);
     }
 
-    if (!has_explicit_gateway_binding && !temp_nodes.empty()) {
+    if (!has_explicit_gateway_binding && !has_any_bind_flag && temp_nodes.size() == 1) {
         temp_nodes[0].bind_on_gateway = true;
     }
 
@@ -768,6 +786,10 @@ static void send_tcp_response(int client_fd, const string& response, const char*
     if (sent < 0) {
         fprintf(stderr, "[TCP][WARN] send failed context=%s errno=%d request=%s\n",
                 context, errno, request != NULL ? request : "(unknown)");
+        tcp_config_log_warn("发送响应失败: context=" + string(context) +
+                            " errno=" + to_string(errno) +
+                            " error=" + tcp_config_errno_text(errno) +
+                            " request=" + string(request != NULL ? request : "(unknown)"));
     }
 }
 
@@ -779,9 +801,13 @@ void handle_tcp_request(int client_fd, const string& client_label) {
         if (n == 0) {
             fprintf(stderr, "[TCP][WARN] connection closed before request: client=%s\n",
                     client_label.c_str());
+            tcp_config_log_warn("连接在读取请求前被关闭: client=" + client_label);
         } else {
             fprintf(stderr, "[TCP][WARN] recv request failed: client=%s errno=%d\n",
                     client_label.c_str(), errno);
+            tcp_config_log_warn("读取请求失败: client=" + client_label +
+                                " errno=" + to_string(errno) +
+                                " error=" + tcp_config_errno_text(errno));
         }
         close(client_fd);
         return;
@@ -832,7 +858,7 @@ void handle_tcp_request(int client_fd, const string& client_label) {
 
                 IPPoolManager::LeaseRecord lease_record;
                 string error;
-                if (g_ip_pool_manager.AcquireLease(kNetworkPoolKey, lease_request, &lease_record, &error)) {
+                if (g_ip_pool_manager.AcquireLease(canonical_node_key(*node), lease_request, &lease_record, &error)) {
                     lease_record.server_virtual_ip = node->server_virtual_ip;
                     json_response = generate_lease_json(*node, lease_record, "lease granted");
                 } else {
@@ -857,13 +883,17 @@ void handle_tcp_request(int client_fd, const string& client_label) {
             } else {
                 IPPoolManager::LeaseRecord lease_record;
                 string error;
-                if (g_ip_pool_manager.RenewLease(kNetworkPoolKey, parts[2], &lease_record, &error)) {
+                if (g_ip_pool_manager.RenewLease(canonical_node_key(*node), parts[2], &lease_record, &error)) {
                     lease_record.server_virtual_ip = node->server_virtual_ip;
                     json_response = generate_lease_json(*node, lease_record, "lease renewed");
                 } else {
                     fprintf(stderr,
                             "[TCP][WARN] renew lease failed: client=%s server_key=%s session=%s error=%s\n",
                             client_label.c_str(), parts[1].c_str(), parts[2].c_str(), error.c_str());
+                    tcp_config_log_warn("续租失败: client=" + client_label +
+                                        " server_key=" + parts[1] +
+                                        " session=" + parts[2] +
+                                        " error=" + error);
                     json_response = make_status_json(status_from_error(error), error, canonical_node_key(*node));
                 }
             }
@@ -882,7 +912,7 @@ void handle_tcp_request(int client_fd, const string& client_label) {
             const NodeConfig* node = find_node_by_key_locked(parts[1]);
             if (node == NULL) {
                 json_response = make_status_json(ip_tunnel::kStatusServerNotFound, "node not found", parts[1]);
-            } else if (g_ip_pool_manager.ReleaseLease(kNetworkPoolKey, parts[2])) {
+            } else if (g_ip_pool_manager.ReleaseLease(canonical_node_key(*node), parts[2])) {
                 json_response = make_status_json(ip_tunnel::kStatusOk, "lease released", canonical_node_key(*node));
             } else {
                 json_response = make_status_json(ip_tunnel::kStatusLeaseNotFound, "lease not found", canonical_node_key(*node));
@@ -1078,8 +1108,33 @@ bool query_active_tcp_config_lease(const std::string& server_key,
                                    IPPoolManager::LeaseRecord* out_record,
                                    std::string* error) {
     lock_guard<mutex> lock(g_servers_mutex);
-    (void)server_key;
-    return g_ip_pool_manager.GetLease(kNetworkPoolKey, session_uuid, out_record, error);
+    if (!server_key.empty()) {
+        return g_ip_pool_manager.GetLease(server_key, session_uuid, out_record, error);
+    }
+
+    for (size_t i = 0; i < g_nodes.size(); ++i) {
+        IPPoolManager::LeaseRecord lease_record;
+        string lease_error;
+        if (!g_ip_pool_manager.GetLease(canonical_node_key(g_nodes[i]),
+                                        session_uuid,
+                                        &lease_record,
+                                        &lease_error)) {
+            continue;
+        }
+
+        if (out_record != NULL) {
+            *out_record = lease_record;
+        }
+        if (error != NULL) {
+            error->clear();
+        }
+        return true;
+    }
+
+    if (error != NULL) {
+        *error = "lease not found";
+    }
+    return false;
 }
 
 void* config_monitor_thread(void* arg) {
