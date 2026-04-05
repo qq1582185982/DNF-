@@ -1,0 +1,82 @@
+<svg width="1280" height="860" viewBox="0 0 1280 860" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="860" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F8FAFC"/>
+      <stop offset="1" stop-color="#EEF2FF"/>
+    </linearGradient>
+    <linearGradient id="header" x1="0" y1="0" x2="1280" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#DBEAFE"/>
+      <stop offset="1" stop-color="#E0E7FF"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L10 5L0 10V0Z" fill="#64748B"/>
+    </marker>
+    <style>
+      .title { font: 700 34px 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif; fill: #0F172A; }
+      .subtitle { font: 600 18px 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif; fill: #334155; }
+      .label { font: 700 24px 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif; fill: #0F172A; }
+      .body { font: 500 18px 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif; fill: #334155; }
+      .small { font: 600 15px 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif; fill: #475569; }
+      .chip { font: 700 16px 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif; fill: #1D4ED8; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1280" height="860" rx="28" fill="url(#bg)"/>
+  <rect x="28" y="28" width="1224" height="88" rx="22" fill="url(#header)" stroke="#BFDBFE"/>
+  <text x="64" y="82" class="title">DNF 虚拟局域网隧道当前架构</text>
+  <text x="64" y="105" class="subtitle">配置面使用纯 TCP 文本协议，数据面使用 UDP Packet Tunnel</text>
+
+  <rect x="360" y="150" width="560" height="96" rx="18" fill="#EFF6FF" stroke="#93C5FD" stroke-width="2"/>
+  <text x="640" y="182" text-anchor="middle" class="chip">配置面</text>
+  <text x="640" y="208" text-anchor="middle" class="subtitle">
+    <tspan x="640" dy="0">GET_SERVERS / GET_VERSION / LEASE_IP</tspan>
+    <tspan x="640" dy="24">RENEW_LEASE / RELEASE_LEASE</tspan>
+  </text>
+
+  <rect x="80" y="270" width="440" height="180" rx="22" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+  <rect x="80" y="270" width="440" height="52" rx="22" fill="#E0F2FE"/>
+  <text x="112" y="304" class="label">Windows 客户端</text>
+  <text x="112" y="352" class="body">• GUI 选择节点</text>
+  <text x="112" y="386" class="body">• 持久化 client_id</text>
+  <text x="112" y="420" class="body">• Wintun 虚拟网卡</text>
+
+  <rect x="760" y="270" width="440" height="180" rx="22" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+  <rect x="760" y="270" width="440" height="52" rx="22" fill="#DCFCE7"/>
+  <text x="792" y="304" class="label">Linux 节点客户端</text>
+  <text x="792" y="352" class="body">• 无界面守护进程</text>
+  <text x="792" y="386" class="body">• server_key / TUN</text>
+  <text x="792" y="420" class="body">• 自动重试 / 自动重连</text>
+
+  <line x1="640" y1="246" x2="300" y2="268" stroke="#94A3B8" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="640" y1="246" x2="980" y2="268" stroke="#94A3B8" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="410" y="500" width="460" height="68" rx="18" fill="#FFF7ED" stroke="#FDBA74" stroke-width="2"/>
+  <text x="640" y="541" text-anchor="middle" class="label">UDP Packet Tunnel</text>
+
+  <line x1="300" y1="452" x2="300" y2="534" stroke="#94A3B8" stroke-width="3"/>
+  <line x1="300" y1="534" x2="408" y2="534" stroke="#94A3B8" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="980" y1="452" x2="980" y2="534" stroke="#94A3B8" stroke-width="3"/>
+  <line x1="980" y1="534" x2="872" y2="534" stroke="#94A3B8" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="250" y="624" width="780" height="146" rx="24" fill="#FFFFFF" stroke="#94A3B8" stroke-width="2.5"/>
+  <rect x="250" y="624" width="780" height="54" rx="24" fill="#EDE9FE"/>
+  <text x="286" y="660" class="label">dnf-tunnel-server</text>
+  <text x="286" y="708" class="body">• 维护虚拟网段 / 虚拟网关</text>
+  <text x="286" y="742" class="body">• 维护 IP 租约池 / sticky IP</text>
+  <text x="640" y="708" class="body">• 提供纯 TCP 配置接口</text>
+  <text x="640" y="742" class="body">• 维护 UDP relay 会话 / peer 协调 / 节点作用域</text>
+
+  <line x1="640" y1="570" x2="640" y2="622" stroke="#94A3B8" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="80" y="780" width="500" height="64" rx="18" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+  <text x="106" y="810" class="small">
+    <tspan x="106" dy="0">网关机本地节点：bind_on_gateway=true</tspan>
+    <tspan x="106" dy="22">游戏服务直接占用虚拟 IP</tspan>
+  </text>
+
+  <rect x="700" y="780" width="500" height="64" rx="18" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+  <text x="726" y="810" class="small">
+    <tspan x="726" dy="0">远端 Linux 节点：bind_on_gateway=false</tspan>
+    <tspan x="726" dy="22">由 Linux 客户端接入后占用虚拟 IP</tspan>
+  </text>
+</svg>
