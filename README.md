@@ -281,7 +281,7 @@
     "tunnel_port": 30003,
     "virtual_subnet": "192.168.200.0/24",
     "virtual_gateway": "192.168.200.1",
-    "tunnel_server_ip": "cd.sviplk.com",
+    "tunnel_server_ip": "vpn.example.com",
     "max_connections": 1000,
     "lease_seconds": 120
   },
@@ -338,7 +338,7 @@ RELEASE_LEASE <server_key> <session_uuid>
       "id": 1,
       "name": "86幻境",
       "server_virtual_ip": "192.168.200.131",
-      "tunnel_server_ip": "cd.sviplk.com",
+      "tunnel_server_ip": "vpn.example.com",
       "tunnel_port": 30003,
       "download_url": "",
       "virtual_subnet": "192.168.200.0/24",
@@ -503,7 +503,7 @@ cd 客户端源码
 
 ```json
 {
-  "config_api_url": "cd.sviplk.com",
+  "config_api_url": "vpn.example.com",
   "config_api_port": 35000,
   "data_plane_mode": "wintun"
 }
@@ -540,7 +540,7 @@ cd linux客户端源码
 ### 最小配置
 
 ```ini
-api_url=cd.sviplk.com
+api_url=vpn.example.com
 api_port=35000
 
 server_key=1
@@ -561,7 +561,7 @@ if_name=dnfcli0
 
 ```ini
 # preferred_ip=192.168.200.131
-# tunnel_host=cd.sviplk.com
+# tunnel_host=vpn.example.com
 # tunnel_port=30003
 ```
 
@@ -601,8 +601,8 @@ sudo systemctl enable --now dnf-linux-client@vm95
 ```text
 lease granted: virtual_ip=192.168.200.131 gateway=192.168.200.1 server_virtual_ip=192.168.200.131
 TUN ready: if=dnfcli0 ip=192.168.200.131
-packet tunnel udp socket ready for relay server cd.sviplk.com:30003 ...
-packet tunnel connected: cd.sviplk.com:30003
+packet tunnel udp socket ready for relay server vpn.example.com:30003 ...
+packet tunnel connected: vpn.example.com:30003
 automatic reconnect succeeded: virtual_ip=192.168.200.131
 ```
 
