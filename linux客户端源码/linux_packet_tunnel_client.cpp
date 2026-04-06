@@ -340,6 +340,28 @@ bool TryDescribeLinuxUdpPacket(const uint8_t* packet, size_t packet_len, std::st
     return true;
 }
 
+bool IsFocusedLinuxGameUdpPort(uint16_t port) {
+    return port == 5063 || port == 2311 || port == 2312 || port == 2313;
+}
+
+bool IsFocusedLinuxGameUdpPacket(const uint8_t* packet, size_t packet_len) {
+    if (packet == NULL || packet_len < 20) {
+        return false;
+    }
+    if (((packet[0] >> 4) & 0x0F) != 4 || packet[9] != IPPROTO_UDP) {
+        return false;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len + 8) {
+        return false;
+    }
+
+    const uint16_t src_port = ntohs(*(const uint16_t*)(packet + ip_header_len));
+    const uint16_t dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
+    return IsFocusedLinuxGameUdpPort(src_port) || IsFocusedLinuxGameUdpPort(dst_port);
+}
+
 bool ParseLinuxIpv4StringToBe(const std::string& value, uint32_t* out_ip_be) {
     if (out_ip_be == NULL || value.empty()) {
         return false;
@@ -1172,7 +1194,28 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
             } else if (payload_len >= 20 && has_fresh_direct_route(LinuxIpv4ToString(payload + 12))) {
                 continue;
             }
-            tun_manager_->WritePacket(payload, payload_len, NULL);
+            const bool should_log_focused_udp = IsFocusedLinuxGameUdpPacket(payload, payload_len);
+            std::string udp_desc;
+            if (should_log_focused_udp) {
+                TryDescribeLinuxUdpPacket(payload, payload_len, &udp_desc);
+            }
+
+            std::string tun_error;
+            if (!tun_manager_->WritePacket(payload, payload_len, &tun_error)) {
+                if (should_log_focused_udp && !udp_desc.empty()) {
+                    LogWarn(std::string(from_known_peer ? "udp peer->tun write failed " :
+                                                           "udp tunnel->tun write failed ") +
+                            udp_desc + " error=" + tun_error);
+                } else {
+                    LogWarn("write packet to TUN failed: " + tun_error);
+                }
+                continue;
+            }
+
+            if (should_log_focused_udp && !udp_desc.empty()) {
+                LogInfo(std::string(from_known_peer ? "udp peer->tun " : "udp tunnel->tun ") +
+                        udp_desc);
+            }
             continue;
         }
     }

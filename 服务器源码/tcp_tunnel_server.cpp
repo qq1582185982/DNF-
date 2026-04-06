@@ -1412,6 +1412,31 @@ private:
                       " len=" + to_string(payload_len));
     }
 
+    bool is_focused_game_udp_port(uint16_t port) {
+        return port == 5063 || port == 2311 || port == 2312 || port == 2313;
+    }
+
+    void maybe_log_virtual_peer_udp_relay(const shared_ptr<PacketTunnelSession>& sender_session,
+                                          const shared_ptr<PacketTunnelSession>& target_session,
+                                          uint32_t src_ip_be,
+                                          uint32_t dst_ip_be,
+                                          uint16_t src_port,
+                                          uint16_t dst_port,
+                                          size_t payload_len) {
+        if (!sender_session ||
+            (!is_focused_game_udp_port(src_port) && !is_focused_game_udp_port(dst_port))) {
+            return;
+        }
+
+        Logger::info("[IP Tunnel|" + sender_session->session_uuid + "] relay peer UDP src=" +
+                     ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
+                     " dst=" + ipv4_be_to_string(dst_ip_be) + ":" + to_string(dst_port) +
+                     " len=" + to_string(payload_len) +
+                     " status=" + string(target_session ? "forward" : "unavailable") +
+                     " target=" + (target_session ? describe_scoped_virtual_ip(target_session)
+                                                   : describe_scoped_virtual_ip(sender_session->server_key, dst_ip_be)));
+    }
+
     const uint64_t kPeerOfferTimeoutMs = 9000;
     const uint64_t kPeerActiveTimeoutMs = 15000;
     const uint64_t kPacketTunnelUdpIdleTimeoutMs = 30000;
@@ -1587,6 +1612,16 @@ private:
             return false;
         }
 
+        uint32_t src_ip_be = 0;
+        memcpy(&src_ip_be, payload + 12, sizeof(src_ip_be));
+        uint16_t src_port = 0;
+        uint16_t dst_port = 0;
+        const bool is_udp_payload =
+            payload_len >= 20 &&
+            (((payload[0] >> 4) & 0x0F) == 4) &&
+            payload[9] == IPPROTO_UDP &&
+            ipv4_udp_ports(payload, payload_len, &src_port, &dst_port);
+
         shared_ptr<PacketTunnelSession> target_session;
         {
             lock_guard<mutex> lock(packet_tunnel_mutex);
@@ -1599,7 +1634,26 @@ private:
         }
 
         if (!target_session || !target_session->active || target_session == sender_session) {
+            if (is_udp_payload) {
+                maybe_log_virtual_peer_udp_relay(sender_session,
+                                                 target_session,
+                                                 src_ip_be,
+                                                 dst_ip_be,
+                                                 src_port,
+                                                 dst_port,
+                                                 payload_len);
+            }
             return false;
+        }
+
+        if (is_udp_payload) {
+            maybe_log_virtual_peer_udp_relay(sender_session,
+                                             target_session,
+                                             src_ip_be,
+                                             dst_ip_be,
+                                             src_port,
+                                             dst_port,
+                                             payload_len);
         }
 
         if (!send_packet_tunnel_frame(target_session,
