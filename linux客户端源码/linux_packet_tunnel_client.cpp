@@ -354,6 +354,44 @@ bool ParseLinuxIpv4StringToBe(const std::string& value, uint32_t* out_ip_be) {
     return true;
 }
 
+bool TryExtractLinuxPeerEndpointFromSockaddr(const sockaddr_storage& source_addr,
+                                             uint8_t* endpoint_family,
+                                             uint8_t* endpoint_addr,
+                                             uint16_t* endpoint_port) {
+    if (endpoint_family == NULL || endpoint_addr == NULL || endpoint_port == NULL) {
+        return false;
+    }
+
+    *endpoint_family = packet_tunnel::kPeerEndpointFamilyUnknown;
+    *endpoint_port = 0;
+    memset(endpoint_addr, 0, 16);
+
+    if (source_addr.ss_family == AF_INET) {
+        const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(&source_addr);
+        *endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
+        *endpoint_port = ntohs(addr4->sin_port);
+        memcpy(endpoint_addr, &addr4->sin_addr, 4);
+        return true;
+    }
+
+    if (source_addr.ss_family == AF_INET6) {
+        const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(&source_addr);
+        *endpoint_port = ntohs(addr6->sin6_port);
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&addr6->sin6_addr);
+        static const uint8_t kV4MappedPrefix[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
+        if (memcmp(bytes, kV4MappedPrefix, sizeof(kV4MappedPrefix)) == 0) {
+            *endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
+            memcpy(endpoint_addr, bytes + 12, 4);
+        } else {
+            *endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv6;
+            memcpy(endpoint_addr, bytes, 16);
+        }
+        return true;
+    }
+
+    return false;
+}
+
 std::string LinuxPeerEndpointToString(uint8_t family, const uint8_t* addr, uint16_t port) {
     char buffer[INET6_ADDRSTRLEN] = {};
     if (family == packet_tunnel::kPeerEndpointFamilyIpv4) {
@@ -1012,8 +1050,10 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
 
         const bool from_server = IsServerEndpoint(source_addr, source_addr_len);
         std::string peer_virtual_ip;
-        const bool from_known_peer = !from_server &&
-                                     TryResolvePeerBySource(source_addr, source_addr_len, &peer_virtual_ip);
+        bool from_known_peer = !from_server &&
+                               TryResolvePeerBySource(source_addr, source_addr_len, &peer_virtual_ip);
+        bool learned_direct_probe = false;
+        bool learned_direct_endpoint_changed = false;
         auto has_fresh_direct_route = [this](const std::string& candidate_peer_virtual_ip) -> bool {
             if (candidate_peer_virtual_ip.empty() || peer_link_manager_ == NULL) {
                 return false;
@@ -1048,6 +1088,37 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
 
         if (frame_type == packet_tunnel::kFrameIpv4Packet && tun_manager_ != NULL) {
             const uint8_t* payload = buffer.data() + packet_tunnel::kFrameHeaderSize;
+            uint8_t probe_type = 0;
+            const bool is_direct_probe =
+                ParseLinuxPeerDirectProbePacket(payload, payload_len, &probe_type);
+            if (!from_server && !from_known_peer && is_direct_probe && peer_link_manager_ != NULL &&
+                payload_len >= 20) {
+                const std::string inferred_peer_virtual_ip = LinuxIpv4ToString(payload + 12);
+                const std::string inferred_local_virtual_ip = LinuxIpv4ToString(payload + 16);
+                uint8_t endpoint_family = packet_tunnel::kPeerEndpointFamilyUnknown;
+                uint16_t endpoint_port = 0;
+                uint8_t endpoint_addr[16] = {};
+                if (!inferred_peer_virtual_ip.empty() &&
+                    inferred_peer_virtual_ip != virtual_ip_ &&
+                    inferred_local_virtual_ip == virtual_ip_ &&
+                    TryExtractLinuxPeerEndpointFromSockaddr(source_addr,
+                                                           &endpoint_family,
+                                                           endpoint_addr,
+                                                           &endpoint_port) &&
+                    peer_link_manager_->ObserveDirectEndpoint(inferred_peer_virtual_ip,
+                                                              endpoint_family,
+                                                              endpoint_addr,
+                                                              endpoint_port,
+                                                              &learned_direct_endpoint_changed,
+                                                              NULL)) {
+                    peer_virtual_ip = inferred_peer_virtual_ip;
+                    from_known_peer = true;
+                    learned_direct_probe = true;
+                    LogInfo("learn direct probe endpoint peer=" + peer_virtual_ip +
+                            " source=" + LinuxSockaddrToString(source_addr, source_addr_len) +
+                            (learned_direct_endpoint_changed ? " changed=yes" : " changed=no"));
+                }
+            }
             if (!from_server && !from_known_peer) {
                 LogWarn("ignore ipv4 packet from unknown endpoint source=" +
                         LinuxSockaddrToString(source_addr, source_addr_len));
@@ -1064,8 +1135,7 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
                 if (peer_link_manager_ != NULL) {
                     peer_link_manager_->TouchPeerDirectData(peer_virtual_ip, 0);
                 }
-                uint8_t probe_type = 0;
-                if (ParseLinuxPeerDirectProbePacket(payload, payload_len, &probe_type)) {
+                if (is_direct_probe) {
                     if (probe_type == kPeerDirectProbeRequest) {
                         uint32_t peer_virtual_ip_be = 0;
                         uint32_t local_virtual_ip_be = ParseVirtualIp(NULL);
@@ -1087,6 +1157,12 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
                                                     NULL);
                             }
                         }
+                    }
+                    if (learned_direct_probe) {
+                        MaybeLogDirectRouteFallback(peer_virtual_ip,
+                                                    learned_direct_endpoint_changed
+                                                        ? "probe_endpoint_updated"
+                                                        : "probe_endpoint_confirmed");
                     }
                     continue;
                 }
@@ -1321,25 +1397,10 @@ bool LinuxPacketTunnelClient::TryResolvePeerBySource(const sockaddr_storage& sou
     uint8_t endpoint_family = packet_tunnel::kPeerEndpointFamilyUnknown;
     uint16_t endpoint_port = 0;
     uint8_t endpoint_addr[16] = {};
-
-    if (source_addr.ss_family == AF_INET) {
-        const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(&source_addr);
-        endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
-        endpoint_port = ntohs(addr4->sin_port);
-        memcpy(endpoint_addr, &addr4->sin_addr, 4);
-    } else if (source_addr.ss_family == AF_INET6) {
-        const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(&source_addr);
-        endpoint_port = ntohs(addr6->sin6_port);
-        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&addr6->sin6_addr);
-        static const uint8_t kV4MappedPrefix[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
-        if (memcmp(bytes, kV4MappedPrefix, sizeof(kV4MappedPrefix)) == 0) {
-            endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
-            memcpy(endpoint_addr, bytes + 12, 4);
-        } else {
-            endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv6;
-            memcpy(endpoint_addr, bytes, 16);
-        }
-    } else {
+    if (!TryExtractLinuxPeerEndpointFromSockaddr(source_addr,
+                                                 &endpoint_family,
+                                                 endpoint_addr,
+                                                 &endpoint_port)) {
         return false;
     }
 

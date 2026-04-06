@@ -8,6 +8,7 @@ namespace {
 const uint64_t kPeerDirectEligibilityStableMs = 3000;
 const uint32_t kPeerDirectEligibilitySamples = 3;
 const uint64_t kPeerDirectSampleResetMs = 8000;
+const uint64_t kPeerDirectActivationFreshMs = 5000;
 const uint32_t kPeerDirectProbeFailureThreshold = 6;
 const uint32_t kPeerDirectActiveFailureThreshold = 3;
 const uint64_t kPeerDirectRouteFreezeMs = 30000;
@@ -201,6 +202,55 @@ bool LinuxPeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
     ResetDirectAssessment(&entry);
     entry.retry_after_ms = 0;
     EnterState(&entry, LinuxPeerRouteState::OfferReceived, now);
+    return true;
+}
+
+bool LinuxPeerLinkManager::ObserveDirectEndpoint(const std::string& peer_virtual_ip,
+                                                 uint8_t endpoint_family,
+                                                 const uint8_t* endpoint_addr,
+                                                 uint16_t endpoint_port,
+                                                 bool* endpoint_changed,
+                                                 LinuxPeerRouteStatus* out_status) {
+    if (endpoint_changed != NULL) {
+        *endpoint_changed = false;
+    }
+    if (endpoint_addr == NULL || endpoint_family == 0 || endpoint_port == 0) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::map<std::string, Entry>::iterator it = peers_.find(peer_virtual_ip);
+    if (it == peers_.end()) {
+        return false;
+    }
+
+    Entry& entry = it->second;
+    if (entry.endpoint_version == 0) {
+        return false;
+    }
+
+    const uint64_t now = linux_peer_now_ms();
+    const bool changed =
+        entry.endpoint_family != endpoint_family ||
+        entry.endpoint_port != endpoint_port ||
+        memcmp(entry.endpoint_addr, endpoint_addr, sizeof(entry.endpoint_addr)) != 0;
+
+    entry.last_observed_ms = now;
+    if (changed) {
+        entry.endpoint_family = endpoint_family;
+        entry.endpoint_port = endpoint_port;
+        memcpy(entry.endpoint_addr, endpoint_addr, sizeof(entry.endpoint_addr));
+        if (entry.direct_ready &&
+            entry.state != LinuxPeerRouteState::DirectActive &&
+            entry.state != LinuxPeerRouteState::Cooldown) {
+            EnterState(&entry, LinuxPeerRouteState::Probing, now);
+        }
+    }
+
+    FillStatus(it->first, entry, out_status);
+    if (endpoint_changed != NULL) {
+        *endpoint_changed = changed;
+    }
     return true;
 }
 
@@ -401,6 +451,13 @@ bool LinuxPeerLinkManager::RecordDirectSendFailure(const std::string& peer_virtu
         }
         if (entry.active_failures >= kPeerDirectActiveFailureThreshold) {
             EnterCooldown(&entry, now);
+        } else {
+            entry.direct_eligible = false;
+            entry.active_direct = false;
+            entry.freeze_until_ms = 0;
+            entry.first_direct_data_ms = 0;
+            entry.direct_sample_count = 0;
+            EnterState(&entry, LinuxPeerRouteState::Probing, now);
         }
     } else {
         entry.direct_eligible = false;
@@ -431,6 +488,18 @@ std::vector<LinuxPeerRouteStatus> LinuxPeerLinkManager::ExpireStalePeers(uint64_
     for (std::map<std::string, Entry>::iterator it = peers_.begin(); it != peers_.end(); ++it) {
         Entry& entry = it->second;
         const LinuxPeerRouteState previous_state = entry.state;
+
+        if (!entry.active_direct &&
+            entry.state == LinuxPeerRouteState::Probing &&
+            entry.last_direct_data_ms != 0 &&
+            now_ms >= entry.last_direct_data_ms &&
+            (now_ms - entry.last_direct_data_ms) <= kPeerDirectActivationFreshMs &&
+            CanActivateDirect(entry, now_ms)) {
+            entry.direct_eligible = true;
+            entry.active_direct = true;
+            entry.freeze_until_ms = now_ms + kPeerDirectRouteFreezeMs;
+            EnterState(&entry, LinuxPeerRouteState::DirectActive, now_ms);
+        }
 
         if ((entry.state == LinuxPeerRouteState::OfferReceived || entry.state == LinuxPeerRouteState::Probing) &&
             entry.last_observed_ms != 0 && now_ms > entry.last_observed_ms &&

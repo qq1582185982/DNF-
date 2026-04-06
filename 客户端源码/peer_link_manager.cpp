@@ -203,6 +203,55 @@ bool PeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
     return true;
 }
 
+bool PeerLinkManager::ObserveDirectEndpoint(const std::string& peer_virtual_ip,
+                                            uint8_t endpoint_family,
+                                            const uint8_t* endpoint_addr,
+                                            uint16_t endpoint_port,
+                                            bool* endpoint_changed,
+                                            PeerRouteStatus* out_status) {
+    if (endpoint_changed != NULL) {
+        *endpoint_changed = false;
+    }
+    if (endpoint_addr == NULL || endpoint_family == 0 || endpoint_port == 0) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::map<std::string, Entry>::iterator it = peers_.find(peer_virtual_ip);
+    if (it == peers_.end()) {
+        return false;
+    }
+
+    Entry& entry = it->second;
+    if (entry.endpoint_version == 0) {
+        return false;
+    }
+
+    const uint64_t now = peer_now_ms();
+    const bool changed =
+        entry.endpoint_family != endpoint_family ||
+        entry.endpoint_port != endpoint_port ||
+        memcmp(entry.endpoint_addr, endpoint_addr, sizeof(entry.endpoint_addr)) != 0;
+
+    entry.last_observed_ms = now;
+    if (changed) {
+        entry.endpoint_family = endpoint_family;
+        entry.endpoint_port = endpoint_port;
+        memcpy(entry.endpoint_addr, endpoint_addr, sizeof(entry.endpoint_addr));
+        if (entry.direct_ready &&
+            entry.state != PeerRouteState::DirectActive &&
+            entry.state != PeerRouteState::Cooldown) {
+            EnterState(&entry, PeerRouteState::Probing, now);
+        }
+    }
+
+    FillStatus(it->first, entry, out_status);
+    if (endpoint_changed != NULL) {
+        *endpoint_changed = changed;
+    }
+    return true;
+}
+
 void PeerLinkManager::TouchPeer(const std::string& peer_virtual_ip, uint64_t endpoint_version) {
     std::lock_guard<std::mutex> lock(mutex_);
     Entry& entry = peers_[peer_virtual_ip];
@@ -399,6 +448,13 @@ bool PeerLinkManager::RecordDirectSendFailure(const std::string& peer_virtual_ip
         }
         if (entry.active_failures >= kPeerDirectActiveFailureThreshold) {
             EnterCooldown(&entry, now);
+        } else {
+            entry.direct_eligible = false;
+            entry.active_direct = false;
+            entry.freeze_until_ms = 0;
+            entry.first_direct_data_ms = 0;
+            entry.direct_sample_count = 0;
+            EnterState(&entry, PeerRouteState::Probing, now);
         }
     } else {
         entry.direct_eligible = false;

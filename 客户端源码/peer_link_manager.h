@@ -51,6 +51,12 @@ public:
                          uint8_t endpoint_family,
                          const uint8_t* endpoint_addr,
                          uint16_t endpoint_port);
+    bool ObserveDirectEndpoint(const std::string& peer_virtual_ip,
+                               uint8_t endpoint_family,
+                               const uint8_t* endpoint_addr,
+                               uint16_t endpoint_port,
+                               bool* endpoint_changed = NULL,
+                               PeerRouteStatus* out_status = NULL);
     void TouchPeer(const std::string& peer_virtual_ip, uint64_t endpoint_version);
     void TouchPeerDirectData(const std::string& peer_virtual_ip, uint64_t endpoint_version);
     void ObservePeerFrame(const std::string& peer_virtual_ip,
