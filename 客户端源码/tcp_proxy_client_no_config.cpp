@@ -240,6 +240,10 @@ void PacketTunnelDebugLog(const string& msg) {
     Logger::debug("[PacketTunnel] " + msg);
 }
 
+void PacketTunnelInfoLog(const string& msg) {
+    Logger::info("[PacketTunnel] " + msg);
+}
+
 string g_session_uuid;
 
 bool read_api_config_from_self(string& api_url, int& api_port, string& version_name, string& data_plane_mode) {
@@ -1067,8 +1071,8 @@ int main(int argc, char* argv[]) {
 
     // 初始化日志系统
     Logger::init(log_filename);
-    Logger::set_log_level("INFO");
-    Logger::info("[Log] Default log level: INFO");
+    Logger::set_log_level("DEBUG");
+    Logger::info("[Log] Default log level: DEBUG");
 
     // 生成会话UUID
     g_session_uuid = generate_session_uuid();

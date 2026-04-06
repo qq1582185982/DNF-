@@ -20,6 +20,7 @@
 #pragma comment(lib, "dnsapi.lib")
 
 void PacketTunnelDebugLog(const std::string& msg);
+void PacketTunnelInfoLog(const std::string& msg);
 
 namespace {
 
@@ -408,6 +409,26 @@ std::string PeerEndpointToString(uint8_t family, const uint8_t* addr, uint16_t p
         }
     }
     return "unknown";
+}
+
+void NormalizePeerEndpointFamily(uint8_t* family, uint8_t* addr) {
+    if (family == NULL || addr == NULL ||
+        *family != packet_tunnel::kPeerEndpointFamilyIpv6) {
+        return;
+    }
+
+    static const uint8_t kV4MappedPrefix[12] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF
+    };
+    if (memcmp(addr, kV4MappedPrefix, sizeof(kV4MappedPrefix)) != 0) {
+        return;
+    }
+
+    uint8_t ipv4_addr[4] = {};
+    memcpy(ipv4_addr, addr + 12, sizeof(ipv4_addr));
+    memset(addr, 0, packet_tunnel::kPeerEndpointAddrSize);
+    memcpy(addr, ipv4_addr, sizeof(ipv4_addr));
+    *family = packet_tunnel::kPeerEndpointFamilyIpv4;
 }
 
 std::string SockaddrToString(const sockaddr_storage& addr, int addr_len) {
@@ -1401,7 +1422,10 @@ bool ParsePeerOfferPayload(const uint8_t* payload, size_t length, ParsedPeerOffe
     out_offer->endpoint_port = packet_tunnel::read_u16_be(payload + 14);
     memset(out_offer->endpoint_addr, 0, sizeof(out_offer->endpoint_addr));
     memcpy(out_offer->endpoint_addr, payload + 16, sizeof(out_offer->endpoint_addr));
-    out_offer->endpoint = PeerEndpointToString(out_offer->endpoint_family, payload + 16, out_offer->endpoint_port);
+    NormalizePeerEndpointFamily(&out_offer->endpoint_family, out_offer->endpoint_addr);
+    out_offer->endpoint = PeerEndpointToString(out_offer->endpoint_family,
+                                               out_offer->endpoint_addr,
+                                               out_offer->endpoint_port);
     return true;
 }
 
@@ -1648,8 +1672,8 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         return false;
     }
 
-    PacketTunnelDebugLog("relay endpoint candidates: " +
-                         BuildRelayEndpointCandidateSummary(relay_candidates));
+    PacketTunnelInfoLog("relay endpoint candidates: " +
+                        BuildRelayEndpointCandidateSummary(relay_candidates));
 
     auto configure_socket = [&](SOCKET sock, int family) {
         if (family == AF_INET6) {
@@ -1683,7 +1707,8 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         const int endpoint_addr_len = candidate.endpoint_addr_len;
         const int preferred_family = candidate.socket_family;
         const bool public_relay_target = candidate.public_internet;
-        peer_direct_allowed_ = public_relay_target;
+        const bool ipv4_direct_test_override = (!public_relay_target && preferred_family == AF_INET);
+        peer_direct_allowed_ = public_relay_target || ipv4_direct_test_override;
 
         sockaddr_storage local_bind_addr = {};
         int local_bind_addr_len = 0;
@@ -1763,7 +1788,10 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         server_endpoint_.addr = endpoint_addr;
         server_endpoint_.addr_len = endpoint_addr_len;
         server_endpoint_.valid = true;
-        if (!peer_direct_allowed_) {
+        if (ipv4_direct_test_override) {
+            PacketTunnelInfoLog("peer direct test override enabled for non-public IPv4 relay " +
+                                SockaddrToString(endpoint_addr, endpoint_addr_len));
+        } else if (!peer_direct_allowed_) {
             PacketTunnelDebugLog("peer direct disabled: relay target is non-public " +
                                  SockaddrToString(endpoint_addr, endpoint_addr_len));
         }

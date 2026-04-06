@@ -368,6 +368,26 @@ std::string LinuxPeerEndpointToString(uint8_t family, const uint8_t* addr, uint1
     return "unknown";
 }
 
+void NormalizeLinuxPeerEndpointFamily(uint8_t* family, uint8_t* addr) {
+    if (family == NULL || addr == NULL ||
+        *family != packet_tunnel::kPeerEndpointFamilyIpv6) {
+        return;
+    }
+
+    static const uint8_t kV4MappedPrefix[12] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF
+    };
+    if (memcmp(addr, kV4MappedPrefix, sizeof(kV4MappedPrefix)) != 0) {
+        return;
+    }
+
+    uint8_t ipv4_addr[4] = {};
+    memcpy(ipv4_addr, addr + 12, sizeof(ipv4_addr));
+    memset(addr, 0, packet_tunnel::kPeerEndpointAddrSize);
+    memcpy(addr, ipv4_addr, sizeof(ipv4_addr));
+    *family = packet_tunnel::kPeerEndpointFamilyIpv4;
+}
+
 std::string LinuxSockaddrToString(const sockaddr_storage& addr, socklen_t addr_len) {
     (void)addr_len;
     char buffer[INET6_ADDRSTRLEN] = {};
@@ -556,7 +576,10 @@ bool ParseLinuxPeerOfferPayload(const uint8_t* payload, size_t length, ParsedLin
     out_offer->endpoint_port = packet_tunnel::read_u16_be(payload + 14);
     memset(out_offer->endpoint_addr, 0, sizeof(out_offer->endpoint_addr));
     memcpy(out_offer->endpoint_addr, payload + 16, sizeof(out_offer->endpoint_addr));
-    out_offer->endpoint = LinuxPeerEndpointToString(out_offer->endpoint_family, payload + 16, out_offer->endpoint_port);
+    NormalizeLinuxPeerEndpointFamily(&out_offer->endpoint_family, out_offer->endpoint_addr);
+    out_offer->endpoint = LinuxPeerEndpointToString(out_offer->endpoint_family,
+                                                    out_offer->endpoint_addr,
+                                                    out_offer->endpoint_port);
     return true;
 }
 
