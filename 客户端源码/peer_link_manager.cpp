@@ -171,7 +171,7 @@ bool PeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
 
     entry.last_observed_ms = now;
 
-    if (same_version && same_endpoint) {
+    if (same_version) {
         if (entry.state == PeerRouteState::Cooldown &&
             entry.retry_after_ms != 0 && now < entry.retry_after_ms) {
             return false;
@@ -181,6 +181,9 @@ bool PeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
              entry.pending_hello_nonce != 0) ||
             entry.direct_ready ||
             entry.active_direct) {
+            return false;
+        }
+        if (same_endpoint) {
             return false;
         }
     }
