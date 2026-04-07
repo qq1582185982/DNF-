@@ -239,6 +239,7 @@ struct ServerConfig {
     string server_virtual_ip = "";
     vector<string> local_node_ips;
     map<string, string> local_node_server_keys;
+    map<string, string> remote_node_server_keys;
     int max_connections = 100;
     string virtual_subnet = "";
     string virtual_gateway = "";
@@ -1276,6 +1277,7 @@ private:
         atomic<uint64_t> last_activity_ms;
         uint8_t handshake_flags;
         bool allow_peer_direct;
+        bool is_remote_linux_node;
         mutex send_mutex;
 
         PacketTunnelSession(int fd,
@@ -1297,7 +1299,8 @@ private:
               last_peer_offer_announce_ms(0),
               last_activity_ms(established_ms),
               handshake_flags(packet_tunnel::kHandshakeFlagNone),
-              allow_peer_direct(true) {}
+              allow_peer_direct(true),
+              is_remote_linux_node(false) {}
     };
 
     struct PacketTunnelSessionRemoval {
@@ -1321,6 +1324,7 @@ private:
     map<string, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions;
     map<string, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions_by_endpoint;
     map<uint32_t, string> local_node_server_keys_by_ip_be;
+    map<uint32_t, string> remote_node_server_keys_by_ip_be;
 
     mutex packet_tunnel_mutex;
     int udp_fd;
@@ -1458,6 +1462,12 @@ private:
 
     static bool session_allows_peer_direct(const shared_ptr<PacketTunnelSession>& session) {
         return session && session->allow_peer_direct;
+    }
+
+    bool is_remote_linux_node_session(const string& server_key, uint32_t virtual_ip_be) const {
+        map<uint32_t, string>::const_iterator it =
+            remote_node_server_keys_by_ip_be.find(virtual_ip_be);
+        return it != remote_node_server_keys_by_ip_be.end() && it->second == server_key;
     }
 
     bool session_has_active_lease(const shared_ptr<PacketTunnelSession>& session,
@@ -2312,6 +2322,7 @@ public:
         has_server_virtual_ip_be = parse_ipv4_be(tun_config.server_virtual_ip, &server_virtual_ip_be);
         has_virtual_subnet_be = parse_cidr_be(tun_config.subnet_cidr, &virtual_network_ip_be, &virtual_subnet_mask_be);
         local_node_server_keys_by_ip_be.clear();
+        remote_node_server_keys_by_ip_be.clear();
         for (map<string, string>::const_iterator it = config.local_node_server_keys.begin();
              it != config.local_node_server_keys.end(); ++it) {
             uint32_t local_node_ip_be = 0;
@@ -2321,6 +2332,16 @@ public:
                 continue;
             }
             local_node_server_keys_by_ip_be[local_node_ip_be] = it->second;
+        }
+        for (map<string, string>::const_iterator it = config.remote_node_server_keys.begin();
+             it != config.remote_node_server_keys.end(); ++it) {
+            uint32_t remote_node_ip_be = 0;
+            if (!parse_ipv4_be(it->first, &remote_node_ip_be)) {
+                Logger::warning("[" + server_name + "] invalid remote node virtual_ip for server_key map: " +
+                                it->first);
+                continue;
+            }
+            remote_node_server_keys_by_ip_be[remote_node_ip_be] = it->second;
         }
 
         string tun_error;
@@ -2516,7 +2537,10 @@ private:
                     session->udp_addr_len = client_addr_len;
                     session->udp_endpoint_key = client_str;
                     session->handshake_flags = flags;
+                    session->is_remote_linux_node =
+                        is_remote_linux_node_session(resolved_server_key, virtual_ip_be);
                     session->allow_peer_direct =
+                        !session->is_remote_linux_node &&
                         (flags & packet_tunnel::kHandshakeFlagRelayOnly) == 0;
                     touch_packet_tunnel_session(session);
 
@@ -2570,7 +2594,9 @@ private:
                                  client_str + ", virtual_ip=" +
                                  describe_scoped_virtual_ip(resolved_server_key, virtual_ip_be) +
                                  ", direct=" +
-                                 string(session->allow_peer_direct ? "enabled" : "relay_only"));
+                                 string(session->allow_peer_direct ? "enabled" :
+                                        (session->is_remote_linux_node ? "relay_only(remote_linux_node)"
+                                                                       : "relay_only")));
                     announce_peer_offers_for_session(session);
                     continue;
                 }
@@ -2973,7 +2999,10 @@ private:
                                                        virtual_ip_be,
                                                        mtu);
             session->handshake_flags = flags;
+            session->is_remote_linux_node =
+                is_remote_linux_node_session(resolved_server_key, virtual_ip_be);
             session->allow_peer_direct =
+                !session->is_remote_linux_node &&
                 (flags & packet_tunnel::kHandshakeFlagRelayOnly) == 0;
             touch_packet_tunnel_session(session);
 
@@ -3001,6 +3030,13 @@ private:
 
             Logger::debug("[IP Tunnel|" + session_uuid + "] 专用会话已建立: 客户端=" + client_str +
                          ", virtual_ip=" + describe_scoped_virtual_ip(resolved_server_key, virtual_ip_be));
+
+            Logger::info("[IP Tunnel|" + session_uuid + "] TCP session established: client=" + client_str +
+                         ", virtual_ip=" + describe_scoped_virtual_ip(resolved_server_key, virtual_ip_be) +
+                         ", direct=" +
+                         string(session->allow_peer_direct ? "enabled" :
+                                (session->is_remote_linux_node ? "relay_only(remote_linux_node)"
+                                                               : "relay_only")));
 
             while (running && session->active) {
                 uint8_t header[packet_tunnel::kFrameHeaderSize] = {};
@@ -3386,15 +3422,17 @@ GlobalConfig load_config(const string& filename) {
     }
 
     for (size_t i = 0; i < global_config.nodes.size(); ++i) {
-        if (!global_config.nodes[i].bind_on_gateway) {
+        if (global_config.nodes[i].bind_on_gateway) {
+            runtime_server.local_node_ips.push_back(global_config.nodes[i].server_virtual_ip);
+            runtime_server.local_node_server_keys[global_config.nodes[i].server_virtual_ip] =
+                to_string(global_config.nodes[i].id);
+            if (runtime_server.server_virtual_ip.empty()) {
+                runtime_server.server_virtual_ip = global_config.nodes[i].server_virtual_ip;
+            }
             continue;
         }
-        runtime_server.local_node_ips.push_back(global_config.nodes[i].server_virtual_ip);
-        runtime_server.local_node_server_keys[global_config.nodes[i].server_virtual_ip] =
+        runtime_server.remote_node_server_keys[global_config.nodes[i].server_virtual_ip] =
             to_string(global_config.nodes[i].id);
-        if (runtime_server.server_virtual_ip.empty()) {
-            runtime_server.server_virtual_ip = global_config.nodes[i].server_virtual_ip;
-        }
     }
 
     if (!runtime_server.server_virtual_ip.empty()) {
