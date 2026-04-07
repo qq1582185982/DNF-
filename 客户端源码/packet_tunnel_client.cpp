@@ -2385,16 +2385,37 @@ void PacketTunnelClient::SocketReadLoop() {
                 has_inner_ipv4 ? Ipv4ToString(payload + 16) : "";
             bool inner_is_udp = false;
             uint16_t inner_src_port = 0;
+            uint16_t inner_dst_port = 0;
             if (has_inner_ipv4 && payload[9] == IPPROTO_UDP) {
                 const size_t ip_header_len = static_cast<size_t>(payload[0] & 0x0F) * 4;
                 if (ip_header_len >= 20 && payload_len >= ip_header_len + 8) {
                     inner_is_udp = true;
                     inner_src_port = ntohs(*(const uint16_t*)(payload + ip_header_len));
+                    inner_dst_port = ntohs(*(const uint16_t*)(payload + ip_header_len + 2));
                 }
             }
 
             uint8_t probe_type = 0;
             const bool is_direct_probe = ParsePeerDirectProbePacket(payload, payload_len, &probe_type);
+            if (!from_server &&
+                inner_is_udp &&
+                (is_direct_probe || inner_src_port == 5063 || inner_dst_port == 5063) &&
+                !IsNoisyUdpForLogging(payload, payload_len)) {
+                const std::string probe_kind =
+                    probe_type == kPeerDirectProbeRequest
+                        ? "request"
+                        : (probe_type == kPeerDirectProbeResponse ? "response" : "none");
+                PacketTunnelDebugLog("recv non-server ipv4 source=" +
+                                     SockaddrToString(source_addr, source_addr_len) +
+                                     " known_peer=" + (from_known_peer ? "yes" : "no") +
+                                     " peer=" + (peer_virtual_ip.empty() ? "-" : peer_virtual_ip) +
+                                     " inner_src=" + inner_src_virtual_ip + ":" +
+                                     std::to_string(inner_src_port) +
+                                     " inner_dst=" + inner_dst_virtual_ip + ":" +
+                                     std::to_string(inner_dst_port) +
+                                     " probe=" + probe_kind +
+                                     " len=" + std::to_string(payload_len));
+            }
             if (!from_server && !from_known_peer && is_direct_probe && peer_link_manager_ != NULL &&
                 payload_len >= 20) {
                 const std::string inferred_peer_virtual_ip = inner_src_virtual_ip;

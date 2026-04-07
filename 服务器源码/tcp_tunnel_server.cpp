@@ -2814,7 +2814,7 @@ private:
                     session->is_remote_linux_node =
                         is_remote_linux_node_session(resolved_server_key, virtual_ip_be);
                     session->allow_peer_direct =
-                        !session->is_remote_linux_node &&
+                        !is_local_or_server_side_session(session) &&
                         (flags & packet_tunnel::kHandshakeFlagRelayOnly) == 0;
                     touch_packet_tunnel_session(session);
 
@@ -3281,7 +3281,7 @@ private:
             session->is_remote_linux_node =
                 is_remote_linux_node_session(resolved_server_key, virtual_ip_be);
             session->allow_peer_direct =
-                !session->is_remote_linux_node &&
+                !is_local_or_server_side_session(session) &&
                 (flags & packet_tunnel::kHandshakeFlagRelayOnly) == 0;
             touch_packet_tunnel_session(session);
 
