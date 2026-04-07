@@ -740,12 +740,14 @@ bool BuildEndpointForSocketFamily(const sockaddr* source_addr,
 LinuxPacketTunnelClient::LinuxPacketTunnelClient(const std::string& tunnel_host,
                                                  uint16_t tunnel_port,
                                                  const std::string& session_uuid,
+                                                 const std::string& client_id,
                                                  const std::string& virtual_ip,
                                                  uint16_t mtu,
                                                  LinuxTunManager* tun_manager)
     : tunnel_host_(tunnel_host),
       tunnel_port_(tunnel_port),
       session_uuid_(session_uuid),
+      client_id_(client_id),
       virtual_ip_(virtual_ip),
       mtu_(mtu),
       tun_manager_(tun_manager),
@@ -957,7 +959,21 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
 
 bool LinuxPacketTunnelClient::SendHandshake(std::string* error) {
     const uint8_t session_uuid_len = static_cast<uint8_t>(session_uuid_.size());
-    std::vector<uint8_t> handshake(7 + session_uuid_len + packet_tunnel::kHandshakeTailSize, 0);
+    if (client_id_.empty()) {
+        if (error != NULL) {
+            *error = "packet tunnel client_id is empty";
+        }
+        return false;
+    }
+    if (client_id_.size() > 255) {
+        if (error != NULL) {
+            *error = "packet tunnel client_id is too long";
+        }
+        return false;
+    }
+
+    const uint8_t client_id_len = static_cast<uint8_t>(client_id_.size());
+    std::vector<uint8_t> handshake(7 + session_uuid_len + 1 + client_id_len + packet_tunnel::kHandshakeTailSize, 0);
 
     uint32_t conn_id_be = htonl(packet_tunnel::kHandshakeConnId);
     uint16_t port_be = htons(packet_tunnel::kHandshakePortMarker);
@@ -967,13 +983,16 @@ bool LinuxPacketTunnelClient::SendHandshake(std::string* error) {
     if (session_uuid_len > 0) {
         memcpy(&handshake[7], session_uuid_.data(), session_uuid_len);
     }
+    const size_t client_id_offset = 7 + session_uuid_len;
+    handshake[client_id_offset] = client_id_len;
+    memcpy(&handshake[client_id_offset + 1], client_id_.data(), client_id_len);
 
     uint32_t virtual_ip_be = ParseVirtualIp(error);
     if (virtual_ip_be == 0) {
         return false;
     }
 
-    const size_t tail = 7 + session_uuid_len;
+    const size_t tail = client_id_offset + 1 + client_id_len;
     handshake[tail + 0] = packet_tunnel::kProtocolVersion;
     handshake[tail + 1] = 0;
     uint16_t mtu_be = htons(mtu_);

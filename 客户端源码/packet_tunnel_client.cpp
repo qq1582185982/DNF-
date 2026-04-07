@@ -1706,12 +1706,14 @@ bool BuildEndpointForSocketFamily(const sockaddr* source_addr,
 PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
                                        uint16_t tunnel_port,
                                        const std::string& session_uuid,
+                                       const std::string& client_id,
                                        const std::string& virtual_ip,
                                        uint16_t mtu,
                                        WintunManager* wintun_manager)
     : tunnel_server_ip_(tunnel_ip),
       tunnel_port_(tunnel_port),
       session_uuid_(session_uuid),
+      client_id_(client_id),
       virtual_ip_(virtual_ip),
       mtu_(mtu),
       wintun_manager_(wintun_manager),
@@ -2016,7 +2018,21 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
 
 bool PacketTunnelClient::SendHandshake(std::wstring* error_msg) {
     uint8_t session_uuid_len = static_cast<uint8_t>(session_uuid_.size());
-    std::vector<uint8_t> handshake(7 + session_uuid_len + packet_tunnel::kHandshakeTailSize, 0);
+    if (client_id_.empty()) {
+        if (error_msg != NULL) {
+            *error_msg = L"IP Tunnel client_id is empty";
+        }
+        return false;
+    }
+    if (client_id_.size() > 255) {
+        if (error_msg != NULL) {
+            *error_msg = L"IP Tunnel client_id is too long";
+        }
+        return false;
+    }
+
+    uint8_t client_id_len = static_cast<uint8_t>(client_id_.size());
+    std::vector<uint8_t> handshake(7 + session_uuid_len + 1 + client_id_len + packet_tunnel::kHandshakeTailSize, 0);
 
     uint32_t conn_id_be = htonl(packet_tunnel::kHandshakeConnId);
     uint16_t port_be = htons(packet_tunnel::kHandshakePortMarker);
@@ -2026,13 +2042,16 @@ bool PacketTunnelClient::SendHandshake(std::wstring* error_msg) {
     if (session_uuid_len > 0) {
         memcpy(&handshake[7], session_uuid_.data(), session_uuid_len);
     }
+    size_t client_id_offset = 7 + session_uuid_len;
+    handshake[client_id_offset] = client_id_len;
+    memcpy(&handshake[client_id_offset + 1], client_id_.data(), client_id_len);
 
     uint32_t virtual_ip_be = ParseVirtualIp(error_msg);
     if (virtual_ip_be == 0) {
         return false;
     }
 
-    size_t tail = 7 + session_uuid_len;
+    size_t tail = client_id_offset + 1 + client_id_len;
     handshake[tail + 0] = packet_tunnel::kProtocolVersion;
     handshake[tail + 1] = peer_direct_allowed_
         ? packet_tunnel::kHandshakeFlagNone
@@ -2042,6 +2061,7 @@ bool PacketTunnelClient::SendHandshake(std::wstring* error_msg) {
     memcpy(&handshake[tail + 4], &virtual_ip_be, sizeof(virtual_ip_be));
 
     PacketTunnelDebugLog("sending handshake: session=" + session_uuid_ +
+                         " client_id=" + client_id_.substr(0, std::min<size_t>(client_id_.size(), 16)) +
                          " mtu=" + std::to_string(mtu_) +
                          " virtual_ip=" + virtual_ip_);
     return SendDatagramToEndpoint(server_endpoint_, handshake.data(), handshake.size(), error_msg);
@@ -2209,8 +2229,15 @@ void PacketTunnelClient::SocketReadLoop() {
                     peer_virtual_ip = inferred_peer_virtual_ip;
                     from_known_peer = true;
                     learned_direct_probe = true;
+                    const std::string probe_kind =
+                        probe_type == kPeerDirectProbeRequest
+                            ? "request"
+                            : (probe_type == kPeerDirectProbeResponse ? "response" : "unknown");
                     PacketTunnelDebugLog("learn direct probe endpoint peer=" +
                                          peer_virtual_ip +
+                                         " probe_type=" + probe_kind +
+                                         " probe_src_virtual_ip=" + inferred_peer_virtual_ip +
+                                         " probe_dst_virtual_ip=" + inferred_local_virtual_ip +
                                          " source=" + SockaddrToString(source_addr, source_addr_len) +
                                          (learned_direct_endpoint_changed ? " changed=yes" : " changed=no"));
                 }

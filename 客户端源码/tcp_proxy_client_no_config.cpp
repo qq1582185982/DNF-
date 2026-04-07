@@ -1352,6 +1352,7 @@ int main(int argc, char* argv[]) {
         TUNNEL_SERVER_IP,
         TUNNEL_PORT,
         g_session_uuid,
+        lease_client_id,
         granted_lease.virtual_ip,
         granted_lease.mtu,
         wintun_manager.get()));
@@ -1432,6 +1433,7 @@ int main(int argc, char* argv[]) {
             TUNNEL_SERVER_IP,
             TUNNEL_PORT,
             g_session_uuid,
+            lease_client_id,
             recovered_lease.virtual_ip,
             recovered_lease.mtu,
             wintun_manager.get()));

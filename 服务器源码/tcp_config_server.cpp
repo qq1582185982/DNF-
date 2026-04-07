@@ -859,7 +859,15 @@ void handle_tcp_request(int client_fd, const string& client_label) {
                 IPPoolManager::LeaseRecord lease_record;
                 string error;
                 if (g_ip_pool_manager.AcquireLease(canonical_node_key(*node), lease_request, &lease_record, &error)) {
+                    string lease_client_id = lease_record.client_id.size() > 16
+                        ? lease_record.client_id.substr(0, 16)
+                        : lease_record.client_id;
                     lease_record.server_virtual_ip = node->server_virtual_ip;
+                    Logger::debug("[TCP lease trace] client=" + client_label +
+                                  " session=" + lease_record.session_uuid +
+                                  " client_id=" + lease_client_id +
+                                  " server_key=" + canonical_node_key(*node) +
+                                  " virtual_ip=" + lease_record.virtual_ip);
                     Logger::debug("[TCP閰嶇疆] lease granted: client=" + client_label +
                                   " server_key=" + canonical_node_key(*node) +
                                   " virtual_ip=" + lease_record.virtual_ip +
@@ -890,7 +898,15 @@ void handle_tcp_request(int client_fd, const string& client_label) {
                 IPPoolManager::LeaseRecord lease_record;
                 string error;
                 if (g_ip_pool_manager.RenewLease(canonical_node_key(*node), parts[2], &lease_record, &error)) {
+                    string lease_client_id = lease_record.client_id.size() > 16
+                        ? lease_record.client_id.substr(0, 16)
+                        : lease_record.client_id;
                     lease_record.server_virtual_ip = node->server_virtual_ip;
+                    Logger::debug("[TCP lease trace] renew client=" + client_label +
+                                  " session=" + lease_record.session_uuid +
+                                  " client_id=" + lease_client_id +
+                                  " server_key=" + canonical_node_key(*node) +
+                                  " virtual_ip=" + lease_record.virtual_ip);
                     Logger::debug("[TCP閰嶇疆] lease renewed: client=" + client_label +
                                   " server_key=" + canonical_node_key(*node) +
                                   " virtual_ip=" + lease_record.virtual_ip +

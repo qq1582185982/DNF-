@@ -2450,30 +2450,56 @@ private:
                 uint32_t conn_id = ntohl(*(uint32_t*)buffer);
                 uint16_t dst_port = ntohs(*(uint16_t*)(buffer + 4));
                 uint8_t session_uuid_len = buffer[6];
-                size_t expected_handshake_size = 7 + (size_t)session_uuid_len + packet_tunnel::kHandshakeTailSize;
 
                 if (conn_id == packet_tunnel::kHandshakeConnId &&
                     dst_port == packet_tunnel::kHandshakePortMarker &&
-                    session_uuid_len < 255 &&
-                    (size_t)n == expected_handshake_size) {
+                    session_uuid_len < 255) {
                     string session_uuid;
                     if (session_uuid_len > 0) {
                         session_uuid.assign((const char*)(buffer + 7), session_uuid_len);
                     }
 
-                    const uint8_t* tail = buffer + 7 + session_uuid_len;
+                    string client_id;
+                    const size_t base_offset = 7 + (size_t)session_uuid_len;
+                    const size_t legacy_size = base_offset + packet_tunnel::kHandshakeTailSize;
+                    const uint8_t* tail = NULL;
+                    bool handshake_layout_valid = false;
+                    if ((size_t)n == legacy_size) {
+                        tail = buffer + base_offset;
+                        handshake_layout_valid = true;
+                    } else if ((size_t)n >= base_offset + 1 + packet_tunnel::kHandshakeTailSize) {
+                        uint8_t client_id_len = buffer[base_offset];
+                        size_t extended_size = base_offset + 1 + (size_t)client_id_len +
+                                               packet_tunnel::kHandshakeTailSize;
+                        if ((size_t)n == extended_size) {
+                            if (client_id_len > 0) {
+                                client_id.assign((const char*)(buffer + base_offset + 1), client_id_len);
+                            }
+                            tail = buffer + base_offset + 1 + client_id_len;
+                            handshake_layout_valid = true;
+                        }
+                    }
+                    if (!handshake_layout_valid) {
+                        continue;
+                    }
+
                     uint8_t version = tail[0];
                     uint8_t flags = tail[1];
                     uint16_t mtu = ntohs(*(uint16_t*)(tail + 2));
                     uint32_t virtual_ip_be = 0;
                     memcpy(&virtual_ip_be, tail + 4, sizeof(virtual_ip_be));
                     string virtual_ip = ipv4_be_to_string(virtual_ip_be);
+                    string client_id_short = client_id.size() > 16
+                        ? client_id.substr(0, 16)
+                        : client_id;
 
                     Logger::info("[IP Tunnel|" + session_uuid + "] UDP handshake: client=" + client_str +
                                  ", version=" + to_string((int)version) +
                                  ", mtu=" + to_string(mtu) +
                                  ", virtual_ip=" + virtual_ip +
-                                 ", flags=" + to_string((int)flags));
+                                 ", flags=" + to_string((int)flags) +
+                                 ", client_id=" +
+                                 (client_id_short.empty() ? string("(empty)") : client_id_short));
 
                     IPPoolManager::LeaseRecord active_lease;
                     string lease_error;
@@ -2507,6 +2533,19 @@ private:
                     } else if (active_lease.virtual_ip != virtual_ip) {
                         ack[1] = packet_tunnel::kStatusInvalidRequest;
                         lease_error = "lease virtual_ip mismatch";
+                    } else if (active_lease.client_id.empty()) {
+                        ack[1] = packet_tunnel::kStatusInvalidRequest;
+                        lease_error = "lease client_id is missing";
+                    } else if (client_id.empty()) {
+                        ack[1] = packet_tunnel::kStatusInvalidRequest;
+                        lease_error = "missing client_id in udp handshake";
+                    } else if (active_lease.client_id != client_id) {
+                        string expected_client_id = active_lease.client_id.size() > 16
+                            ? active_lease.client_id.substr(0, 16)
+                            : active_lease.client_id;
+                        ack[1] = packet_tunnel::kStatusInvalidRequest;
+                        lease_error = "lease client_id mismatch: expected=" + expected_client_id +
+                                      " actual=" + client_id_short;
                     }
                     *(uint16_t*)(ack + 2) = htons(mtu);
                     memcpy(ack + 4, &virtual_ip_be, sizeof(virtual_ip_be));

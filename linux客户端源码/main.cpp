@@ -451,6 +451,7 @@ int main(int argc, char** argv) {
             packet_client.reset(new LinuxPacketTunnelClient(effective_tunnel_host,
                                                             (uint16_t)effective_tunnel_port,
                                                             options.session_uuid,
+                                                            options.client_id,
                                                             current_lease.virtual_ip,
                                                             current_lease.mtu,
                                                             &tun_manager));

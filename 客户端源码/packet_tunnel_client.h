@@ -21,6 +21,7 @@ public:
     PacketTunnelClient(const std::string& tunnel_ip,
                        uint16_t tunnel_port,
                        const std::string& session_uuid,
+                       const std::string& client_id,
                        const std::string& virtual_ip,
                        uint16_t mtu,
                        WintunManager* wintun_manager);
@@ -97,6 +98,7 @@ private:
     std::string tunnel_server_ip_;
     uint16_t tunnel_port_;
     std::string session_uuid_;
+    std::string client_id_;
     std::string virtual_ip_;
     uint16_t mtu_;
     WintunManager* wintun_manager_;

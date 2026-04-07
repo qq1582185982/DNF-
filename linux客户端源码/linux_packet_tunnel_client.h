@@ -17,6 +17,7 @@ public:
     LinuxPacketTunnelClient(const std::string& tunnel_host,
                             uint16_t tunnel_port,
                             const std::string& session_uuid,
+                            const std::string& client_id,
                             const std::string& virtual_ip,
                             uint16_t mtu,
                             LinuxTunManager* tun_manager);
@@ -85,6 +86,7 @@ private:
     std::string tunnel_host_;
     uint16_t tunnel_port_;
     std::string session_uuid_;
+    std::string client_id_;
     std::string virtual_ip_;
     uint16_t mtu_;
     LinuxTunManager* tun_manager_;
