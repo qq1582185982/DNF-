@@ -721,9 +721,16 @@ static uint16_t ipv4_transport_checksum(const uint8_t* packet, size_t packet_len
     return checksum;
 }
 
-static bool rewrite_client_bound_udp_source_ip(vector<uint8_t>* packet,
-                                               uint32_t from_ip_be,
-                                               uint32_t to_ip_be) {
+static bool is_known_game_udp_port(uint16_t port) {
+    return port == 5063 || port == 2311 || port == 2312 || port == 2313;
+}
+
+static const uint64_t kGatewayUdpPortOwnerTtlMs = 60000;
+
+static bool rewrite_ipv4_udp_ip_field(vector<uint8_t>* packet,
+                                      size_t ip_offset,
+                                      uint32_t from_ip_be,
+                                      uint32_t to_ip_be) {
     if (packet == nullptr || packet->size() < 20) {
         return false;
     }
@@ -742,13 +749,17 @@ static bool rewrite_client_bound_udp_source_ip(vector<uint8_t>* packet,
         return false;
     }
 
-    uint32_t current_src_ip_be = 0;
-    memcpy(&current_src_ip_be, &bytes[12], sizeof(current_src_ip_be));
-    if (current_src_ip_be != from_ip_be || current_src_ip_be == to_ip_be) {
+    if (ip_offset + sizeof(uint32_t) > bytes.size()) {
         return false;
     }
 
-    memcpy(&bytes[12], &to_ip_be, sizeof(to_ip_be));
+    uint32_t current_ip_be = 0;
+    memcpy(&current_ip_be, &bytes[ip_offset], sizeof(current_ip_be));
+    if (current_ip_be != from_ip_be || current_ip_be == to_ip_be) {
+        return false;
+    }
+
+    memcpy(&bytes[ip_offset], &to_ip_be, sizeof(to_ip_be));
 
     bytes[10] = 0;
     bytes[11] = 0;
@@ -762,6 +773,18 @@ static bool rewrite_client_bound_udp_source_ip(vector<uint8_t>* packet,
     bytes[ip_header_len + 6] = static_cast<uint8_t>((udp_checksum >> 8) & 0xFF);
     bytes[ip_header_len + 7] = static_cast<uint8_t>(udp_checksum & 0xFF);
     return true;
+}
+
+static bool rewrite_client_bound_udp_source_ip(vector<uint8_t>* packet,
+                                               uint32_t from_ip_be,
+                                               uint32_t to_ip_be) {
+    return rewrite_ipv4_udp_ip_field(packet, 12, from_ip_be, to_ip_be);
+}
+
+static bool rewrite_client_bound_udp_destination_ip(vector<uint8_t>* packet,
+                                                    uint32_t from_ip_be,
+                                                    uint32_t to_ip_be) {
+    return rewrite_ipv4_udp_ip_field(packet, 16, from_ip_be, to_ip_be);
 }
 
 static bool ipv4_is_noisy_udp_for_logging(uint32_t dst_ip_be, uint16_t src_port, uint16_t dst_port) {
@@ -1312,6 +1335,15 @@ private:
             : session(s), reason(why) {}
     };
 
+    struct GatewayUdpPortOwner {
+        uint32_t virtual_ip_be;
+        uint64_t last_seen_ms;
+
+        GatewayUdpPortOwner()
+            : virtual_ip_be(0),
+              last_seen_ms(0) {}
+    };
+
     ServerConfig config;
     string server_name;
     PeerCoord peer_coord_;
@@ -1323,6 +1355,7 @@ private:
     shared_ptr<thread> udp_read_thread;
     map<string, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions;
     map<string, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions_by_endpoint;
+    map<string, GatewayUdpPortOwner> gateway_udp_port_owners_;
     map<uint32_t, string> local_node_server_keys_by_ip_be;
     map<uint32_t, string> remote_node_server_keys_by_ip_be;
 
@@ -1372,6 +1405,13 @@ private:
         return build_scoped_virtual_ip_key(server_key, ipv4_be_to_string(virtual_ip_be));
     }
 
+    static string build_scoped_udp_port_key(const string& server_key, uint16_t port) {
+        if (server_key.empty()) {
+            return "udp|" + to_string(port);
+        }
+        return server_key + "|udp|" + to_string(port);
+    }
+
     static string describe_scoped_virtual_ip(const string& server_key, uint32_t virtual_ip_be) {
         const string virtual_ip = ipv4_be_to_string(virtual_ip_be);
         if (server_key.empty()) {
@@ -1385,6 +1425,201 @@ private:
             return "unknown";
         }
         return describe_scoped_virtual_ip(session->server_key, session->virtual_ip_be);
+    }
+
+    bool is_local_or_server_side_session(const shared_ptr<PacketTunnelSession>& session) const {
+        if (!session) {
+            return true;
+        }
+        if (session->is_remote_linux_node) {
+            return true;
+        }
+        if (has_server_virtual_ip_be && session->virtual_ip_be == server_virtual_ip_be) {
+            return true;
+        }
+        if (has_gateway_ip_be && session->virtual_ip_be == gateway_ip_be) {
+            return true;
+        }
+
+        map<uint32_t, string>::const_iterator local_it =
+            local_node_server_keys_by_ip_be.find(session->virtual_ip_be);
+        return local_it != local_node_server_keys_by_ip_be.end() &&
+               local_it->second == session->server_key;
+    }
+
+    void learn_gateway_udp_port_owner(const shared_ptr<PacketTunnelSession>& session,
+                                      uint16_t src_port) {
+        if (!session || src_port == 0 || is_known_game_udp_port(src_port) ||
+            is_local_or_server_side_session(session)) {
+            return;
+        }
+
+        const string port_key = build_scoped_udp_port_key(session->server_key, src_port);
+        const uint64_t now_ms = monotonic_millis();
+        bool owner_changed = false;
+        {
+            lock_guard<mutex> lock(packet_tunnel_mutex);
+            GatewayUdpPortOwner& owner = gateway_udp_port_owners_[port_key];
+            owner_changed = owner.virtual_ip_be != 0 && owner.virtual_ip_be != session->virtual_ip_be;
+            owner.virtual_ip_be = session->virtual_ip_be;
+            owner.last_seen_ms = now_ms;
+        }
+
+        if (owner_changed) {
+            Logger::debug("[IP Tunnel|" + session->session_uuid + "] gateway UDP port owner updated port=" +
+                          to_string(src_port) + " owner=" + describe_scoped_virtual_ip(session));
+        }
+    }
+
+    bool try_resolve_gateway_udp_peer_target(const shared_ptr<PacketTunnelSession>& sender_session,
+                                             uint16_t dst_port,
+                                             shared_ptr<PacketTunnelSession>* out_target_session,
+                                             string* out_resolution) {
+        if (out_target_session == nullptr) {
+            return false;
+        }
+        *out_target_session = shared_ptr<PacketTunnelSession>();
+        if (out_resolution != nullptr) {
+            out_resolution->clear();
+        }
+        if (!sender_session || dst_port == 0) {
+            return false;
+        }
+
+        const uint64_t now_ms = monotonic_millis();
+        const string port_key = build_scoped_udp_port_key(sender_session->server_key, dst_port);
+        string resolution = "none";
+        shared_ptr<PacketTunnelSession> selected_session;
+        size_t candidate_count = 0;
+
+        {
+            lock_guard<mutex> lock(packet_tunnel_mutex);
+
+            map<string, GatewayUdpPortOwner>::iterator owner_it = gateway_udp_port_owners_.find(port_key);
+            if (owner_it != gateway_udp_port_owners_.end()) {
+                const bool owner_stale =
+                    owner_it->second.last_seen_ms == 0 ||
+                    now_ms < owner_it->second.last_seen_ms ||
+                    (now_ms - owner_it->second.last_seen_ms) > kGatewayUdpPortOwnerTtlMs;
+                if (owner_stale) {
+                    gateway_udp_port_owners_.erase(owner_it);
+                } else if (owner_it->second.virtual_ip_be != sender_session->virtual_ip_be) {
+                    map<string, shared_ptr<PacketTunnelSession>>::const_iterator session_it =
+                        packet_tunnel_sessions.find(build_scoped_virtual_ip_key(sender_session->server_key,
+                                                                                owner_it->second.virtual_ip_be));
+                    if (session_it != packet_tunnel_sessions.end() &&
+                        session_it->second &&
+                        session_it->second->active &&
+                        session_it->second != sender_session &&
+                        !is_local_or_server_side_session(session_it->second)) {
+                        selected_session = session_it->second;
+                        resolution = "port_owner";
+                    }
+                }
+            }
+
+            if (!selected_session) {
+                for (map<string, shared_ptr<PacketTunnelSession>>::const_iterator it = packet_tunnel_sessions.begin();
+                     it != packet_tunnel_sessions.end();
+                     ++it) {
+                    const shared_ptr<PacketTunnelSession>& candidate = it->second;
+                    if (!candidate || candidate == sender_session || !candidate->active ||
+                        candidate->server_key != sender_session->server_key ||
+                        is_local_or_server_side_session(candidate)) {
+                        continue;
+                    }
+                    ++candidate_count;
+                    if (candidate_count == 1) {
+                        selected_session = candidate;
+                    } else {
+                        selected_session.reset();
+                    }
+                }
+
+                if (selected_session && candidate_count == 1) {
+                    resolution = "single_candidate";
+                }
+            }
+        }
+
+        if (!selected_session) {
+            if (out_resolution != nullptr) {
+                *out_resolution = "unresolved_candidates=" + to_string(candidate_count);
+            }
+            return false;
+        }
+
+        *out_target_session = selected_session;
+        if (out_resolution != nullptr) {
+            *out_resolution = resolution;
+        }
+        return true;
+    }
+
+    bool relay_gateway_udp_to_peer(const shared_ptr<PacketTunnelSession>& sender_session,
+                                   uint32_t original_dst_ip_be,
+                                   const uint8_t* payload,
+                                   size_t payload_len) {
+        if (!sender_session || !payload || payload_len < 20 || payload[9] != IPPROTO_UDP) {
+            return false;
+        }
+
+        uint32_t src_ip_be = 0;
+        memcpy(&src_ip_be, payload + 12, sizeof(src_ip_be));
+
+        uint16_t src_port = 0;
+        uint16_t dst_port = 0;
+        if (!ipv4_udp_ports(payload, payload_len, &src_port, &dst_port)) {
+            return false;
+        }
+
+        learn_gateway_udp_port_owner(sender_session, src_port);
+
+        if (is_known_game_udp_port(src_port) || is_known_game_udp_port(dst_port)) {
+            return false;
+        }
+
+        shared_ptr<PacketTunnelSession> target_session;
+        string resolution;
+        if (!try_resolve_gateway_udp_peer_target(sender_session,
+                                                 dst_port,
+                                                 &target_session,
+                                                 &resolution)) {
+            return false;
+        }
+
+        vector<uint8_t> rewritten_packet(payload, payload + payload_len);
+        if (!rewrite_client_bound_udp_destination_ip(&rewritten_packet,
+                                                     original_dst_ip_be,
+                                                     target_session->virtual_ip_be)) {
+            return false;
+        }
+
+        Logger::info("[IP Tunnel|" + sender_session->session_uuid + "] relay gateway UDP src=" +
+                     ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
+                     " dst=" + ipv4_be_to_string(original_dst_ip_be) + ":" + to_string(dst_port) +
+                     " -> peer=" + describe_scoped_virtual_ip(target_session->server_key,
+                                                              target_session->virtual_ip_be) +
+                     ":" + to_string(dst_port) +
+                     " resolver=" + resolution +
+                     " len=" + to_string(payload_len));
+
+        if (!send_packet_tunnel_frame(target_session,
+                                      packet_tunnel::kFrameIpv4Packet,
+                                      rewritten_packet.data(),
+                                      rewritten_packet.size())) {
+            Logger::warning("[IP Tunnel|" + sender_session->session_uuid +
+                            "] failed to relay rewritten gateway UDP to " +
+                            describe_scoped_virtual_ip(target_session));
+            target_session->active = false;
+            if (!target_session->use_udp && target_session->client_fd >= 0) {
+                shutdown(target_session->client_fd, SHUT_RDWR);
+            }
+            return false;
+        }
+
+        touch_packet_tunnel_session(target_session);
+        return true;
     }
 
     void maybe_log_udp_flow_info(const shared_ptr<PacketTunnelSession>& session,
@@ -1417,7 +1652,7 @@ private:
     }
 
     bool is_focused_game_udp_port(uint16_t port) {
-        return port == 5063 || port == 2311 || port == 2312 || port == 2313;
+        return is_known_game_udp_port(port);
     }
 
     void maybe_log_virtual_peer_udp_relay(const shared_ptr<PacketTunnelSession>& sender_session,
@@ -2809,6 +3044,11 @@ private:
                 continue;
             }
 
+            if ((route_to_local_gateway || route_to_local_node) &&
+                relay_gateway_udp_to_peer(session, dst_ip_be, payload, payload_len)) {
+                continue;
+            }
+
             if (payload[9] == IPPROTO_UDP) {
                 uint16_t src_port = 0;
                 uint16_t dst_port = 0;
@@ -3236,6 +3476,11 @@ private:
                     if (!route_to_local_gateway && !route_to_local_node) {
                         Logger::debug("[IP Tunnel|" + session_uuid + "] no peer/local route for dst=" +
                                       describe_scoped_virtual_ip(session->server_key, dst_ip_be));
+                        continue;
+                    }
+
+                    if ((route_to_local_gateway || route_to_local_node) &&
+                        relay_gateway_udp_to_peer(session, dst_ip_be, payload.data(), payload_len)) {
                         continue;
                     }
 

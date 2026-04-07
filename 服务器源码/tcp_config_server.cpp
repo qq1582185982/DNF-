@@ -868,7 +868,7 @@ void handle_tcp_request(int client_fd, const string& client_label) {
                                   " client_id=" + lease_client_id +
                                   " server_key=" + canonical_node_key(*node) +
                                   " virtual_ip=" + lease_record.virtual_ip);
-                    Logger::debug("[TCP閰嶇疆] lease granted: client=" + client_label +
+                    Logger::debug("[TCP配置] lease granted: client=" + client_label +
                                   " server_key=" + canonical_node_key(*node) +
                                   " virtual_ip=" + lease_record.virtual_ip +
                                   " gateway=" + lease_record.gateway_ip +
