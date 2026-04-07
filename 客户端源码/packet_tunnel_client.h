@@ -42,6 +42,14 @@ private:
         }
     };
 
+    struct PeerUdpPortOwner {
+        std::string peer_virtual_ip;
+        unsigned long long last_seen_ms;
+
+        PeerUdpPortOwner() : last_seen_ms(0) {
+        }
+    };
+
     bool ConnectSocket(std::wstring* error_msg);
     bool SendHandshake(std::wstring* error_msg);
     bool ReceiveHandshakeAck(std::wstring* error_msg);
@@ -61,11 +69,15 @@ private:
                               UdpEndpoint* endpoint,
                               bool* direct_path_fresh = NULL,
                               bool* active_direct = NULL) const;
+    bool TryResolveGatewayUdpPeerTarget(uint16_t dst_port,
+                                        std::string* peer_virtual_ip,
+                                        std::string* resolution = NULL) const;
     bool TryResolvePeerBySource(const sockaddr_storage& source_addr,
                                 int source_addr_len,
                                 std::string* peer_virtual_ip) const;
     bool IsServerEndpoint(const sockaddr_storage& source_addr,
                           int source_addr_len) const;
+    void LearnPeerUdpPortOwner(const std::string& peer_virtual_ip, uint16_t src_port);
     bool SendFrameToEndpoint(const UdpEndpoint& endpoint,
                              uint8_t frame_type,
                              const uint8_t* data,
@@ -122,5 +134,6 @@ private:
     std::map<std::string, unsigned long long> wintun_target_debug_log_tick_;
     std::map<std::string, unsigned long long> payload_ip_debug_log_tick_;
     std::map<std::string, unsigned long long> peer_probe_send_tick_;
+    std::map<uint16_t, PeerUdpPortOwner> peer_udp_port_owners_;
     bool peer_direct_allowed_;
 };

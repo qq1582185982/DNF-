@@ -41,6 +41,7 @@ const DWORD kPeerDirectProbeIntervalMs = 500;
 const DWORD kSocketReadTimeoutMs = 1000;
 const DWORD kPhysicalDnsQueryTimeoutMs = 1500;
 const DWORD kWintunReadWaitMs = 500;
+const DWORD kGatewayUdpPortOwnerTtlMs = 60000;
 const int kSocketBufferBytes = 256 * 1024;
 const uint16_t kPeerDirectProbeSrcPort = 65401;
 const uint16_t kPeerDirectProbeDstPort = 65402;
@@ -75,6 +76,122 @@ uint16_t ComputeIpv4HeaderChecksum(const uint8_t* header, size_t header_len) {
         sum = (sum & 0xFFFFu) + (sum >> 16);
     }
     return static_cast<uint16_t>(~sum);
+}
+
+uint16_t ComputeIpv4TransportChecksum(const uint8_t* packet, size_t packet_len) {
+    if (packet == NULL || packet_len < 20) {
+        return 0;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len) {
+        return 0;
+    }
+
+    const uint16_t total_len =
+        static_cast<uint16_t>((packet[2] << 8) | packet[3]);
+    if (total_len < ip_header_len || packet_len < total_len) {
+        return 0;
+    }
+
+    const uint8_t protocol = packet[9];
+    const size_t transport_len = static_cast<size_t>(total_len - ip_header_len);
+    const uint8_t* transport = packet + ip_header_len;
+
+    uint32_t sum = 0;
+    for (int i = 12; i < 20; i += 2) {
+        sum += (static_cast<uint32_t>(packet[i]) << 8) |
+               static_cast<uint32_t>(packet[i + 1]);
+    }
+    sum += static_cast<uint32_t>(protocol);
+    sum += static_cast<uint32_t>(transport_len);
+
+    size_t remaining = transport_len;
+    while (remaining >= 2) {
+        sum += (static_cast<uint32_t>(transport[0]) << 8) |
+               static_cast<uint32_t>(transport[1]);
+        transport += 2;
+        remaining -= 2;
+    }
+    if (remaining == 1) {
+        sum += static_cast<uint32_t>(transport[0]) << 8;
+    }
+
+    while ((sum >> 16) != 0) {
+        sum = (sum & 0xFFFFu) + (sum >> 16);
+    }
+
+    uint16_t checksum = static_cast<uint16_t>(~sum & 0xFFFFu);
+    if (checksum == 0) {
+        checksum = 0xFFFFu;
+    }
+    return checksum;
+}
+
+bool RewriteIpv4UdpDestinationIp(std::vector<uint8_t>* packet,
+                                 uint32_t from_ip_be,
+                                 uint32_t to_ip_be) {
+    if (packet == NULL || packet->size() < 20) {
+        return false;
+    }
+
+    std::vector<uint8_t>& bytes = *packet;
+    if (((bytes[0] >> 4) & 0x0F) != 4) {
+        return false;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(bytes[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || bytes.size() < ip_header_len + 8 ||
+        bytes[9] != IPPROTO_UDP) {
+        return false;
+    }
+
+    uint32_t current_ip_be = 0;
+    memcpy(&current_ip_be, &bytes[16], sizeof(current_ip_be));
+    if (current_ip_be != from_ip_be || current_ip_be == to_ip_be) {
+        return false;
+    }
+
+    memcpy(&bytes[16], &to_ip_be, sizeof(to_ip_be));
+    bytes[10] = 0;
+    bytes[11] = 0;
+    packet_tunnel::write_u16_be(bytes.data() + 10,
+                                ComputeIpv4HeaderChecksum(bytes.data(), ip_header_len));
+
+    bytes[ip_header_len + 6] = 0;
+    bytes[ip_header_len + 7] = 0;
+    packet_tunnel::write_u16_be(bytes.data() + ip_header_len + 6,
+                                ComputeIpv4TransportChecksum(bytes.data(), bytes.size()));
+    return true;
+}
+
+bool IsKnownGameUdpPort(uint16_t port) {
+    switch (port) {
+    case 5063:
+    case 2311:
+    case 2312:
+    case 2313:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool IsReservedPeerDirectPort(uint16_t port) {
+    return port == kPeerDirectProbeSrcPort || port == kPeerDirectProbeDstPort;
+}
+
+bool IsKnownPeerVirtualIp(const std::vector<PeerRouteStatus>& peers,
+                          const std::string& peer_virtual_ip) {
+    if (peer_virtual_ip.empty()) {
+        return false;
+    }
+    for (size_t i = 0; i < peers.size(); ++i) {
+        if (peers[i].peer_virtual_ip == peer_virtual_ip) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool BuildPeerDirectProbePacket(uint32_t src_ip_be,
@@ -2204,12 +2321,29 @@ void PacketTunnelClient::SocketReadLoop() {
 
         if (frame_type == packet_tunnel::kFrameIpv4Packet && wintun_manager_ != NULL) {
             const uint8_t* payload = buffer.data() + packet_tunnel::kFrameHeaderSize;
+            const bool has_inner_ipv4 =
+                payload_len >= 20 &&
+                (((payload[0] >> 4) & 0x0F) == 4);
+            const std::string inner_src_virtual_ip =
+                has_inner_ipv4 ? Ipv4ToString(payload + 12) : "";
+            const std::string inner_dst_virtual_ip =
+                has_inner_ipv4 ? Ipv4ToString(payload + 16) : "";
+            bool inner_is_udp = false;
+            uint16_t inner_src_port = 0;
+            if (has_inner_ipv4 && payload[9] == IPPROTO_UDP) {
+                const size_t ip_header_len = static_cast<size_t>(payload[0] & 0x0F) * 4;
+                if (ip_header_len >= 20 && payload_len >= ip_header_len + 8) {
+                    inner_is_udp = true;
+                    inner_src_port = ntohs(*(const uint16_t*)(payload + ip_header_len));
+                }
+            }
+
             uint8_t probe_type = 0;
             const bool is_direct_probe = ParsePeerDirectProbePacket(payload, payload_len, &probe_type);
             if (!from_server && !from_known_peer && is_direct_probe && peer_link_manager_ != NULL &&
                 payload_len >= 20) {
-                const std::string inferred_peer_virtual_ip = Ipv4ToString(payload + 12);
-                const std::string inferred_local_virtual_ip = Ipv4ToString(payload + 16);
+                const std::string inferred_peer_virtual_ip = inner_src_virtual_ip;
+                const std::string inferred_local_virtual_ip = inner_dst_virtual_ip;
                 uint8_t endpoint_family = packet_tunnel::kPeerEndpointFamilyUnknown;
                 uint16_t endpoint_port = 0;
                 uint8_t endpoint_addr[16] = {};
@@ -2254,7 +2388,22 @@ void PacketTunnelClient::SocketReadLoop() {
                                      peer_virtual_ip);
                 continue;
             }
+
+            std::string relay_peer_virtual_ip;
+            if (from_server &&
+                peer_link_manager_ != NULL &&
+                inner_is_udp &&
+                inner_dst_virtual_ip == virtual_ip_) {
+                const std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
+                if (IsKnownPeerVirtualIp(peers, inner_src_virtual_ip)) {
+                    relay_peer_virtual_ip = inner_src_virtual_ip;
+                }
+            }
+
             if (from_known_peer) {
+                if (inner_is_udp) {
+                    LearnPeerUdpPortOwner(peer_virtual_ip, inner_src_port);
+                }
                 MarkNetworkActivity();
                 if (peer_link_manager_ != NULL) {
                     peer_link_manager_->TouchPeerDirectData(peer_virtual_ip, 0);
@@ -2296,7 +2445,14 @@ void PacketTunnelClient::SocketReadLoop() {
                 if (!has_fresh_direct_route(peer_virtual_ip)) {
                     continue;
                 }
-            } else if (payload_len >= 20 && has_fresh_direct_route(Ipv4ToString(payload + 12))) {
+            } else {
+                if (!relay_peer_virtual_ip.empty()) {
+                    LearnPeerUdpPortOwner(relay_peer_virtual_ip, inner_src_port);
+                }
+            }
+            if (!from_known_peer &&
+                has_inner_ipv4 &&
+                has_fresh_direct_route(inner_src_virtual_ip)) {
                 continue;
             }
             std::string desc;
@@ -2395,50 +2551,115 @@ void PacketTunnelClient::WintunReadLoop() {
             }
         }
         if (is_udp && peer_direct_allowed_) {
+            const std::string original_dst_virtual_ip = dst_virtual_ip;
+            std::string target_peer_virtual_ip = dst_virtual_ip;
+            std::string target_resolution = "direct_ip";
+            bool resolved_gateway_target = false;
             UdpEndpoint peer_endpoint;
             bool direct_path_fresh = false;
             bool active_direct = false;
-            if (TryBuildPeerEndpoint(dst_virtual_ip,
+            bool have_peer_endpoint =
+                TryBuildPeerEndpoint(target_peer_virtual_ip,
                                      &peer_endpoint,
                                      &direct_path_fresh,
-                                     &active_direct)) {
-                if (direct_path_fresh) {
-                    if (SendFrameToEndpoint(peer_endpoint,
-                                            packet_tunnel::kFrameIpv4Packet,
-                                            packet.data(),
-                                            packet.size(),
-                                            NULL)) {
-                        PacketTunnelDebugLog("udp wintun->peer " + route_desc);
-                        continue;
+                                     &active_direct);
+            if (!have_peer_endpoint) {
+                std::string resolved_peer_virtual_ip;
+                std::string resolution;
+                if (TryResolveGatewayUdpPeerTarget(dst_port,
+                                                   &resolved_peer_virtual_ip,
+                                                   &resolution) &&
+                    !resolved_peer_virtual_ip.empty()) {
+                    target_peer_virtual_ip = resolved_peer_virtual_ip;
+                    target_resolution = resolution;
+                    resolved_gateway_target =
+                        target_peer_virtual_ip != original_dst_virtual_ip;
+                    have_peer_endpoint =
+                        TryBuildPeerEndpoint(target_peer_virtual_ip,
+                                             &peer_endpoint,
+                                             &direct_path_fresh,
+                                             &active_direct);
+                    if (resolved_gateway_target) {
+                        PacketTunnelDebugLog("udp gateway peer resolve dst=" +
+                                             original_dst_virtual_ip + ":" +
+                                             std::to_string(dst_port) +
+                                             " -> peer=" + target_peer_virtual_ip +
+                                             " resolver=" + target_resolution);
                     }
-                    PeerRouteStatus failed_status = {};
-                    const bool state_changed =
-                        peer_link_manager_ != NULL &&
-                        peer_link_manager_->RecordDirectSendFailure(dst_virtual_ip,
-                                                                    0,
-                                                                    true,
-                                                                    &failed_status);
-                    PacketTunnelDebugLog("udp active direct send failed, fallback to relay " +
-                                         route_desc);
-                    if (state_changed && failed_status.state == PeerRouteState::Cooldown) {
-                        PacketTunnelDebugLog("udp direct route entered cooldown peer=" +
-                                             failed_status.peer_virtual_ip);
+                }
+            }
+
+            std::vector<uint8_t> direct_packet;
+            const std::vector<uint8_t>* direct_packet_view = &packet;
+            bool direct_payload_ready = true;
+            if (have_peer_endpoint && resolved_gateway_target) {
+                uint32_t original_dst_ip_be = 0;
+                uint32_t target_peer_ip_be = 0;
+                memcpy(&original_dst_ip_be, packet.data() + 16, sizeof(original_dst_ip_be));
+                direct_packet = packet;
+                if (!ParseIpv4StringToBe(target_peer_virtual_ip, &target_peer_ip_be) ||
+                    !RewriteIpv4UdpDestinationIp(&direct_packet,
+                                                original_dst_ip_be,
+                                                target_peer_ip_be)) {
+                    direct_payload_ready = false;
+                    PacketTunnelDebugLog("udp gateway peer rewrite failed dst=" +
+                                         original_dst_virtual_ip + ":" +
+                                         std::to_string(dst_port) +
+                                         " peer=" + target_peer_virtual_ip +
+                                         " resolver=" + target_resolution);
+                } else {
+                    direct_packet_view = &direct_packet;
+                }
+            }
+
+            std::string direct_route_desc = route_desc;
+            if (target_peer_virtual_ip != original_dst_virtual_ip) {
+                direct_route_desc += " resolved_peer=" + target_peer_virtual_ip +
+                                     " resolver=" + target_resolution;
+            }
+
+            if (have_peer_endpoint) {
+                if (direct_path_fresh) {
+                    if (direct_payload_ready) {
+                        if (SendFrameToEndpoint(peer_endpoint,
+                                                packet_tunnel::kFrameIpv4Packet,
+                                                direct_packet_view->data(),
+                                                direct_packet_view->size(),
+                                                NULL)) {
+                            PacketTunnelDebugLog("udp wintun->peer " + direct_route_desc);
+                            continue;
+                        }
+                        PeerRouteStatus failed_status = {};
+                        const bool state_changed =
+                            peer_link_manager_ != NULL &&
+                            peer_link_manager_->RecordDirectSendFailure(target_peer_virtual_ip,
+                                                                        0,
+                                                                        true,
+                                                                        &failed_status);
+                        PacketTunnelDebugLog("udp active direct send failed, fallback to relay " +
+                                             direct_route_desc);
+                        if (state_changed && failed_status.state == PeerRouteState::Cooldown) {
+                            PacketTunnelDebugLog("udp direct route entered cooldown peer=" +
+                                                 failed_status.peer_virtual_ip);
+                        }
+                    } else {
+                        MaybeLogDirectRouteFallback(target_peer_virtual_ip, "rewrite_failed");
                     }
                 } else {
                     const unsigned long long now_tick = GetTickCount64();
                     std::map<std::string, unsigned long long>::iterator probe_it =
-                        peer_probe_send_tick_.find(dst_virtual_ip);
+                        peer_probe_send_tick_.find(target_peer_virtual_ip);
                     const bool should_send_probe =
                         probe_it == peer_probe_send_tick_.end() ||
                         now_tick < probe_it->second ||
                         (now_tick - probe_it->second) >= kPeerDirectProbeIntervalMs;
                     if (should_send_probe) {
-                        uint32_t dst_virtual_ip_be = 0;
+                        uint32_t target_peer_ip_be = 0;
                         std::vector<uint8_t> probe_packet;
                         if (virtual_ip_be != 0 &&
-                            ParseIpv4StringToBe(dst_virtual_ip, &dst_virtual_ip_be) &&
+                            ParseIpv4StringToBe(target_peer_virtual_ip, &target_peer_ip_be) &&
                             BuildPeerDirectProbePacket(virtual_ip_be,
-                                                       dst_virtual_ip_be,
+                                                       target_peer_ip_be,
                                                        kPeerDirectProbeRequest,
                                                        &probe_packet) &&
                             SendFrameToEndpoint(peer_endpoint,
@@ -2446,22 +2667,22 @@ void PacketTunnelClient::WintunReadLoop() {
                                                 probe_packet.data(),
                                                 probe_packet.size(),
                                                 NULL)) {
-                            peer_probe_send_tick_[dst_virtual_ip] = now_tick;
-                            PacketTunnelDebugLog("udp direct probe request " + route_desc);
+                            peer_probe_send_tick_[target_peer_virtual_ip] = now_tick;
+                            PacketTunnelDebugLog("udp direct probe request " + direct_route_desc);
                         } else {
                             PeerRouteStatus failed_status = {};
                             const bool state_changed =
                                 peer_link_manager_ != NULL &&
-                                peer_link_manager_->RecordDirectSendFailure(dst_virtual_ip,
+                                peer_link_manager_->RecordDirectSendFailure(target_peer_virtual_ip,
                                                                             0,
                                                                             active_direct,
                                                                             &failed_status);
                             if (active_direct) {
                                 PacketTunnelDebugLog("udp active direct probe failed, fallback to relay " +
-                                                     route_desc);
+                                                     direct_route_desc);
                             } else {
                                 PacketTunnelDebugLog("udp direct probe send failed, keep relay primary " +
-                                                     route_desc);
+                                                     direct_route_desc);
                             }
                             if (state_changed && failed_status.state == PeerRouteState::Cooldown) {
                                 PacketTunnelDebugLog("udp direct route entered cooldown peer=" +
@@ -2471,7 +2692,10 @@ void PacketTunnelClient::WintunReadLoop() {
                     }
                 }
             } else {
-                MaybeLogDirectRouteFallback(dst_virtual_ip, "route_unavailable");
+                MaybeLogDirectRouteFallback(target_peer_virtual_ip,
+                                            target_peer_virtual_ip != original_dst_virtual_ip
+                                                ? ("route_unavailable_" + target_resolution)
+                                                : "route_unavailable");
             }
         }
 
@@ -2599,11 +2823,25 @@ void PacketTunnelClient::MaybeLogWintunTargetIntent(const std::string& dst_virtu
 
     std::string direct_target = "none";
     std::string peers_summary = "none";
+    std::string resolution = "none";
     if (peer_link_manager_ != NULL) {
         const std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
         const std::string detail = DescribeSinglePeerRoute(peers, dst_virtual_ip, now_tick);
         if (!detail.empty()) {
             direct_target = detail;
+            resolution = "direct_ip";
+        } else {
+            std::string resolved_peer_virtual_ip;
+            if (TryResolveGatewayUdpPeerTarget(dst_port,
+                                               &resolved_peer_virtual_ip,
+                                               &resolution) &&
+                !resolved_peer_virtual_ip.empty()) {
+                const std::string resolved_detail =
+                    DescribeSinglePeerRoute(peers, resolved_peer_virtual_ip, now_tick);
+                direct_target = !resolved_detail.empty()
+                                    ? resolved_detail
+                                    : resolved_peer_virtual_ip;
+            }
         }
         peers_summary = BuildPeerRouteSnapshotSummary(peers, now_tick);
     }
@@ -2611,6 +2849,7 @@ void PacketTunnelClient::MaybeLogWintunTargetIntent(const std::string& dst_virtu
     wintun_target_debug_log_tick_[flow_key] = now_tick;
     PacketTunnelDebugLog("udp wintun intent " + route_desc +
                          " direct_target=" + direct_target +
+                         " resolver=" + resolution +
                          " peers=" + peers_summary);
 }
 
@@ -3053,6 +3292,120 @@ bool PacketTunnelClient::IsServerEndpoint(const sockaddr_storage& source_addr,
                           source_addr_len,
                           server_endpoint_.addr,
                           server_endpoint_.addr_len);
+}
+
+void PacketTunnelClient::LearnPeerUdpPortOwner(const std::string& peer_virtual_ip,
+                                               uint16_t src_port) {
+    if (peer_virtual_ip.empty() ||
+        peer_virtual_ip == virtual_ip_ ||
+        src_port == 0 ||
+        IsKnownGameUdpPort(src_port) ||
+        IsReservedPeerDirectPort(src_port)) {
+        return;
+    }
+
+    const unsigned long long now_tick = GetTickCount64();
+    std::string previous_owner;
+    bool owner_changed = false;
+
+    PeerUdpPortOwner& owner = peer_udp_port_owners_[src_port];
+    previous_owner = owner.peer_virtual_ip;
+    owner_changed = !previous_owner.empty() && previous_owner != peer_virtual_ip;
+    owner.peer_virtual_ip = peer_virtual_ip;
+    owner.last_seen_ms = now_tick;
+
+    if (owner_changed) {
+        PacketTunnelDebugLog("udp gateway owner update port=" + std::to_string(src_port) +
+                             " owner=" + previous_owner + "->" + peer_virtual_ip);
+    }
+}
+
+bool PacketTunnelClient::TryResolveGatewayUdpPeerTarget(uint16_t dst_port,
+                                                        std::string* peer_virtual_ip,
+                                                        std::string* resolution) const {
+    if (peer_virtual_ip != NULL) {
+        peer_virtual_ip->clear();
+    }
+    if (resolution != NULL) {
+        resolution->clear();
+    }
+    if (dst_port == 0 || peer_link_manager_ == NULL) {
+        return false;
+    }
+
+    const unsigned long long now_tick = GetTickCount64();
+    const std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
+
+    auto can_route_peer = [this](const PeerRouteStatus& peer) -> bool {
+        return !peer.peer_virtual_ip.empty() &&
+               peer.peer_virtual_ip != virtual_ip_ &&
+               peer.state != PeerRouteState::Cooldown &&
+               peer.direct_ready &&
+               peer.endpoint_family != packet_tunnel::kPeerEndpointFamilyUnknown &&
+               peer.endpoint_port != 0;
+    };
+
+    std::string selected_peer_virtual_ip;
+    std::string selected_resolution;
+    std::string single_candidate_peer_virtual_ip;
+    size_t candidate_count = 0;
+
+    for (size_t i = 0; i < peers.size(); ++i) {
+        if (!can_route_peer(peers[i])) {
+            continue;
+        }
+        ++candidate_count;
+        if (candidate_count == 1) {
+            single_candidate_peer_virtual_ip = peers[i].peer_virtual_ip;
+        } else {
+            single_candidate_peer_virtual_ip.clear();
+        }
+    }
+
+    std::map<uint16_t, PeerUdpPortOwner>::const_iterator owner_it =
+        peer_udp_port_owners_.find(dst_port);
+    if (owner_it != peer_udp_port_owners_.end()) {
+        const PeerUdpPortOwner& owner = owner_it->second;
+        const bool owner_stale =
+            owner.last_seen_ms == 0 ||
+            now_tick < owner.last_seen_ms ||
+            (now_tick - owner.last_seen_ms) > kGatewayUdpPortOwnerTtlMs;
+        if (!owner_stale &&
+            !owner.peer_virtual_ip.empty() &&
+            owner.peer_virtual_ip != virtual_ip_) {
+            for (size_t i = 0; i < peers.size(); ++i) {
+                if (!can_route_peer(peers[i]) ||
+                    peers[i].peer_virtual_ip != owner.peer_virtual_ip) {
+                    continue;
+                }
+                selected_peer_virtual_ip = owner.peer_virtual_ip;
+                selected_resolution = "port_owner";
+                break;
+            }
+        }
+    }
+
+    if (selected_peer_virtual_ip.empty() &&
+        candidate_count == 1 &&
+        !single_candidate_peer_virtual_ip.empty()) {
+        selected_peer_virtual_ip = single_candidate_peer_virtual_ip;
+        selected_resolution = "single_candidate";
+    }
+
+    if (selected_peer_virtual_ip.empty()) {
+        if (resolution != NULL) {
+            *resolution = "unresolved_candidates=" + std::to_string(candidate_count);
+        }
+        return false;
+    }
+
+    if (peer_virtual_ip != NULL) {
+        *peer_virtual_ip = selected_peer_virtual_ip;
+    }
+    if (resolution != NULL) {
+        *resolution = selected_resolution;
+    }
+    return true;
 }
 
 bool PacketTunnelClient::SendFrameToEndpoint(const UdpEndpoint& endpoint,
