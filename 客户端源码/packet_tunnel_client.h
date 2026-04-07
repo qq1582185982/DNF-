@@ -69,7 +69,8 @@ private:
                               UdpEndpoint* endpoint,
                               bool* direct_path_fresh = NULL,
                               bool* active_direct = NULL) const;
-    bool TryResolveGatewayUdpPeerTarget(uint16_t dst_port,
+    bool TryResolveGatewayUdpPeerTarget(const std::string& dst_virtual_ip,
+                                        uint16_t dst_port,
                                         std::string* peer_virtual_ip,
                                         std::string* resolution = NULL) const;
     bool TryResolvePeerBySource(const sockaddr_storage& source_addr,
