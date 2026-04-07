@@ -93,6 +93,9 @@ private:
     void MaybeLogTcpPayloadIpHints(const std::string& direction,
                                    const uint8_t* packet,
                                    size_t packet_len);
+    void MaybeLogUdpPayloadIpHints(const std::string& direction,
+                                   const uint8_t* packet,
+                                   size_t packet_len);
     void MarkNetworkActivity();
 
     std::string tunnel_server_ip_;
@@ -117,7 +120,7 @@ private:
     std::atomic<uint32_t> peer_signal_nonce_;
     std::map<std::string, unsigned long long> peer_route_debug_log_tick_;
     std::map<std::string, unsigned long long> wintun_target_debug_log_tick_;
-    std::map<std::string, unsigned long long> tcp_payload_ip_debug_log_tick_;
+    std::map<std::string, unsigned long long> payload_ip_debug_log_tick_;
     std::map<std::string, unsigned long long> peer_probe_send_tick_;
     bool peer_direct_allowed_;
 };

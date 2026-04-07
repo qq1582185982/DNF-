@@ -2307,6 +2307,9 @@ void PacketTunnelClient::SocketReadLoop() {
             MaybeLogTcpPayloadIpHints(from_known_peer ? "peer->wintun" : "tunnel->wintun",
                                       payload,
                                       payload_len);
+            MaybeLogUdpPayloadIpHints(from_known_peer ? "peer->wintun" : "tunnel->wintun",
+                                      payload,
+                                      payload_len);
             wintun_manager_->WritePacket(payload, payload_len, NULL);
             continue;
         }
@@ -2363,6 +2366,7 @@ void PacketTunnelClient::WintunReadLoop() {
             !IsNoisyUdpForLogging(packet.data(), packet.size()) &&
             TryDescribeUdpPacket(packet.data(), packet.size(), &desc);
         MaybeLogTcpPayloadIpHints("wintun->tunnel", packet.data(), packet.size());
+        MaybeLogUdpPayloadIpHints("wintun->tunnel", packet.data(), packet.size());
         const bool is_udp = packet.size() >= 20 && packet[9] == IPPROTO_UDP;
         std::string dst_virtual_ip;
         std::string route_desc;
@@ -2659,6 +2663,7 @@ void PacketTunnelClient::MaybeLogTcpPayloadIpHints(const std::string& direction,
         const std::string role =
             DescribeVirtualIpRole(hits[i].ip, virtual_ip_, inner_src_ip, inner_dst_ip, peers);
         const std::string flow_key =
+            "tcp|" +
             direction + "|" +
             inner_src_ip + ":" + std::to_string(src_port) + ">" +
             inner_dst_ip + ":" + std::to_string(dst_port) + "|" +
@@ -2666,17 +2671,94 @@ void PacketTunnelClient::MaybeLogTcpPayloadIpHints(const std::string& direction,
             (hits[i].little_endian ? "le" : "be") + "|" +
             role;
         std::map<std::string, unsigned long long>::iterator it =
-            tcp_payload_ip_debug_log_tick_.find(flow_key);
-        if (it != tcp_payload_ip_debug_log_tick_.end() &&
+            payload_ip_debug_log_tick_.find(flow_key);
+        if (it != payload_ip_debug_log_tick_.end() &&
             now_tick >= it->second &&
             (now_tick - it->second) < kPeerRouteDebugLogIntervalMs) {
             continue;
         }
 
-        tcp_payload_ip_debug_log_tick_[flow_key] = now_tick;
+        payload_ip_debug_log_tick_[flow_key] = now_tick;
 
         std::ostringstream ss;
         ss << "tcp payload virtual-ip hit dir=" << direction
+           << " flow=" << inner_src_ip << ":" << src_port
+           << "->" << inner_dst_ip << ":" << dst_port
+           << " hit=" << hits[i].ip
+           << " order=" << (hits[i].little_endian ? "le" : "be")
+           << " role=" << role
+           << " payload_off=" << hits[i].offset;
+        if (hits[i].has_next_port) {
+            ss << " next_port_le=" << hits[i].next_port_le
+               << " next_port_be=" << hits[i].next_port_be;
+        }
+        ss << " ctx=" << hits[i].context_hex;
+        PacketTunnelDebugLog(ss.str());
+    }
+}
+
+void PacketTunnelClient::MaybeLogUdpPayloadIpHints(const std::string& direction,
+                                                   const uint8_t* packet,
+                                                   size_t packet_len) {
+    if (packet == NULL || packet_len < 28 || ((packet[0] >> 4) & 0x0F) != 4 || packet[9] != IPPROTO_UDP) {
+        return;
+    }
+
+    if (IsNoisyUdpForLogging(packet, packet_len)) {
+        return;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len + 8) {
+        return;
+    }
+
+    const uint16_t src_port = ntohs(*(const uint16_t*)(packet + ip_header_len));
+    const uint16_t dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
+    const uint8_t* udp_payload = packet + ip_header_len + 8;
+    const size_t udp_payload_len = packet_len - ip_header_len - 8;
+    if (udp_payload_len < 4) {
+        return;
+    }
+
+    const std::vector<TcpPayloadVirtualIpHit> hits =
+        FindVirtualSubnetIpHits(udp_payload, udp_payload_len, 6);
+    if (hits.empty()) {
+        return;
+    }
+
+    const std::string inner_src_ip = Ipv4ToString(packet + 12);
+    const std::string inner_dst_ip = Ipv4ToString(packet + 16);
+
+    std::vector<PeerRouteStatus> peers;
+    if (peer_link_manager_ != NULL) {
+        peers = peer_link_manager_->Snapshot();
+    }
+
+    const unsigned long long now_tick = GetTickCount64();
+    for (size_t i = 0; i < hits.size(); ++i) {
+        const std::string role =
+            DescribeVirtualIpRole(hits[i].ip, virtual_ip_, inner_src_ip, inner_dst_ip, peers);
+        const std::string flow_key =
+            "udp|" +
+            direction + "|" +
+            inner_src_ip + ":" + std::to_string(src_port) + ">" +
+            inner_dst_ip + ":" + std::to_string(dst_port) + "|" +
+            hits[i].ip + "|" +
+            (hits[i].little_endian ? "le" : "be") + "|" +
+            role;
+        std::map<std::string, unsigned long long>::iterator it =
+            payload_ip_debug_log_tick_.find(flow_key);
+        if (it != payload_ip_debug_log_tick_.end() &&
+            now_tick >= it->second &&
+            (now_tick - it->second) < kPeerRouteDebugLogIntervalMs) {
+            continue;
+        }
+
+        payload_ip_debug_log_tick_[flow_key] = now_tick;
+
+        std::ostringstream ss;
+        ss << "udp payload virtual-ip hit dir=" << direction
            << " flow=" << inner_src_ip << ":" << src_port
            << "->" << inner_dst_ip << ":" << dst_port
            << " hit=" << hits[i].ip
