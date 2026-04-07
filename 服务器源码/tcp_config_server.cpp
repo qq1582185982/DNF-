@@ -860,6 +860,12 @@ void handle_tcp_request(int client_fd, const string& client_label) {
                 string error;
                 if (g_ip_pool_manager.AcquireLease(canonical_node_key(*node), lease_request, &lease_record, &error)) {
                     lease_record.server_virtual_ip = node->server_virtual_ip;
+                    Logger::debug("[TCP閰嶇疆] lease granted: client=" + client_label +
+                                  " server_key=" + canonical_node_key(*node) +
+                                  " virtual_ip=" + lease_record.virtual_ip +
+                                  " gateway=" + lease_record.gateway_ip +
+                                  " server_virtual_ip=" + lease_record.server_virtual_ip +
+                                  " route=" + g_network.virtual_subnet);
                     json_response = generate_lease_json(*node, lease_record, "lease granted");
                 } else {
                     json_response = make_status_json(status_from_error(error), error, canonical_node_key(*node));
@@ -885,6 +891,12 @@ void handle_tcp_request(int client_fd, const string& client_label) {
                 string error;
                 if (g_ip_pool_manager.RenewLease(canonical_node_key(*node), parts[2], &lease_record, &error)) {
                     lease_record.server_virtual_ip = node->server_virtual_ip;
+                    Logger::debug("[TCP閰嶇疆] lease renewed: client=" + client_label +
+                                  " server_key=" + canonical_node_key(*node) +
+                                  " virtual_ip=" + lease_record.virtual_ip +
+                                  " gateway=" + lease_record.gateway_ip +
+                                  " server_virtual_ip=" + lease_record.server_virtual_ip +
+                                  " route=" + g_network.virtual_subnet);
                     json_response = generate_lease_json(*node, lease_record, "lease renewed");
                 } else {
                     fprintf(stderr,

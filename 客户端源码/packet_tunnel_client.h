@@ -7,6 +7,7 @@
 #include <ws2tcpip.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -85,6 +86,12 @@ private:
     static std::wstring Utf8ToWide(const std::string& value);
     void MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip,
                                      const std::string& reason);
+    void MaybeLogWintunTargetIntent(const std::string& dst_virtual_ip,
+                                    uint16_t dst_port,
+                                    const std::string& route_desc);
+    void MaybeLogTcpPayloadIpHints(const std::string& direction,
+                                   const uint8_t* packet,
+                                   size_t packet_len);
     void MarkNetworkActivity();
 
     std::string tunnel_server_ip_;
@@ -107,6 +114,8 @@ private:
     PeerLinkManager* peer_link_manager_;
     std::atomic<uint32_t> peer_signal_nonce_;
     std::map<std::string, unsigned long long> peer_route_debug_log_tick_;
+    std::map<std::string, unsigned long long> wintun_target_debug_log_tick_;
+    std::map<std::string, unsigned long long> tcp_payload_ip_debug_log_tick_;
     std::map<std::string, unsigned long long> peer_probe_send_tick_;
     bool peer_direct_allowed_;
 };

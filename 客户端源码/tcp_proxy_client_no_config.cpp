@@ -786,6 +786,13 @@ public:
         renew_failed_ = false;
         renew_thread_ = thread(&LeaseSessionGuard::RenewLoop, this);
 
+        const string route_summary = lease.routes.empty() ? "(none)" : lease.routes[0].cidr;
+        Logger::debug("[lease-trace] server_key=" + server_key +
+                      " virtual_ip=" + lease.virtual_ip +
+                      " gateway=" + lease.gateway_ip +
+                      " server_virtual_ip=" + lease.server_virtual_ip +
+                      " route=" + route_summary);
+
         Logger::info("[租约] 虚拟IP租约申请成功");
         Logger::debug("[租约] 已申请虚拟IP: " + lease.virtual_ip +
                       " 网关=" + lease.gateway_ip +
