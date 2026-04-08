@@ -184,7 +184,15 @@ bool PeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
             return false;
         }
         if (same_endpoint) {
-            return false;
+            const bool should_retry_stable_offer =
+                entry.pending_hello_nonce == 0 &&
+                !entry.direct_ready &&
+                !entry.active_direct &&
+                (entry.state == PeerRouteState::RelayOnly ||
+                 entry.state == PeerRouteState::Cooldown);
+            if (!should_retry_stable_offer) {
+                return false;
+            }
         }
     }
 
@@ -569,8 +577,7 @@ bool PeerLinkManager::TryResolveByEndpoint(uint8_t endpoint_family,
 
     std::lock_guard<std::mutex> lock(mutex_);
     for (std::map<std::string, Entry>::const_iterator it = peers_.begin(); it != peers_.end(); ++it) {
-        if (it->second.state == PeerRouteState::RelayOnly ||
-            it->second.state == PeerRouteState::Cooldown ||
+        if (it->second.state == PeerRouteState::Cooldown ||
             !HasEndpoint(it->second) ||
             it->second.endpoint_family != endpoint_family ||
             it->second.endpoint_port != endpoint_port ||

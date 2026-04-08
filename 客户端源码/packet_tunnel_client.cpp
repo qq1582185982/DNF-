@@ -51,6 +51,8 @@ const uint8_t kPeerDirectProbeVersion = 1;
 const uint8_t kPeerDirectProbeRequest = 1;
 const uint8_t kPeerDirectProbeResponse = 2;
 
+bool IsKnownGameUdpPort(uint16_t port);
+
 std::string HexPrefix(const uint8_t* data, size_t length, size_t max_bytes) {
     if (data == NULL || length == 0 || max_bytes == 0) {
         return "";
@@ -66,6 +68,30 @@ std::string HexPrefix(const uint8_t* data, size_t length, size_t max_bytes) {
         out.push_back(kHex[value & 0x0F]);
     }
     return out;
+}
+
+void MaybeLogDnfUdpSignature(const std::string& direction,
+                             const std::string& src_virtual_ip,
+                             uint16_t src_port,
+                             const std::string& dst_virtual_ip,
+                             uint16_t dst_port,
+                             const uint8_t* udp_payload,
+                             size_t udp_payload_len) {
+    if (udp_payload == NULL) {
+        return;
+    }
+
+    const bool interesting =
+        IsKnownGameUdpPort(src_port) || IsKnownGameUdpPort(dst_port);
+    if (!interesting) {
+        return;
+    }
+
+    PacketTunnelDebugLog("dnf udp signature dir=" + direction +
+                         " src=" + src_virtual_ip + ":" + std::to_string(src_port) +
+                         " dst=" + dst_virtual_ip + ":" + std::to_string(dst_port) +
+                         " payload_len=" + std::to_string(udp_payload_len) +
+                         " hex=" + HexPrefix(udp_payload, udp_payload_len, 24));
 }
 
 uint16_t ComputeIpv4HeaderChecksum(const uint8_t* header, size_t header_len) {
@@ -2077,7 +2103,7 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
 
         sockaddr_storage local_bind_addr = {};
         int local_bind_addr_len = 0;
-        bool has_local_bind = false;
+        bool has_local_bind_hint = false;
         std::string bind_adapter_name;
 
         SOCKET probe_sock = socket(preferred_family, SOCK_DGRAM, IPPROTO_UDP);
@@ -2092,7 +2118,7 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
                                 &local_bind_addr_len) == 0) {
                     ClearSockaddrPort(&local_bind_addr);
                     if (!public_relay_target) {
-                        has_local_bind = true;
+                        has_local_bind_hint = true;
                     } else {
                         bool preferred_adapter = false;
                         if (IsUsableBindAddress(reinterpret_cast<const sockaddr*>(&local_bind_addr)) &&
@@ -2101,7 +2127,7 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
                                                   &bind_adapter_name,
                                                   &preferred_adapter) &&
                             preferred_adapter) {
-                            has_local_bind = true;
+                            has_local_bind_hint = true;
                         } else {
                             PacketTunnelDebugLog("udp socket local bind rejected: " +
                                                  SockaddrToString(local_bind_addr, local_bind_addr_len) +
@@ -2115,21 +2141,6 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
             closesocket(probe_sock);
         }
 
-        if (public_relay_target && !has_local_bind) {
-            if (!TryFindPreferredBindAddress(preferred_family,
-                                             &local_bind_addr,
-                                             &local_bind_addr_len,
-                                             &bind_adapter_name)) {
-                PacketTunnelDebugLog("udp socket preferred bind not found for family=" +
-                                     std::to_string(preferred_family));
-                return false;
-            }
-            has_local_bind = true;
-            PacketTunnelDebugLog("udp socket local bind override: " +
-                                 SockaddrToString(local_bind_addr, local_bind_addr_len) +
-                                 " adapter=" + bind_adapter_name);
-        }
-
         SOCKET sock = socket(preferred_family, SOCK_DGRAM, IPPROTO_UDP);
         if (sock == INVALID_SOCKET) {
             return false;
@@ -2137,15 +2148,24 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
 
         configure_socket(sock, preferred_family);
 
-        if (public_relay_target &&
-            has_local_bind &&
-            bind(sock,
-                 reinterpret_cast<const sockaddr*>(&local_bind_addr),
-                 local_bind_addr_len) != 0) {
-            PacketTunnelDebugLog("udp socket local bind fallback: " +
-                                 WideToUtf8(BuildSocketError(L"bind failed", WSAGetLastError())));
-            closesocket(sock);
-            return false;
+        if (public_relay_target) {
+            if (!has_local_bind_hint &&
+                TryFindPreferredBindAddress(preferred_family,
+                                            &local_bind_addr,
+                                            &local_bind_addr_len,
+                                            &bind_adapter_name)) {
+                has_local_bind_hint = true;
+                PacketTunnelDebugLog("udp socket route hint override: " +
+                                     SockaddrToString(local_bind_addr, local_bind_addr_len) +
+                                     " adapter=" + bind_adapter_name);
+            } else if (!has_local_bind_hint) {
+                PacketTunnelDebugLog("udp socket route hint not found for family=" +
+                                     std::to_string(preferred_family));
+            }
+
+            // Keep the public relay socket on a wildcard bind so peer-direct packets can
+            // arrive on whichever adapter/NAT path the OS selects at runtime.
+            PacketTunnelDebugLog("udp socket using wildcard local bind for public relay candidate");
         }
 
         sock_ = sock;
@@ -2164,8 +2184,8 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
                              ":" + std::to_string(tunnel_port_) +
                              " scope=" + RelayEndpointScopeName(candidate) +
                              " family=" + std::to_string(socket_family_) +
-                             ((public_relay_target && has_local_bind)
-                                  ? (" local=" + SockaddrToString(local_bind_addr, local_bind_addr_len))
+                             ((public_relay_target && has_local_bind_hint)
+                                  ? (" local_hint=" + SockaddrToString(local_bind_addr, local_bind_addr_len))
                                   : std::string("")));
         return true;
     };
@@ -2340,8 +2360,9 @@ void PacketTunnelClient::SocketReadLoop() {
         std::string peer_virtual_ip;
         bool from_known_peer = !from_server &&
                                TryResolvePeerBySource(source_addr, source_addr_len, &peer_virtual_ip);
-        bool learned_direct_probe = false;
+        bool learned_direct_endpoint = false;
         bool learned_direct_endpoint_changed = false;
+        std::string learned_direct_reason;
         auto has_fresh_direct_route = [this](const std::string& candidate_peer_virtual_ip) -> bool {
             if (candidate_peer_virtual_ip.empty() || peer_link_manager_ == NULL) {
                 return false;
@@ -2392,6 +2413,13 @@ void PacketTunnelClient::SocketReadLoop() {
                     inner_is_udp = true;
                     inner_src_port = ntohs(*(const uint16_t*)(payload + ip_header_len));
                     inner_dst_port = ntohs(*(const uint16_t*)(payload + ip_header_len + 2));
+                    MaybeLogDnfUdpSignature(from_server ? "tunnel->wintun" : "peer->wintun",
+                                            inner_src_virtual_ip,
+                                            inner_src_port,
+                                            inner_dst_virtual_ip,
+                                            inner_dst_port,
+                                            payload + ip_header_len + 8,
+                                            payload_len - ip_header_len - 8);
                 }
             }
 
@@ -2416,14 +2444,24 @@ void PacketTunnelClient::SocketReadLoop() {
                                      " probe=" + probe_kind +
                                      " len=" + std::to_string(payload_len));
             }
-            if (!from_server && !from_known_peer && is_direct_probe && peer_link_manager_ != NULL &&
-                payload_len >= 20) {
+            if (!from_server && !from_known_peer && peer_link_manager_ != NULL &&
+                payload_len >= 20 && inner_is_udp) {
                 const std::string inferred_peer_virtual_ip = inner_src_virtual_ip;
                 const std::string inferred_local_virtual_ip = inner_dst_virtual_ip;
+                bool should_learn_direct_endpoint = is_direct_probe;
+                if (!should_learn_direct_endpoint &&
+                    inferred_local_virtual_ip == virtual_ip_ &&
+                    !inferred_peer_virtual_ip.empty() &&
+                    inferred_peer_virtual_ip != virtual_ip_) {
+                    const std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
+                    should_learn_direct_endpoint =
+                        IsKnownPeerVirtualIp(peers, inferred_peer_virtual_ip);
+                }
                 uint8_t endpoint_family = packet_tunnel::kPeerEndpointFamilyUnknown;
                 uint16_t endpoint_port = 0;
                 uint8_t endpoint_addr[16] = {};
-                if (!inferred_peer_virtual_ip.empty() &&
+                if (should_learn_direct_endpoint &&
+                    !inferred_peer_virtual_ip.empty() &&
                     inferred_peer_virtual_ip != virtual_ip_ &&
                     inferred_local_virtual_ip == virtual_ip_ &&
                     TryExtractPeerEndpointFromSockaddr(source_addr,
@@ -2438,16 +2476,18 @@ void PacketTunnelClient::SocketReadLoop() {
                                                               NULL)) {
                     peer_virtual_ip = inferred_peer_virtual_ip;
                     from_known_peer = true;
-                    learned_direct_probe = true;
+                    learned_direct_endpoint = true;
+                    learned_direct_reason = is_direct_probe ? "probe" : "payload";
                     const std::string probe_kind =
                         probe_type == kPeerDirectProbeRequest
                             ? "request"
                             : (probe_type == kPeerDirectProbeResponse ? "response" : "unknown");
-                    PacketTunnelDebugLog("learn direct probe endpoint peer=" +
+                    PacketTunnelDebugLog("learn direct endpoint peer=" +
                                          peer_virtual_ip +
+                                         " reason=" + learned_direct_reason +
                                          " probe_type=" + probe_kind +
-                                         " probe_src_virtual_ip=" + inferred_peer_virtual_ip +
-                                         " probe_dst_virtual_ip=" + inferred_local_virtual_ip +
+                                         " src_virtual_ip=" + inferred_peer_virtual_ip +
+                                         " dst_virtual_ip=" + inferred_local_virtual_ip +
                                          " source=" + SockaddrToString(source_addr, source_addr_len) +
                                          (learned_direct_endpoint_changed ? " changed=yes" : " changed=no"));
                 }
@@ -2510,11 +2550,15 @@ void PacketTunnelClient::SocketReadLoop() {
                             }
                         }
                     }
-                    if (learned_direct_probe) {
+                    if (learned_direct_endpoint) {
                         MaybeLogDirectRouteFallback(peer_virtual_ip,
                                                     learned_direct_endpoint_changed
-                                                        ? "probe_endpoint_updated"
-                                                        : "probe_endpoint_confirmed");
+                                                        ? (learned_direct_reason == "probe"
+                                                               ? "probe_endpoint_updated"
+                                                               : "payload_endpoint_updated")
+                                                        : (learned_direct_reason == "probe"
+                                                               ? "probe_endpoint_confirmed"
+                                                               : "payload_endpoint_confirmed"));
                     }
                     continue;
                 }
@@ -2607,6 +2651,7 @@ void PacketTunnelClient::WintunReadLoop() {
         if (is_udp) {
             const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
             dst_virtual_ip = Ipv4ToString(packet.data() + 16);
+            const std::string src_virtual_ip = Ipv4ToString(packet.data() + 12);
             if (ip_header_len >= 20 && packet.size() >= ip_header_len + 4) {
                 src_port = ntohs(*(const uint16_t*)(packet.data() + ip_header_len));
                 dst_port = ntohs(*(const uint16_t*)(packet.data() + ip_header_len + 2));
@@ -2616,14 +2661,14 @@ void PacketTunnelClient::WintunReadLoop() {
                             : ("dst=" + dst_virtual_ip + ":" + std::to_string(dst_port) +
                                " len=" + std::to_string(packet.size()));
             MaybeLogWintunTargetIntent(dst_virtual_ip, dst_port, route_desc);
-            if (dst_port == 5063 && ip_header_len >= 20 && packet.size() >= ip_header_len + 8) {
-                const uint8_t* udp_payload = packet.data() + ip_header_len + 8;
-                const size_t udp_payload_len = packet.size() - ip_header_len - 8;
-                PacketTunnelDebugLog("udp 5063 signature src=" + virtual_ip_ + ":" +
-                                     std::to_string(src_port) + " dst=" + dst_virtual_ip + ":" +
-                                     std::to_string(dst_port) + " payload_len=" +
-                                     std::to_string(udp_payload_len) + " hex=" +
-                                     HexPrefix(udp_payload, udp_payload_len, 16));
+            if (ip_header_len >= 20 && packet.size() >= ip_header_len + 8) {
+                MaybeLogDnfUdpSignature("wintun->tunnel",
+                                        src_virtual_ip,
+                                        src_port,
+                                        dst_virtual_ip,
+                                        dst_port,
+                                        packet.data() + ip_header_len + 8,
+                                        packet.size() - ip_header_len - 8);
             }
         }
         if (is_udp && peer_direct_allowed_) {
@@ -2736,6 +2781,40 @@ void PacketTunnelClient::WintunReadLoop() {
                         probe_it == peer_probe_send_tick_.end() ||
                         now_tick < probe_it->second ||
                         (now_tick - probe_it->second) >= kPeerDirectProbeIntervalMs;
+                    bool sent_shadow_payload = false;
+                    const bool can_shadow_send_payload =
+                        should_send_probe &&
+                        direct_payload_ready &&
+                        !resolved_gateway_target &&
+                        target_peer_virtual_ip == original_dst_virtual_ip &&
+                        (src_port == 5063 || dst_port == 5063);
+                    if (can_shadow_send_payload &&
+                        SendFrameToEndpoint(peer_endpoint,
+                                            packet_tunnel::kFrameIpv4Packet,
+                                            direct_packet_view->data(),
+                                            direct_packet_view->size(),
+                                            NULL)) {
+                        peer_probe_send_tick_[target_peer_virtual_ip] = now_tick;
+                        sent_shadow_payload = true;
+                        PacketTunnelDebugLog("udp direct shadow send " + direct_route_desc +
+                                             " endpoint=" +
+                                             SockaddrToString(peer_endpoint.addr,
+                                                              peer_endpoint.addr_len));
+                    } else if (can_shadow_send_payload) {
+                        PeerRouteStatus failed_status = {};
+                        const bool state_changed =
+                            peer_link_manager_ != NULL &&
+                            peer_link_manager_->RecordDirectSendFailure(target_peer_virtual_ip,
+                                                                        0,
+                                                                        active_direct,
+                                                                        &failed_status);
+                        PacketTunnelDebugLog("udp direct shadow send failed, keep relay primary " +
+                                             direct_route_desc);
+                        if (state_changed && failed_status.state == PeerRouteState::Cooldown) {
+                            PacketTunnelDebugLog("udp direct route entered cooldown peer=" +
+                                                 failed_status.peer_virtual_ip);
+                        }
+                    }
                     if (should_send_probe) {
                         uint32_t target_peer_ip_be = 0;
                         std::vector<uint8_t> probe_packet;
@@ -2751,7 +2830,9 @@ void PacketTunnelClient::WintunReadLoop() {
                                                 probe_packet.size(),
                                                 NULL)) {
                             peer_probe_send_tick_[target_peer_virtual_ip] = now_tick;
-                            PacketTunnelDebugLog("udp direct probe request " + direct_route_desc);
+                            PacketTunnelDebugLog(std::string("udp direct probe request ") +
+                                                 direct_route_desc +
+                                                 (sent_shadow_payload ? " alongside=shadow_payload" : ""));
                         } else {
                             PeerRouteStatus failed_status = {};
                             const bool state_changed =
