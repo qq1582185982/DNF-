@@ -61,6 +61,7 @@ const unsigned long long kSlowWintunWriteWarnMs = 10;
 const unsigned long long kSlowPacketProcessWarnMs = 20;
 const unsigned long long kSlowWintunQueueWarnMs = 10;
 const int kReliableTcpRedundantCopies = 2;
+const size_t kReliableTcpRedundantMaxPayloadBytes = 512;
 const uint16_t kPeerDirectProbeSrcPort = 65401;
 const uint16_t kPeerDirectProbeDstPort = 65402;
 const uint8_t kPeerDirectProbeMagic[4] = {'P', 'T', 'D', 'P'};
@@ -694,7 +695,11 @@ bool ShouldSendReliableTcpRedundancy(uint8_t frame_type,
     const size_t tcp_payload_len = payload_len - ip_header_len - tcp_header_len;
     const uint8_t tcp_flags = payload[ip_header_len + 13];
     const bool control_packet = (tcp_flags & 0x07) != 0;  // FIN/SYN/RST
-    return tcp_payload_len > 0 || control_packet;
+    if (control_packet) {
+        return true;
+    }
+    return tcp_payload_len > 0 &&
+           tcp_payload_len <= kReliableTcpRedundantMaxPayloadBytes;
 }
 
 bool IsTransientSocketSendError(int error_code) {
