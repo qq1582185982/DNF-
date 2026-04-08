@@ -29,6 +29,9 @@ const int kPeerSnapshotLogIntervalMs = 15000;
 const int kPeerRouteDebugLogIntervalMs = 2000;
 const int kPeerDirectProbeIntervalMs = 500;
 const int kSocketReadTimeoutMs = 1000;
+const int kSocketSendTimeoutMs = 50;
+const int kSocketSendRetryCount = 2;
+const int kSocketSendRetryDelayMs = 5;
 const int kTunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
 const int kReliableTcpRedundantCopies = 2;
@@ -178,6 +181,14 @@ bool ShouldSendLinuxReliableTcpRedundancy(uint8_t frame_type,
     const uint8_t tcp_flags = payload[ip_header_len + 13];
     const bool control_packet = (tcp_flags & 0x07) != 0;  // FIN/SYN/RST
     return tcp_payload_len > 0 || control_packet;
+}
+
+bool IsLinuxTransientSendError(int error_code) {
+    return error_code == EAGAIN ||
+           error_code == EWOULDBLOCK ||
+           error_code == ENOBUFS ||
+           error_code == ETIMEDOUT ||
+           error_code == EINTR;
 }
 
 bool IsDirectPathFresh(const LinuxPeerRouteStatus& route, unsigned long long now_tick) {
@@ -929,7 +940,8 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
         setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &kSocketBufferBytes, sizeof(kSocketBufferBytes));
 
         timeval send_timeout = {};
-        send_timeout.tv_sec = 5;
+        send_timeout.tv_sec = kSocketSendTimeoutMs / 1000;
+        send_timeout.tv_usec = (kSocketSendTimeoutMs % 1000) * 1000;
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
 
         timeval recv_timeout = {};
@@ -1572,19 +1584,38 @@ bool LinuxPacketTunnelClient::SendDatagramToEndpoint(const UdpEndpoint& endpoint
         return false;
     }
 
-    ssize_t n = sendto(sock_,
-                       data,
-                       length,
-                       0,
-                       reinterpret_cast<const sockaddr*>(&endpoint.addr),
-                       endpoint.addr_len);
-    if (n != static_cast<ssize_t>(length)) {
-        if (error != NULL) {
-            *error = std::string("packet tunnel send failed: ") + strerror(errno);
+    int last_error = 0;
+    for (int attempt = 0; attempt < kSocketSendRetryCount; ++attempt) {
+        ssize_t n = sendto(sock_,
+                           data,
+                           length,
+                           0,
+                           reinterpret_cast<const sockaddr*>(&endpoint.addr),
+                           endpoint.addr_len);
+        if (n == static_cast<ssize_t>(length)) {
+            MarkNetworkActivity();
+            return true;
         }
-        return false;
+
+        last_error = errno;
+        if (IsLinuxTransientSendError(last_error) && attempt + 1 < kSocketSendRetryCount) {
+            usleep(kSocketSendRetryDelayMs * 1000);
+            continue;
+        }
+        if (!IsLinuxTransientSendError(last_error)) {
+            if (error != NULL) {
+                *error = std::string("packet tunnel send failed: ") + strerror(last_error);
+            }
+            return false;
+        }
+        break;
     }
-    MarkNetworkActivity();
+
+    LogWarn("packet tunnel send dropped after transient stall: error=" +
+            std::string(strerror(last_error)));
+    if (error != NULL) {
+        *error = std::string("packet tunnel send dropped: ") + strerror(last_error);
+    }
     return true;
 }
 

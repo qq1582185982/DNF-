@@ -49,6 +49,9 @@ const DWORD kPeerSnapshotLogIntervalMs = 15000;
 const DWORD kPeerRouteDebugLogIntervalMs = 2000;
 const DWORD kPeerDirectProbeIntervalMs = 500;
 const DWORD kSocketReadTimeoutMs = 1000;
+const DWORD kSocketSendTimeoutMs = 50;
+const int kSocketSendRetryCount = 2;
+const DWORD kSocketSendRetryDelayMs = 5;
 const DWORD kPhysicalDnsQueryTimeoutMs = 1500;
 const DWORD kWintunReadWaitMs = 500;
 const DWORD kGatewayUdpPortOwnerTtlMs = 60000;
@@ -692,6 +695,13 @@ bool ShouldSendReliableTcpRedundancy(uint8_t frame_type,
     const uint8_t tcp_flags = payload[ip_header_len + 13];
     const bool control_packet = (tcp_flags & 0x07) != 0;  // FIN/SYN/RST
     return tcp_payload_len > 0 || control_packet;
+}
+
+bool IsTransientSocketSendError(int error_code) {
+    return error_code == WSAETIMEDOUT ||
+           error_code == WSAEWOULDBLOCK ||
+           error_code == WSAENOBUFS ||
+           error_code == WSAEINTR;
 }
 
 bool IsWatchedBusinessTcpPort(uint16_t port) {
@@ -2144,7 +2154,7 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&kSocketBufferBytes, sizeof(kSocketBufferBytes));
         setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&kSocketBufferBytes, sizeof(kSocketBufferBytes));
 
-        DWORD send_timeout = 5000;
+        DWORD send_timeout = kSocketSendTimeoutMs;
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&send_timeout, sizeof(send_timeout));
         DWORD recv_timeout = kSocketReadTimeoutMs;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&recv_timeout, sizeof(recv_timeout));
@@ -3896,19 +3906,40 @@ bool PacketTunnelClient::SendDatagramToEndpoint(const UdpEndpoint& endpoint,
         return false;
     }
 
-    int n = sendto(sock_,
-                   reinterpret_cast<const char*>(data),
-                   static_cast<int>(length),
-                   0,
-                   reinterpret_cast<const sockaddr*>(&endpoint.addr),
-                   endpoint.addr_len);
-    if (n != (int)length) {
-        if (error_msg != NULL) {
-            *error_msg = BuildSocketError(L"IP Tunnel send failed", WSAGetLastError());
+    int last_error = 0;
+    for (int attempt = 0; attempt < kSocketSendRetryCount; ++attempt) {
+        int n = sendto(sock_,
+                       reinterpret_cast<const char*>(data),
+                       static_cast<int>(length),
+                       0,
+                       reinterpret_cast<const sockaddr*>(&endpoint.addr),
+                       endpoint.addr_len);
+        if (n == (int)length) {
+            MarkNetworkActivity();
+            return true;
         }
-        return false;
+
+        last_error = WSAGetLastError();
+        if (IsTransientSocketSendError(last_error) && attempt + 1 < kSocketSendRetryCount) {
+            Sleep(kSocketSendRetryDelayMs);
+            continue;
+        }
+        if (!IsTransientSocketSendError(last_error)) {
+            if (error_msg != NULL) {
+                *error_msg = BuildSocketError(L"IP Tunnel send failed", last_error);
+            }
+            return false;
+        }
+        break;
     }
-    MarkNetworkActivity();
+
+    PacketTunnelWarnLog("IP Tunnel send dropped after transient stall error=" +
+                        std::to_string(last_error) +
+                        " endpoint=" + SockaddrToString(endpoint.addr, endpoint.addr_len) +
+                        " len=" + std::to_string(length));
+    if (error_msg != NULL) {
+        *error_msg = BuildSocketError(L"IP Tunnel send dropped", last_error);
+    }
     return true;
 }
 
