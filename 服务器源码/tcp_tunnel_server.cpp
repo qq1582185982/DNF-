@@ -191,6 +191,7 @@
 #include <iostream>
 #include <string>
 #include <map>
+#include <set>
 #include <vector>
 #include <thread>
 #include <mutex>
@@ -226,6 +227,7 @@
 using namespace std;
 
 static constexpr size_t DEFAULT_THREAD_STACK_SIZE = 1 * 1024 * 1024;  // 1MB
+static const int kReliableTcpRedundantCopies = 2;
 
 // 前向声明Logger类
 class Logger;
@@ -238,8 +240,8 @@ struct ServerConfig {
     string game_server_ip = "";
     string server_virtual_ip = "";
     vector<string> local_node_ips;
-    map<string, string> local_node_server_keys;
-    map<string, string> remote_node_server_keys;
+    vector<pair<string, string> > local_node_server_keys;
+    vector<pair<string, string> > remote_node_server_keys;
     int max_connections = 100;
     string virtual_subnet = "";
     string virtual_gateway = "";
@@ -1105,6 +1107,56 @@ static bool parse_peer_disable_frame(const uint8_t* payload,
     return true;
 }
 
+static bool try_parse_tcp_packet(const uint8_t* packet,
+                                 size_t packet_len,
+                                 size_t* out_ip_header_len,
+                                 size_t* out_tcp_header_len) {
+    if (packet == nullptr ||
+        packet_len < 20 ||
+        ((packet[0] >> 4) & 0x0F) != 4 ||
+        packet[9] != IPPROTO_TCP) {
+        return false;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len + 20) {
+        return false;
+    }
+
+    const size_t tcp_header_len =
+        static_cast<size_t>((packet[ip_header_len + 12] >> 4) & 0x0F) * 4;
+    if (tcp_header_len < 20 || packet_len < ip_header_len + tcp_header_len) {
+        return false;
+    }
+
+    if (out_ip_header_len != nullptr) {
+        *out_ip_header_len = ip_header_len;
+    }
+    if (out_tcp_header_len != nullptr) {
+        *out_tcp_header_len = tcp_header_len;
+    }
+    return true;
+}
+
+static bool should_send_reliable_tcp_redundancy(uint8_t frame_type,
+                                                const uint8_t* payload,
+                                                size_t payload_len) {
+    if (frame_type != packet_tunnel::kFrameIpv4Packet) {
+        return false;
+    }
+
+    size_t ip_header_len = 0;
+    size_t tcp_header_len = 0;
+    if (!try_parse_tcp_packet(payload, payload_len, &ip_header_len, &tcp_header_len)) {
+        return false;
+    }
+
+    const size_t tcp_payload_len = payload_len - ip_header_len - tcp_header_len;
+    const uint8_t tcp_flags = payload[ip_header_len + 13];
+    const bool control_packet = (tcp_flags & 0x07) != 0;  // FIN/SYN/RST
+    return tcp_payload_len > 0 || control_packet;
+}
+
 static bool encode_peer_offer_payload(uint32_t peer_virtual_ip_be,
                                       uint64_t endpoint_version,
                                       const sockaddr_storage& endpoint_addr,
@@ -1357,7 +1409,8 @@ private:
     map<string, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions_by_endpoint;
     map<string, GatewayUdpPortOwner> gateway_udp_port_owners_;
     map<uint32_t, string> local_node_server_keys_by_ip_be;
-    map<uint32_t, string> remote_node_server_keys_by_ip_be;
+    set<string> local_node_scope_keys_;
+    set<string> remote_node_scope_keys_;
 
     mutex packet_tunnel_mutex;
     int udp_fd;
@@ -1431,7 +1484,12 @@ private:
         if (!session) {
             return true;
         }
-        if (session->is_remote_linux_node) {
+        const string scope_key =
+            build_scoped_virtual_ip_key(session->server_key, session->virtual_ip_be);
+        if (remote_node_scope_keys_.find(scope_key) != remote_node_scope_keys_.end()) {
+            return true;
+        }
+        if (local_node_scope_keys_.find(scope_key) != local_node_scope_keys_.end()) {
             return true;
         }
         if (has_server_virtual_ip_be && session->virtual_ip_be == server_virtual_ip_be) {
@@ -1440,11 +1498,7 @@ private:
         if (has_gateway_ip_be && session->virtual_ip_be == gateway_ip_be) {
             return true;
         }
-
-        map<uint32_t, string>::const_iterator local_it =
-            local_node_server_keys_by_ip_be.find(session->virtual_ip_be);
-        return local_it != local_node_server_keys_by_ip_be.end() &&
-               local_it->second == session->server_key;
+        return false;
     }
 
     void learn_gateway_udp_port_owner(const shared_ptr<PacketTunnelSession>& session,
@@ -1703,9 +1757,9 @@ private:
     }
 
     bool is_remote_linux_node_session(const string& server_key, uint32_t virtual_ip_be) const {
-        map<uint32_t, string>::const_iterator it =
-            remote_node_server_keys_by_ip_be.find(virtual_ip_be);
-        return it != remote_node_server_keys_by_ip_be.end() && it->second == server_key;
+        return remote_node_scope_keys_.find(
+                   build_scoped_virtual_ip_key(server_key, virtual_ip_be)) !=
+               remote_node_scope_keys_.end();
     }
 
     bool session_has_active_lease(const shared_ptr<PacketTunnelSession>& session,
@@ -1833,6 +1887,23 @@ private:
                            session->udp_addr_len);
             if (n != (int)frame.size()) {
                 return false;
+            }
+            if (should_send_reliable_tcp_redundancy(frame_type, payload, payload_len)) {
+                for (int copy = 1; copy < kReliableTcpRedundantCopies; ++copy) {
+                    n = sendto(udp_fd,
+                               (const char*)frame.data(),
+                               frame.size(),
+                               MSG_NOSIGNAL,
+                               (const sockaddr*)&session->udp_addr,
+                               session->udp_addr_len);
+                    if (n != (int)frame.size()) {
+                        Logger::warning("[" + server_name + "|IP Tunnel|" + session->session_uuid +
+                                        "] redundant tcp frame resend failed copy=" +
+                                        to_string(copy + 1) +
+                                        " target=" + describe_scoped_virtual_ip(session));
+                        break;
+                    }
+                }
             }
             touch_packet_tunnel_session(session);
             const uint64_t send_elapsed_ms = monotonic_millis() - send_start_ms;
@@ -2642,8 +2713,9 @@ public:
         has_server_virtual_ip_be = parse_ipv4_be(tun_config.server_virtual_ip, &server_virtual_ip_be);
         has_virtual_subnet_be = parse_cidr_be(tun_config.subnet_cidr, &virtual_network_ip_be, &virtual_subnet_mask_be);
         local_node_server_keys_by_ip_be.clear();
-        remote_node_server_keys_by_ip_be.clear();
-        for (map<string, string>::const_iterator it = config.local_node_server_keys.begin();
+        local_node_scope_keys_.clear();
+        remote_node_scope_keys_.clear();
+        for (vector<pair<string, string> >::const_iterator it = config.local_node_server_keys.begin();
              it != config.local_node_server_keys.end(); ++it) {
             uint32_t local_node_ip_be = 0;
             if (!parse_ipv4_be(it->first, &local_node_ip_be)) {
@@ -2652,8 +2724,9 @@ public:
                 continue;
             }
             local_node_server_keys_by_ip_be[local_node_ip_be] = it->second;
+            local_node_scope_keys_.insert(build_scoped_virtual_ip_key(it->second, local_node_ip_be));
         }
-        for (map<string, string>::const_iterator it = config.remote_node_server_keys.begin();
+        for (vector<pair<string, string> >::const_iterator it = config.remote_node_server_keys.begin();
              it != config.remote_node_server_keys.end(); ++it) {
             uint32_t remote_node_ip_be = 0;
             if (!parse_ipv4_be(it->first, &remote_node_ip_be)) {
@@ -2661,7 +2734,7 @@ public:
                                 it->first);
                 continue;
             }
-            remote_node_server_keys_by_ip_be[remote_node_ip_be] = it->second;
+            remote_node_scope_keys_.insert(build_scoped_virtual_ip_key(it->second, remote_node_ip_be));
         }
 
         string tun_error;
@@ -3692,8 +3765,8 @@ GlobalConfig load_config(const string& filename) {
         default_node.bind_on_gateway = true;
         global_config.nodes.push_back(default_node);
         runtime_server.local_node_ips.push_back(default_node.server_virtual_ip);
-        runtime_server.local_node_server_keys[default_node.server_virtual_ip] =
-            to_string(default_node.id);
+        runtime_server.local_node_server_keys.push_back(
+            make_pair(default_node.server_virtual_ip, to_string(default_node.id)));
         runtime_server.server_virtual_ip = default_node.server_virtual_ip;
         runtime_server.game_server_ip = runtime_server.server_virtual_ip;
         global_config.servers.push_back(runtime_server);
@@ -3800,15 +3873,17 @@ GlobalConfig load_config(const string& filename) {
     for (size_t i = 0; i < global_config.nodes.size(); ++i) {
         if (global_config.nodes[i].bind_on_gateway) {
             runtime_server.local_node_ips.push_back(global_config.nodes[i].server_virtual_ip);
-            runtime_server.local_node_server_keys[global_config.nodes[i].server_virtual_ip] =
-                to_string(global_config.nodes[i].id);
+            runtime_server.local_node_server_keys.push_back(
+                make_pair(global_config.nodes[i].server_virtual_ip,
+                          to_string(global_config.nodes[i].id)));
             if (runtime_server.server_virtual_ip.empty()) {
                 runtime_server.server_virtual_ip = global_config.nodes[i].server_virtual_ip;
             }
             continue;
         }
-        runtime_server.remote_node_server_keys[global_config.nodes[i].server_virtual_ip] =
-            to_string(global_config.nodes[i].id);
+        runtime_server.remote_node_server_keys.push_back(
+            make_pair(global_config.nodes[i].server_virtual_ip,
+                      to_string(global_config.nodes[i].id)));
     }
 
     if (!runtime_server.server_virtual_ip.empty()) {

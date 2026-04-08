@@ -57,6 +57,7 @@ const unsigned long long kSlowSocketSendWarnMs = 10;
 const unsigned long long kSlowWintunWriteWarnMs = 10;
 const unsigned long long kSlowPacketProcessWarnMs = 20;
 const unsigned long long kSlowWintunQueueWarnMs = 10;
+const int kReliableTcpRedundantCopies = 2;
 const uint16_t kPeerDirectProbeSrcPort = 65401;
 const uint16_t kPeerDirectProbeDstPort = 65402;
 const uint8_t kPeerDirectProbeMagic[4] = {'P', 'T', 'D', 'P'};
@@ -667,6 +668,30 @@ bool TryParseTcpPacket(const uint8_t* packet,
         *out_dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
     }
     return true;
+}
+
+bool ShouldSendReliableTcpRedundancy(uint8_t frame_type,
+                                     const uint8_t* payload,
+                                     size_t payload_len) {
+    if (frame_type != packet_tunnel::kFrameIpv4Packet) {
+        return false;
+    }
+
+    size_t ip_header_len = 0;
+    size_t tcp_header_len = 0;
+    if (!TryParseTcpPacket(payload,
+                           payload_len,
+                           &ip_header_len,
+                           &tcp_header_len,
+                           NULL,
+                           NULL)) {
+        return false;
+    }
+
+    const size_t tcp_payload_len = payload_len - ip_header_len - tcp_header_len;
+    const uint8_t tcp_flags = payload[ip_header_len + 13];
+    const bool control_packet = (tcp_flags & 0x07) != 0;  // FIN/SYN/RST
+    return tcp_payload_len > 0 || control_packet;
 }
 
 bool IsWatchedBusinessTcpPort(uint16_t port) {
@@ -3925,7 +3950,25 @@ int PacketTunnelClient::RecvDatagramFrom(uint8_t* data,
 }
 
 bool PacketTunnelClient::SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg) {
-    return SendFrameToEndpoint(server_endpoint_, frame_type, data, length, error_msg);
+    const bool sent = SendFrameToEndpoint(server_endpoint_, frame_type, data, length, error_msg);
+    if (!sent) {
+        return false;
+    }
+
+    if (!ShouldSendReliableTcpRedundancy(frame_type, data, length)) {
+        return true;
+    }
+
+    for (int copy = 1; copy < kReliableTcpRedundantCopies; ++copy) {
+        std::wstring redundant_error;
+        if (!SendFrameToEndpoint(server_endpoint_, frame_type, data, length, &redundant_error)) {
+            PacketTunnelWarnLog("redundant tcp frame resend failed copy=" +
+                                std::to_string(copy + 1) +
+                                " error=" + WideToUtf8(redundant_error));
+            break;
+        }
+    }
+    return true;
 }
 
 bool PacketTunnelClient::SendDatagram(const uint8_t* data, size_t length, std::wstring* error_msg) {
