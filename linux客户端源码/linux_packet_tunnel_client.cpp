@@ -1752,10 +1752,17 @@ void LinuxPacketTunnelClient::TunReadLoop() {
             !IsLinuxNoisyUdpPacket(packet.data(), packet.size()) &&
             TryDescribeLinuxUdpPacket(packet.data(), packet.size(), &desc);
         const bool is_udp = packet.size() >= 20 && packet[9] == IPPROTO_UDP;
-        if (is_udp) {
-            const std::string dst_virtual_ip = LinuxIpv4ToString(packet.data() + 16);
-            const std::string route_desc =
-                has_desc ? desc : ("dst=" + dst_virtual_ip + " len=" + std::to_string(packet.size()));
+        const bool is_tcp = packet.size() >= 20 && packet[9] == IPPROTO_TCP;
+        const std::string inner_proto_name = is_udp ? "udp" : (is_tcp ? "tcp" : "ip");
+        const std::string dst_virtual_ip =
+            packet.size() >= 20 ? LinuxIpv4ToString(packet.data() + 16) : "";
+        const std::string route_desc =
+            (has_desc && is_udp)
+                ? desc
+                : ("dst=" + dst_virtual_ip +
+                   " proto=" + inner_proto_name +
+                   " len=" + std::to_string(packet.size()));
+        if (!dst_virtual_ip.empty()) {
             UdpEndpoint peer_endpoint;
             bool direct_path_fresh = false;
             bool active_direct = false;
@@ -1769,7 +1776,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                             packet.data(),
                                             packet.size(),
                                             NULL)) {
-                        LogInfo("udp tun->peer " + route_desc);
+                        LogInfo(inner_proto_name + " tun->peer " + route_desc);
                         continue;
                     }
                     LinuxPeerRouteStatus failed_status = {};
@@ -1779,7 +1786,8 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                                                     0,
                                                                     true,
                                                                     &failed_status);
-                    LogWarn("udp active direct send failed, fallback to relay " + route_desc);
+                    LogWarn(inner_proto_name + " active direct send failed, fallback to relay " +
+                            route_desc);
                     if (state_changed && failed_status.state == LinuxPeerRouteState::Cooldown) {
                         LogInfo("udp direct route entered cooldown peer=" +
                                 failed_status.peer_virtual_ip);
@@ -1807,7 +1815,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                                 probe_packet.size(),
                                                 NULL)) {
                             peer_probe_send_tick_[dst_virtual_ip] = tick;
-                            LogInfo("udp direct probe request " + route_desc);
+                            LogInfo(inner_proto_name + " direct probe request " + route_desc);
                         } else {
                             LinuxPeerRouteStatus failed_status = {};
                             const bool state_changed =
@@ -1817,9 +1825,13 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                                                             active_direct,
                                                                             &failed_status);
                             if (active_direct) {
-                                LogWarn("udp active direct probe failed, fallback to relay " + route_desc);
+                                LogWarn(inner_proto_name +
+                                        " active direct probe failed, fallback to relay " +
+                                        route_desc);
                             } else {
-                                LogInfo("udp direct probe send failed, keep relay primary " + route_desc);
+                                LogInfo(inner_proto_name +
+                                        " direct probe send failed, keep relay primary " +
+                                        route_desc);
                             }
                             if (state_changed && failed_status.state == LinuxPeerRouteState::Cooldown) {
                                 LogInfo("udp direct route entered cooldown peer=" +
@@ -1962,7 +1974,63 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                         BuildLinuxPeerRouteSnapshotSummary(peers, current_ms));
                 last_peer_snapshot_log_ms = current_ms;
             }
+            const uint32_t local_virtual_ip_be = ParseVirtualIp(NULL);
             for (size_t i = 0; i < peers.size(); ++i) {
+                if (peers[i].direct_ready &&
+                    peers[i].endpoint_version != 0 &&
+                    local_virtual_ip_be != 0) {
+                    UdpEndpoint peer_endpoint;
+                    bool direct_path_fresh = false;
+                    bool active_direct = false;
+                    if (TryBuildPeerEndpoint(peers[i].peer_virtual_ip,
+                                             &peer_endpoint,
+                                             &direct_path_fresh,
+                                             &active_direct)) {
+                        std::map<std::string, unsigned long long>::iterator probe_it =
+                            peer_probe_send_tick_.find(peers[i].peer_virtual_ip);
+                        const bool should_send_probe =
+                            probe_it == peer_probe_send_tick_.end() ||
+                            current_ms < probe_it->second ||
+                            (current_ms - probe_it->second) >=
+                                static_cast<unsigned long long>(kPeerDirectProbeIntervalMs);
+                        if (should_send_probe && (!direct_path_fresh || !active_direct)) {
+                            uint32_t target_peer_ip_be = 0;
+                            std::vector<uint8_t> probe_packet;
+                            if (ParseLinuxIpv4StringToBe(peers[i].peer_virtual_ip, &target_peer_ip_be) &&
+                                BuildLinuxPeerDirectProbePacket(local_virtual_ip_be,
+                                                                target_peer_ip_be,
+                                                                kPeerDirectProbeRequest,
+                                                                &probe_packet) &&
+                                SendFrameToEndpoint(peer_endpoint,
+                                                    packet_tunnel::kFrameIpv4Packet,
+                                                    probe_packet.data(),
+                                                    probe_packet.size(),
+                                                    NULL)) {
+                                peer_probe_send_tick_[peers[i].peer_virtual_ip] = current_ms;
+                                LogInfo("peer control eager direct probe: peer=" +
+                                        peers[i].peer_virtual_ip +
+                                        " state=" + LinuxPeerRouteStateName(peers[i].state) +
+                                        " active=" + (active_direct ? std::string("yes")
+                                                                    : std::string("no")));
+                            } else {
+                                LinuxPeerRouteStatus failed_status = {};
+                                const bool state_changed =
+                                    peer_link_manager_->RecordDirectSendFailure(
+                                        peers[i].peer_virtual_ip,
+                                        peers[i].endpoint_version,
+                                        active_direct,
+                                        &failed_status);
+                                LogInfo("peer control eager direct probe failed: peer=" +
+                                        peers[i].peer_virtual_ip);
+                                if (state_changed &&
+                                    failed_status.state == LinuxPeerRouteState::Cooldown) {
+                                    LogInfo("udp direct route entered cooldown peer=" +
+                                            failed_status.peer_virtual_ip);
+                                }
+                            }
+                        }
+                    }
+                }
                 if (!peers[i].direct_ready || peers[i].endpoint_version == 0) {
                     continue;
                 }

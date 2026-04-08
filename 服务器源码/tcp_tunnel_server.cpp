@@ -1526,6 +1526,24 @@ private:
         return false;
     }
 
+    bool is_peer_direct_excluded_session(const shared_ptr<PacketTunnelSession>& session) const {
+        if (!session) {
+            return true;
+        }
+        const string scope_key =
+            build_scoped_virtual_ip_key(session->server_key, session->virtual_ip_be);
+        if (local_node_scope_keys_.find(scope_key) != local_node_scope_keys_.end()) {
+            return true;
+        }
+        if (has_server_virtual_ip_be && session->virtual_ip_be == server_virtual_ip_be) {
+            return true;
+        }
+        if (has_gateway_ip_be && session->virtual_ip_be == gateway_ip_be) {
+            return true;
+        }
+        return false;
+    }
+
     void learn_gateway_udp_port_owner(const shared_ptr<PacketTunnelSession>& session,
                                       uint16_t src_port) {
         if (!session || src_port == 0 || is_known_game_udp_port(src_port) ||
@@ -2146,8 +2164,8 @@ private:
         if (!session || !session->active || !session->use_udp) {
             return;
         }
-        if (is_local_or_server_side_session(session)) {
-            Logger::debug("[" + server_name + "|IP Tunnel] skip peer offers for local/server-side session " +
+        if (is_peer_direct_excluded_session(session)) {
+            Logger::debug("[" + server_name + "|IP Tunnel] skip peer offers for peer-direct excluded session " +
                           describe_scoped_virtual_ip(session));
             return;
         }
@@ -2196,7 +2214,7 @@ private:
                 const shared_ptr<PacketTunnelSession>& peer = it->second;
                 if (!peer || peer == session || !peer->active || !peer->use_udp ||
                     peer->server_key != session->server_key ||
-                    is_local_or_server_side_session(peer)) {
+                    is_peer_direct_excluded_session(peer)) {
                     continue;
                 }
                 peers.push_back(peer);
@@ -2319,10 +2337,10 @@ private:
         if (!sender_session || !sender_session->active || !sender_session->use_udp) {
             return false;
         }
-        if (is_local_or_server_side_session(sender_session)) {
+        if (is_peer_direct_excluded_session(sender_session)) {
             Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] suppress " +
                           packet_tunnel_frame_name(frame_type) +
-                          " from local/server-side session " +
+                          " from peer-direct excluded session " +
                           describe_scoped_virtual_ip(sender_session));
             return true;
         }
@@ -2343,10 +2361,10 @@ private:
         if (!target_session || !target_session->active || !target_session->use_udp) {
             return false;
         }
-        if (is_local_or_server_side_session(target_session)) {
+        if (is_peer_direct_excluded_session(target_session)) {
             Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] suppress " +
                           packet_tunnel_frame_name(frame_type) +
-                          " to local/server-side target " +
+                          " to peer-direct excluded target " +
                           describe_scoped_virtual_ip(target_session));
             return true;
         }
@@ -2430,9 +2448,9 @@ private:
         if (!sender_session || !sender_session->active || !sender_session->use_udp) {
             return false;
         }
-        if (is_local_or_server_side_session(sender_session)) {
+        if (is_peer_direct_excluded_session(sender_session)) {
             Logger::debug("[IP Tunnel|" + sender_session->session_uuid +
-                          "] suppress peer_disable from local/server-side session " +
+                          "] suppress peer_disable from peer-direct excluded session " +
                           describe_scoped_virtual_ip(sender_session));
             return true;
         }
@@ -2453,9 +2471,9 @@ private:
         if (!target_session || !target_session->active || !target_session->use_udp) {
             return false;
         }
-        if (is_local_or_server_side_session(target_session)) {
+        if (is_peer_direct_excluded_session(target_session)) {
             Logger::debug("[IP Tunnel|" + sender_session->session_uuid +
-                          "] suppress peer_disable to local/server-side target " +
+                          "] suppress peer_disable to peer-direct excluded target " +
                           describe_scoped_virtual_ip(target_session));
             return true;
         }
@@ -3093,7 +3111,7 @@ private:
                     session->is_remote_linux_node =
                         is_remote_linux_node_session(resolved_server_key, virtual_ip_be);
                     session->allow_peer_direct =
-                        !is_local_or_server_side_session(session) &&
+                        !is_peer_direct_excluded_session(session) &&
                         (flags & packet_tunnel::kHandshakeFlagRelayOnly) == 0;
                     touch_packet_tunnel_session(session);
 
@@ -3580,7 +3598,7 @@ private:
             session->is_remote_linux_node =
                 is_remote_linux_node_session(resolved_server_key, virtual_ip_be);
             session->allow_peer_direct =
-                !is_local_or_server_side_session(session) &&
+                !is_peer_direct_excluded_session(session) &&
                 (flags & packet_tunnel::kHandshakeFlagRelayOnly) == 0;
             touch_packet_tunnel_session(session);
 
