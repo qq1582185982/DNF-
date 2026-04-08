@@ -36,6 +36,7 @@ const int kTunReadWaitMs = 500;
 const int kSocketBufferBytes = 4 * 1024 * 1024;
 const int kReliableTcpRedundantCopies = 2;
 const size_t kReliableTcpRedundantMaxPayloadBytes = 512;
+const int kReliableTcpRedundantInterCopyDelayMs = 2;
 const uint16_t kPeerDirectProbeSrcPort = 65401;
 const uint16_t kPeerDirectProbeDstPort = 65402;
 const uint8_t kPeerDirectProbeMagic[4] = {'P', 'T', 'D', 'P'};
@@ -181,7 +182,14 @@ bool ShouldSendLinuxReliableTcpRedundancy(uint8_t frame_type,
     const size_t tcp_payload_len = payload_len - ip_header_len - tcp_header_len;
     const uint8_t tcp_flags = payload[ip_header_len + 13];
     const bool control_packet = (tcp_flags & 0x07) != 0;  // FIN/SYN/RST
+    const bool ack_only_packet =
+        tcp_payload_len == 0 &&
+        (tcp_flags & 0x10) != 0 &&
+        !control_packet;
     if (control_packet) {
+        return true;
+    }
+    if (ack_only_packet) {
         return true;
     }
     return tcp_payload_len > 0 &&
@@ -1887,6 +1895,9 @@ bool LinuxPacketTunnelClient::SendFrame(uint8_t frame_type,
     }
 
     for (int copy = 1; copy < kReliableTcpRedundantCopies; ++copy) {
+        if (kReliableTcpRedundantInterCopyDelayMs > 0) {
+            usleep(kReliableTcpRedundantInterCopyDelayMs * 1000);
+        }
         std::string redundant_error;
         if (!SendFrameToEndpoint(server_endpoint_, frame_type, data, length, &redundant_error)) {
             LogWarn("redundant tcp frame resend failed copy=" +
