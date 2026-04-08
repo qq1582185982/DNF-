@@ -227,7 +227,6 @@
 using namespace std;
 
 static constexpr size_t DEFAULT_THREAD_STACK_SIZE = 1 * 1024 * 1024;  // 1MB
-static const int kReliableTcpRedundantCopies = 2;
 
 // 前向声明Logger类
 class Logger;
@@ -1107,56 +1106,6 @@ static bool parse_peer_disable_frame(const uint8_t* payload,
     return true;
 }
 
-static bool try_parse_tcp_packet(const uint8_t* packet,
-                                 size_t packet_len,
-                                 size_t* out_ip_header_len,
-                                 size_t* out_tcp_header_len) {
-    if (packet == nullptr ||
-        packet_len < 20 ||
-        ((packet[0] >> 4) & 0x0F) != 4 ||
-        packet[9] != IPPROTO_TCP) {
-        return false;
-    }
-
-    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
-    if (ip_header_len < 20 || packet_len < ip_header_len + 20) {
-        return false;
-    }
-
-    const size_t tcp_header_len =
-        static_cast<size_t>((packet[ip_header_len + 12] >> 4) & 0x0F) * 4;
-    if (tcp_header_len < 20 || packet_len < ip_header_len + tcp_header_len) {
-        return false;
-    }
-
-    if (out_ip_header_len != nullptr) {
-        *out_ip_header_len = ip_header_len;
-    }
-    if (out_tcp_header_len != nullptr) {
-        *out_tcp_header_len = tcp_header_len;
-    }
-    return true;
-}
-
-static bool should_send_reliable_tcp_redundancy(uint8_t frame_type,
-                                                const uint8_t* payload,
-                                                size_t payload_len) {
-    if (frame_type != packet_tunnel::kFrameIpv4Packet) {
-        return false;
-    }
-
-    size_t ip_header_len = 0;
-    size_t tcp_header_len = 0;
-    if (!try_parse_tcp_packet(payload, payload_len, &ip_header_len, &tcp_header_len)) {
-        return false;
-    }
-
-    const size_t tcp_payload_len = payload_len - ip_header_len - tcp_header_len;
-    const uint8_t tcp_flags = payload[ip_header_len + 13];
-    const bool control_packet = (tcp_flags & 0x07) != 0;  // FIN/SYN/RST
-    return tcp_payload_len > 0 || control_packet;
-}
-
 static bool encode_peer_offer_payload(uint32_t peer_virtual_ip_be,
                                       uint64_t endpoint_version,
                                       const sockaddr_storage& endpoint_addr,
@@ -1887,23 +1836,6 @@ private:
                            session->udp_addr_len);
             if (n != (int)frame.size()) {
                 return false;
-            }
-            if (should_send_reliable_tcp_redundancy(frame_type, payload, payload_len)) {
-                for (int copy = 1; copy < kReliableTcpRedundantCopies; ++copy) {
-                    n = sendto(udp_fd,
-                               (const char*)frame.data(),
-                               frame.size(),
-                               MSG_NOSIGNAL,
-                               (const sockaddr*)&session->udp_addr,
-                               session->udp_addr_len);
-                    if (n != (int)frame.size()) {
-                        Logger::warning("[" + server_name + "|IP Tunnel|" + session->session_uuid +
-                                        "] redundant tcp frame resend failed copy=" +
-                                        to_string(copy + 1) +
-                                        " target=" + describe_scoped_virtual_ip(session));
-                        break;
-                    }
-                }
             }
             touch_packet_tunnel_session(session);
             const uint64_t send_elapsed_ms = monotonic_millis() - send_start_ms;

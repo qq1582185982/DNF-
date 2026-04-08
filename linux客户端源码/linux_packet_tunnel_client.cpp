@@ -31,6 +31,7 @@ const int kPeerDirectProbeIntervalMs = 500;
 const int kSocketReadTimeoutMs = 1000;
 const int kTunReadWaitMs = 500;
 const int kSocketBufferBytes = 256 * 1024;
+const int kReliableTcpRedundantCopies = 2;
 const uint16_t kPeerDirectProbeSrcPort = 65401;
 const uint16_t kPeerDirectProbeDstPort = 65402;
 const uint8_t kPeerDirectProbeMagic[4] = {'P', 'T', 'D', 'P'};
@@ -124,6 +125,59 @@ bool ParseLinuxPeerDirectProbePacket(const uint8_t* packet,
         *out_probe_type = payload[5];
     }
     return true;
+}
+
+bool TryParseLinuxTcpPacket(const uint8_t* packet,
+                            size_t packet_len,
+                            size_t* out_ip_header_len,
+                            size_t* out_tcp_header_len) {
+    if (packet == NULL ||
+        packet_len < 20 ||
+        ((packet[0] >> 4) & 0x0F) != 4 ||
+        packet[9] != IPPROTO_TCP) {
+        return false;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len + 20) {
+        return false;
+    }
+
+    const size_t tcp_header_len =
+        static_cast<size_t>((packet[ip_header_len + 12] >> 4) & 0x0F) * 4;
+    if (tcp_header_len < 20 || packet_len < ip_header_len + tcp_header_len) {
+        return false;
+    }
+
+    if (out_ip_header_len != NULL) {
+        *out_ip_header_len = ip_header_len;
+    }
+    if (out_tcp_header_len != NULL) {
+        *out_tcp_header_len = tcp_header_len;
+    }
+    return true;
+}
+
+bool ShouldSendLinuxReliableTcpRedundancy(uint8_t frame_type,
+                                          const uint8_t* payload,
+                                          size_t payload_len) {
+    if (frame_type != packet_tunnel::kFrameIpv4Packet) {
+        return false;
+    }
+
+    size_t ip_header_len = 0;
+    size_t tcp_header_len = 0;
+    if (!TryParseLinuxTcpPacket(payload,
+                                payload_len,
+                                &ip_header_len,
+                                &tcp_header_len)) {
+        return false;
+    }
+
+    const size_t tcp_payload_len = payload_len - ip_header_len - tcp_header_len;
+    const uint8_t tcp_flags = payload[ip_header_len + 13];
+    const bool control_packet = (tcp_flags & 0x07) != 0;  // FIN/SYN/RST
+    return tcp_payload_len > 0 || control_packet;
 }
 
 bool IsDirectPathFresh(const LinuxPeerRouteStatus& route, unsigned long long now_tick) {
@@ -1787,7 +1841,25 @@ bool LinuxPacketTunnelClient::SendFrame(uint8_t frame_type,
                                         const uint8_t* data,
                                         size_t length,
                                         std::string* error) {
-    return SendFrameToEndpoint(server_endpoint_, frame_type, data, length, error);
+    const bool sent = SendFrameToEndpoint(server_endpoint_, frame_type, data, length, error);
+    if (!sent) {
+        return false;
+    }
+
+    if (!ShouldSendLinuxReliableTcpRedundancy(frame_type, data, length)) {
+        return true;
+    }
+
+    for (int copy = 1; copy < kReliableTcpRedundantCopies; ++copy) {
+        std::string redundant_error;
+        if (!SendFrameToEndpoint(server_endpoint_, frame_type, data, length, &redundant_error)) {
+            LogWarn("redundant tcp frame resend failed copy=" +
+                    std::to_string(copy + 1) +
+                    " error=" + redundant_error);
+            break;
+        }
+    }
+    return true;
 }
 
 bool LinuxPacketTunnelClient::SendDatagram(const uint8_t* data, size_t length, std::string* error) {
