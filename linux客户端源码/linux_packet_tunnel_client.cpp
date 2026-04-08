@@ -35,6 +35,9 @@ const int kSocketSendRetryCount = 2;
 const int kSocketSendRetryDelayMs = 5;
 const int kTunReadWaitMs = 500;
 const int kSocketBufferBytes = 4 * 1024 * 1024;
+const unsigned long long kWatchedTcpFlowIdleCleanupMs = 180000;
+const unsigned long long kWatchedTcpClosedRetentionMs = 10000;
+const unsigned long long kWatchedTcpServerWaitLogMs = 200;
 const size_t kPacketTunnelBatchMaxDatagramBytes = 1200;
 const size_t kPacketTunnelBatchMaxFrames = 8;
 const size_t kPacketTunnelBatchMaxTcpPayloadBytes = 320;
@@ -270,6 +273,34 @@ struct ParsedLinuxPeerDisable {
     uint8_t reason;
 };
 
+struct LinuxWatchedTcpPacketInfo {
+    std::string flow_key;
+    std::string client_ip;
+    uint16_t client_port;
+    std::string server_ip;
+    uint16_t server_port;
+    bool from_client;
+    bool syn;
+    bool ack;
+    bool fin;
+    bool rst;
+    bool has_payload;
+    size_t payload_len;
+    uint8_t flags;
+
+    LinuxWatchedTcpPacketInfo()
+        : client_port(0),
+          server_port(0),
+          from_client(false),
+          syn(false),
+          ack(false),
+          fin(false),
+          rst(false),
+          has_payload(false),
+          payload_len(0),
+          flags(0) {}
+};
+
 std::string LinuxFrameName(uint8_t frame_type) {
     switch (frame_type) {
     case packet_tunnel::kFrameHeartbeat:
@@ -466,6 +497,106 @@ bool IsFocusedLinuxGameUdpPacket(const uint8_t* packet, size_t packet_len) {
     const uint16_t src_port = ntohs(*(const uint16_t*)(packet + ip_header_len));
     const uint16_t dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
     return IsFocusedLinuxGameUdpPort(src_port) || IsFocusedLinuxGameUdpPort(dst_port);
+}
+
+bool IsWatchedLinuxServiceTcpPort(uint16_t port) {
+    return port == 7001 || port == 10011 || port == 3306;
+}
+
+bool TryParseLinuxWatchedTcpPacket(const uint8_t* packet,
+                                   size_t packet_len,
+                                   const std::string& local_virtual_ip,
+                                   LinuxWatchedTcpPacketInfo* out_info) {
+    if (packet == NULL || out_info == NULL || packet_len < 20) {
+        return false;
+    }
+    if (((packet[0] >> 4) & 0x0F) != 4 || packet[9] != IPPROTO_TCP) {
+        return false;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len + 20) {
+        return false;
+    }
+
+    const uint16_t total_len = ntohs(*(const uint16_t*)(packet + 2));
+    if (total_len < ip_header_len + 20 || packet_len < total_len) {
+        return false;
+    }
+
+    const size_t tcp_header_offset = ip_header_len;
+    const size_t tcp_header_len =
+        static_cast<size_t>((packet[tcp_header_offset + 12] >> 4) & 0x0F) * 4;
+    if (tcp_header_len < 20 || total_len < tcp_header_offset + tcp_header_len) {
+        return false;
+    }
+
+    const uint16_t src_port = ntohs(*(const uint16_t*)(packet + tcp_header_offset));
+    const uint16_t dst_port = ntohs(*(const uint16_t*)(packet + tcp_header_offset + 2));
+    const std::string src_ip = LinuxIpv4ToString(packet + 12);
+    const std::string dst_ip = LinuxIpv4ToString(packet + 16);
+
+    LinuxWatchedTcpPacketInfo info;
+    if (dst_ip == local_virtual_ip && IsWatchedLinuxServiceTcpPort(dst_port)) {
+        info.client_ip = src_ip;
+        info.client_port = src_port;
+        info.server_ip = dst_ip;
+        info.server_port = dst_port;
+        info.from_client = true;
+    } else if (src_ip == local_virtual_ip && IsWatchedLinuxServiceTcpPort(src_port)) {
+        info.client_ip = dst_ip;
+        info.client_port = dst_port;
+        info.server_ip = src_ip;
+        info.server_port = src_port;
+        info.from_client = false;
+    } else {
+        return false;
+    }
+
+    info.flags = packet[tcp_header_offset + 13];
+    info.syn = (info.flags & 0x02) != 0;
+    info.ack = (info.flags & 0x10) != 0;
+    info.fin = (info.flags & 0x01) != 0;
+    info.rst = (info.flags & 0x04) != 0;
+    info.payload_len = total_len - tcp_header_offset - tcp_header_len;
+    info.has_payload = info.payload_len > 0;
+
+    std::ostringstream flow_key;
+    flow_key << info.client_ip << ":" << info.client_port
+             << "->" << info.server_ip << ":" << info.server_port;
+    info.flow_key = flow_key.str();
+    *out_info = info;
+    return true;
+}
+
+std::string LinuxFormatElapsedMs(unsigned long long start_ms, unsigned long long end_ms) {
+    if (start_ms == 0 || end_ms < start_ms) {
+        return "-";
+    }
+    return std::to_string(end_ms - start_ms);
+}
+
+std::string LinuxDescribeTcpTraceFlags(uint8_t flags) {
+    std::string desc;
+    if ((flags & 0x02) != 0) {
+        desc += "SYN|";
+    }
+    if ((flags & 0x10) != 0) {
+        desc += "ACK|";
+    }
+    if ((flags & 0x01) != 0) {
+        desc += "FIN|";
+    }
+    if ((flags & 0x04) != 0) {
+        desc += "RST|";
+    }
+    if ((flags & 0x08) != 0) {
+        desc += "PSH|";
+    }
+    if (!desc.empty()) {
+        desc.erase(desc.size() - 1);
+    }
+    return desc.empty() ? "NONE" : desc;
 }
 
 bool ParseLinuxIpv4StringToBe(const std::string& value, uint32_t* out_ip_be) {
@@ -874,6 +1005,138 @@ LinuxPacketTunnelClient::~LinuxPacketTunnelClient() {
 
 void LinuxPacketTunnelClient::MarkNetworkActivity() {
     last_network_activity_ms_ = now_ms();
+}
+
+void LinuxPacketTunnelClient::PruneWatchedTcpFlows(unsigned long long now_tick) {
+    for (std::map<std::string, WatchedTcpFlowTrace>::iterator it = watched_tcp_flows_.begin();
+         it != watched_tcp_flows_.end();) {
+        const WatchedTcpFlowTrace& trace = it->second;
+        const bool closed_expired =
+            trace.close_logged &&
+            now_tick >= trace.closed_ms &&
+            (now_tick - trace.closed_ms) > kWatchedTcpClosedRetentionMs;
+        const bool idle_expired =
+            trace.last_seen_ms != 0 &&
+            now_tick >= trace.last_seen_ms &&
+            (now_tick - trace.last_seen_ms) > kWatchedTcpFlowIdleCleanupMs;
+        if (closed_expired || idle_expired) {
+            it = watched_tcp_flows_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
+                                                    size_t packet_len,
+                                                    const char* path) {
+    LinuxWatchedTcpPacketInfo info = {};
+    if (!TryParseLinuxWatchedTcpPacket(packet, packet_len, virtual_ip_, &info)) {
+        return;
+    }
+
+    const unsigned long long tick = now_ms();
+    std::lock_guard<std::mutex> lock(watched_tcp_mutex_);
+    PruneWatchedTcpFlows(tick);
+
+    WatchedTcpFlowTrace& trace = watched_tcp_flows_[info.flow_key];
+    if (trace.created_ms == 0 || (trace.close_logged && info.from_client && info.syn && !info.ack)) {
+        trace = WatchedTcpFlowTrace();
+        trace.client_ip = info.client_ip;
+        trace.client_port = info.client_port;
+        trace.server_ip = info.server_ip;
+        trace.server_port = info.server_port;
+        trace.created_ms = tick;
+    }
+    trace.last_seen_ms = tick;
+
+    const std::string origin = (path != NULL) ? path : "?";
+    std::ostringstream flow_ss;
+    flow_ss << trace.client_ip << ":" << trace.client_port
+            << " -> " << trace.server_ip << ":" << trace.server_port;
+    const std::string flow = flow_ss.str();
+
+    if (info.from_client && info.syn && !info.ack && trace.syn_ms == 0) {
+        trace.syn_ms = tick;
+        LogInfo("tcp service trace syn flow=" + flow +
+                " origin=" + origin +
+                " port=" + std::to_string(trace.server_port));
+    }
+
+    if (!info.from_client && info.syn && info.ack && trace.synack_ms == 0) {
+        trace.synack_ms = tick;
+        LogInfo("tcp service trace synack flow=" + flow +
+                " origin=" + origin +
+                " since_syn=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms");
+    }
+
+    if (info.from_client &&
+        info.ack &&
+        !info.syn &&
+        !info.fin &&
+        !info.rst &&
+        !info.has_payload &&
+        trace.synack_ms != 0 &&
+        trace.established_ms == 0) {
+        trace.established_ms = tick;
+        LogInfo("tcp service trace established flow=" + flow +
+                " origin=" + origin +
+                " since_syn=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms" +
+                " since_synack=" + LinuxFormatElapsedMs(trace.synack_ms, tick) + "ms");
+    }
+
+    if (info.has_payload) {
+        if (info.from_client) {
+            ++trace.client_payload_count;
+            trace.last_client_payload_ms = tick;
+            trace.pending_request_ms = tick;
+            if (trace.first_client_payload_ms == 0) {
+                trace.first_client_payload_ms = tick;
+                LogInfo("tcp service trace first_client_payload flow=" + flow +
+                        " origin=" + origin +
+                        " bytes=" + std::to_string(info.payload_len) +
+                        " since_syn=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms" +
+                        " since_established=" +
+                        LinuxFormatElapsedMs(trace.established_ms, tick) + "ms");
+            }
+        } else {
+            ++trace.server_payload_count;
+            if (trace.first_server_payload_ms == 0) {
+                trace.first_server_payload_ms = tick;
+                LogInfo("tcp service trace first_server_payload flow=" + flow +
+                        " origin=" + origin +
+                        " bytes=" + std::to_string(info.payload_len) +
+                        " since_syn=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms" +
+                        " since_client_payload=" +
+                        LinuxFormatElapsedMs(trace.first_client_payload_ms, tick) + "ms");
+            } else if (trace.pending_request_ms != 0 &&
+                       tick >= trace.pending_request_ms &&
+                       (tick - trace.pending_request_ms) >= kWatchedTcpServerWaitLogMs) {
+                LogInfo("tcp service trace server_reply_wait flow=" + flow +
+                        " origin=" + origin +
+                        " wait=" + std::to_string(tick - trace.pending_request_ms) + "ms" +
+                        " bytes=" + std::to_string(info.payload_len));
+            }
+            trace.last_server_payload_ms = tick;
+            trace.pending_request_ms = 0;
+        }
+    }
+
+    if ((info.fin || info.rst) && !trace.close_logged) {
+        trace.close_logged = true;
+        trace.closed_ms = tick;
+        std::ostringstream close_ss;
+        close_ss << "tcp service trace close flow=" << flow
+                 << " origin=" << origin
+                 << " flags=" << LinuxDescribeTcpTraceFlags(info.flags)
+                 << " lifetime=" << LinuxFormatElapsedMs(trace.created_ms, tick) << "ms"
+                 << " client_payloads=" << trace.client_payload_count
+                 << " server_payloads=" << trace.server_payload_count;
+        if (trace.pending_request_ms != 0 && tick >= trace.pending_request_ms) {
+            close_ss << " pending_wait=" << (tick - trace.pending_request_ms) << "ms";
+        }
+        LogInfo(close_ss.str());
+    }
 }
 
 bool LinuxPacketTunnelClient::Start(std::string* error) {
@@ -1358,6 +1621,9 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
                 LogInfo(std::string(from_known_peer ? "udp peer->tun " : "udp tunnel->tun ") +
                         udp_desc);
             }
+            TraceWatchedTcpPacket(payload,
+                                  payload_len,
+                                  from_known_peer ? "peer->tun" : "tunnel->tun");
             continue;
         }
         }
@@ -1777,6 +2043,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                             packet.size(),
                                             NULL)) {
                         LogInfo(inner_proto_name + " tun->peer " + route_desc);
+                        TraceWatchedTcpPacket(packet.data(), packet.size(), "tun->peer");
                         continue;
                     }
                     LinuxPeerRouteStatus failed_status = {};
@@ -1904,6 +2171,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
             break;
         }
 
+        TraceWatchedTcpPacket(packet.data(), packet.size(), "tun->tunnel");
         if (has_desc) {
             LogInfo("udp tun->tunnel " + desc);
         }

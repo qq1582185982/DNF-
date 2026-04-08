@@ -1,5 +1,6 @@
 #include "linux_client_common.h"
 
+#include <chrono>
 #include <arpa/inet.h>
 #include <iomanip>
 #include <iostream>
@@ -58,13 +59,21 @@ std::string ExtractRawJsonValue(const std::string& json, const std::string& key)
 }  // namespace
 
 std::string NowString() {
-    time_t now = time(NULL);
+    const std::chrono::system_clock::time_point now = std::chrono::system_clock::now();
+    const std::chrono::milliseconds epoch_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch());
+    const int millis = static_cast<int>(epoch_ms.count() % 1000);
+
+    const time_t wall_time = std::chrono::system_clock::to_time_t(now);
     struct tm tm_value;
-    localtime_r(&now, &tm_value);
+    localtime_r(&wall_time, &tm_value);
 
     char buffer[32] = {};
     strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &tm_value);
-    return std::string(buffer);
+
+    std::ostringstream stream;
+    stream << buffer << "." << std::setw(3) << std::setfill('0') << millis;
+    return stream.str();
 }
 
 void LogInfo(const std::string& message) {

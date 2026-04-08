@@ -38,6 +38,45 @@ private:
         }
     };
 
+    struct WatchedTcpFlowTrace {
+        std::string client_ip;
+        uint16_t client_port;
+        std::string server_ip;
+        uint16_t server_port;
+        unsigned long long created_ms;
+        unsigned long long last_seen_ms;
+        unsigned long long syn_ms;
+        unsigned long long synack_ms;
+        unsigned long long established_ms;
+        unsigned long long first_client_payload_ms;
+        unsigned long long first_server_payload_ms;
+        unsigned long long last_client_payload_ms;
+        unsigned long long last_server_payload_ms;
+        unsigned long long pending_request_ms;
+        unsigned int client_payload_count;
+        unsigned int server_payload_count;
+        bool close_logged;
+        unsigned long long closed_ms;
+
+        WatchedTcpFlowTrace()
+            : client_port(0),
+              server_port(0),
+              created_ms(0),
+              last_seen_ms(0),
+              syn_ms(0),
+              synack_ms(0),
+              established_ms(0),
+              first_client_payload_ms(0),
+              first_server_payload_ms(0),
+              last_client_payload_ms(0),
+              last_server_payload_ms(0),
+              pending_request_ms(0),
+              client_payload_count(0),
+              server_payload_count(0),
+              close_logged(false),
+              closed_ms(0) {}
+    };
+
     bool ConnectSocket(std::string* error);
     bool SendHandshake(std::string* error);
     bool ReceiveHandshakeAck(std::string* error);
@@ -82,6 +121,8 @@ private:
     uint32_t ParseVirtualIp(std::string* error) const;
     void MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip, const std::string& reason);
     void MarkNetworkActivity();
+    void TraceWatchedTcpPacket(const uint8_t* packet, size_t packet_len, const char* path);
+    void PruneWatchedTcpFlows(unsigned long long now_tick);
 
     std::string tunnel_host_;
     uint16_t tunnel_port_;
@@ -101,8 +142,10 @@ private:
     std::thread tun_thread_;
     std::thread heartbeat_thread_;
     std::mutex send_mutex_;
+    std::mutex watched_tcp_mutex_;
     LinuxPeerLinkManager* peer_link_manager_;
     std::atomic<uint32_t> peer_signal_nonce_;
     std::map<std::string, unsigned long long> peer_route_debug_log_tick_;
     std::map<std::string, unsigned long long> peer_probe_send_tick_;
+    std::map<std::string, WatchedTcpFlowTrace> watched_tcp_flows_;
 };
