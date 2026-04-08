@@ -233,7 +233,7 @@ private:
 
 ofstream Logger::log_file;
 bool Logger::file_enabled = false;
-string Logger::current_log_level = "INFO";
+string Logger::current_log_level = "DEBUG";
 mutex Logger::log_mutex;
 DWORD Logger::last_flush_tick = 0;
 
@@ -261,7 +261,7 @@ static string normalize_log_level(string level) {
     if (level == "DEBUG" || level == "INFO" || level == "WARN" || level == "ERROR") {
         return level;
     }
-    return "INFO";
+    return "DEBUG";
 }
 
 static string determine_initial_log_level() {
@@ -270,7 +270,7 @@ static string determine_initial_log_level() {
                                            value,
                                            static_cast<DWORD>(sizeof(value)));
     if (length == 0 || length >= sizeof(value)) {
-        return "INFO";
+        return "DEBUG";
     }
     return normalize_log_level(string(value, length));
 }

@@ -1685,9 +1685,6 @@ private:
     const uint64_t kSlowPacketTunnelFrameSendWarnMs = 10;
     const uint64_t kSlowPacketTunnelTunProcessWarnMs = 20;
     const uint64_t kSlowPacketTunnelUdpProcessWarnMs = 20;
-    static constexpr int kReliableTcpRedundantCopies = 2;
-    static constexpr size_t kReliableTcpRedundantMaxPayloadBytes = 512;
-    static constexpr int kReliableTcpRedundantInterCopyDelayMs = 2;
 
     const char* peer_endpoint_state_name(PeerEndpointState state) {
         switch (state) {
@@ -1810,73 +1807,6 @@ private:
         }
     }
 
-    static bool try_parse_ipv4_tcp_packet(const uint8_t* packet,
-                                          size_t packet_len,
-                                          size_t* out_ip_header_len = nullptr,
-                                          size_t* out_tcp_header_len = nullptr) {
-        if (packet == nullptr || packet_len < 40) {
-            return false;
-        }
-
-        const uint8_t version = (packet[0] >> 4) & 0x0F;
-        if (version != 4) {
-            return false;
-        }
-
-        const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
-        if (ip_header_len < 20 || packet_len < ip_header_len + 20) {
-            return false;
-        }
-
-        if (packet[9] != IPPROTO_TCP) {
-            return false;
-        }
-
-        const size_t tcp_header_len =
-            static_cast<size_t>((packet[ip_header_len + 12] >> 4) & 0x0F) * 4;
-        if (tcp_header_len < 20 || packet_len < ip_header_len + tcp_header_len) {
-            return false;
-        }
-
-        if (out_ip_header_len != nullptr) {
-            *out_ip_header_len = ip_header_len;
-        }
-        if (out_tcp_header_len != nullptr) {
-            *out_tcp_header_len = tcp_header_len;
-        }
-        return true;
-    }
-
-    static bool should_send_reliable_tcp_redundancy(uint8_t frame_type,
-                                                    const uint8_t* payload,
-                                                    size_t payload_len) {
-        if (frame_type != packet_tunnel::kFrameIpv4Packet) {
-            return false;
-        }
-
-        size_t ip_header_len = 0;
-        size_t tcp_header_len = 0;
-        if (!try_parse_ipv4_tcp_packet(payload,
-                                       payload_len,
-                                       &ip_header_len,
-                                       &tcp_header_len)) {
-            return false;
-        }
-
-        const size_t tcp_payload_len = payload_len - ip_header_len - tcp_header_len;
-        const uint8_t tcp_flags = payload[ip_header_len + 13];
-        const bool control_packet = (tcp_flags & 0x07) != 0;  // FIN/SYN/RST
-        const bool ack_only_packet =
-            tcp_payload_len == 0 &&
-            (tcp_flags & 0x10) != 0 &&
-            !control_packet;
-        if (control_packet || ack_only_packet) {
-            return true;
-        }
-        return tcp_payload_len > 0 &&
-               tcp_payload_len <= kReliableTcpRedundantMaxPayloadBytes;
-    }
-
     bool send_packet_tunnel_frame(const shared_ptr<PacketTunnelSession>& session,
                                   uint8_t frame_type,
                                   const uint8_t* payload,
@@ -1898,36 +1828,14 @@ private:
             if (udp_fd < 0 || session->udp_addr_len == 0) {
                 return false;
             }
-            const bool redundant_tcp_frame =
-                should_send_reliable_tcp_redundancy(frame_type, payload, payload_len);
-            for (int copy = 0; copy < kReliableTcpRedundantCopies; ++copy) {
-                if (copy > 0) {
-                    if (!redundant_tcp_frame) {
-                        break;
-                    }
-                    if (kReliableTcpRedundantInterCopyDelayMs > 0) {
-                        usleep(kReliableTcpRedundantInterCopyDelayMs * 1000);
-                    }
-                }
-
-                int n = sendto(udp_fd,
-                               (const char*)frame.data(),
-                               frame.size(),
-                               MSG_NOSIGNAL,
-                               (const sockaddr*)&session->udp_addr,
-                               session->udp_addr_len);
-                if (n != (int)frame.size()) {
-                    if (copy == 0) {
-                        return false;
-                    }
-                    Logger::warning("[" + server_name + "|IP Tunnel|" + session->session_uuid +
-                                    "] redundant frame resend failed copy=" +
-                                    to_string(copy + 1) +
-                                    " frame=" + packet_tunnel_frame_name(frame_type) +
-                                    " payload_len=" + to_string(payload_len) +
-                                    " target=" + describe_scoped_virtual_ip(session));
-                    break;
-                }
+            int n = sendto(udp_fd,
+                           (const char*)frame.data(),
+                           frame.size(),
+                           MSG_NOSIGNAL,
+                           (const sockaddr*)&session->udp_addr,
+                           session->udp_addr_len);
+            if (n != (int)frame.size()) {
+                return false;
             }
             touch_packet_tunnel_session(session);
             const uint64_t send_elapsed_ms = monotonic_millis() - send_start_ms;
