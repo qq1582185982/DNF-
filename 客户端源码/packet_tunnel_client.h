@@ -22,6 +22,7 @@ public:
                        uint16_t tunnel_port,
                        const std::string& session_uuid,
                        const std::string& client_id,
+                       const std::string& server_virtual_ip,
                        const std::string& virtual_ip,
                        uint16_t mtu,
                        WintunManager* wintun_manager);
@@ -78,6 +79,7 @@ private:
                                 std::string* peer_virtual_ip) const;
     bool IsServerEndpoint(const sockaddr_storage& source_addr,
                           int source_addr_len) const;
+    bool IsServerVirtualPeer(const std::string& peer_virtual_ip) const;
     void LearnPeerUdpPortOwner(const std::string& peer_virtual_ip, uint16_t src_port);
     bool SendFrameToEndpoint(const UdpEndpoint& endpoint,
                              uint8_t frame_type,
@@ -115,6 +117,7 @@ private:
     uint16_t tunnel_port_;
     std::string session_uuid_;
     std::string client_id_;
+    std::string server_virtual_ip_;
     std::string virtual_ip_;
     uint16_t mtu_;
     WintunManager* wintun_manager_;

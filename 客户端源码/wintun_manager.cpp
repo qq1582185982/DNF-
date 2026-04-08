@@ -13,11 +13,16 @@
 #include <sstream>
 #include <vector>
 
+void PacketTunnelWarnLog(const std::string& msg);
+
 namespace {
 
 const WCHAR kAdapterName[] = L"DNFProxyWintun";
 const WCHAR kTunnelType[] = L"DNFProxy";
-const DWORD kRingCapacity = 0x400000;
+const DWORD kRingCapacity = 0x1000000;
+const DWORD kWriteRetryDelayMs = 1;
+const int kWriteRetryCount = 16;
+const DWORD kSlowWintunWriteWarnMs = 10;
 const WCHAR kTempSubdir[] = L"DNFProxy\\Wintun";
 
 std::wstring GetWintunTempDir() {
@@ -549,16 +554,46 @@ bool WintunManager::WritePacket(const uint8_t* packet, size_t length, std::wstri
         return false;
     }
 
-    BYTE* outgoing = allocate_send_packet_(session_, (DWORD)length);
+    BYTE* outgoing = NULL;
+    DWORD last_error = ERROR_SUCCESS;
+    const DWORD write_start = GetTickCount();
+    int retry_count = 0;
+    for (int attempt = 0; attempt < kWriteRetryCount; ++attempt) {
+        outgoing = allocate_send_packet_(session_, (DWORD)length);
+        if (outgoing != NULL) {
+            break;
+        }
+
+        last_error = GetLastError();
+        if (last_error != ERROR_BUFFER_OVERFLOW) {
+            break;
+        }
+
+        retry_count = attempt + 1;
+        if (attempt + 1 < kWriteRetryCount) {
+            Sleep(kWriteRetryDelayMs);
+        }
+    }
     if (outgoing == NULL) {
         if (error_msg != NULL) {
-            *error_msg = BuildWindowsErrorMessage(L"Wintun allocate send packet failed", GetLastError());
+            if (last_error == ERROR_BUFFER_OVERFLOW) {
+                *error_msg = L"Wintun send ring remained full after retries";
+            } else {
+                *error_msg = BuildWindowsErrorMessage(L"Wintun allocate send packet failed", last_error);
+            }
         }
         return false;
     }
 
     memcpy(outgoing, packet, length);
     send_packet_(session_, outgoing);
+    const DWORD write_elapsed = GetTickCount() - write_start;
+    if (retry_count > 0 || write_elapsed >= kSlowWintunWriteWarnMs) {
+        PacketTunnelWarnLog("wintun write delayed elapsed_ms=" +
+                            std::to_string(write_elapsed) +
+                            " retries=" + std::to_string(retry_count) +
+                            " len=" + std::to_string(length));
+    }
     return true;
 }
 

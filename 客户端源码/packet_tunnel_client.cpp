@@ -21,6 +21,7 @@
 #pragma comment(lib, "dnsapi.lib")
 
 void PacketTunnelDebugLog(const std::string& msg);
+void PacketTunnelWarnLog(const std::string& msg);
 void PacketTunnelInfoLog(const std::string& msg);
 
 namespace {
@@ -44,6 +45,9 @@ const DWORD kPhysicalDnsQueryTimeoutMs = 1500;
 const DWORD kWintunReadWaitMs = 500;
 const DWORD kGatewayUdpPortOwnerTtlMs = 60000;
 const int kSocketBufferBytes = 256 * 1024;
+const unsigned long long kSlowSocketSendWarnMs = 10;
+const unsigned long long kSlowWintunWriteWarnMs = 10;
+const unsigned long long kSlowPacketProcessWarnMs = 20;
 const uint16_t kPeerDirectProbeSrcPort = 65401;
 const uint16_t kPeerDirectProbeDstPort = 65402;
 const uint8_t kPeerDirectProbeMagic[4] = {'P', 'T', 'D', 'P'};
@@ -1905,6 +1909,7 @@ PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
                                        uint16_t tunnel_port,
                                        const std::string& session_uuid,
                                        const std::string& client_id,
+                                       const std::string& server_virtual_ip,
                                        const std::string& virtual_ip,
                                        uint16_t mtu,
                                        WintunManager* wintun_manager)
@@ -1912,6 +1917,7 @@ PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
       tunnel_port_(tunnel_port),
       session_uuid_(session_uuid),
       client_id_(client_id),
+      server_virtual_ip_(server_virtual_ip),
       virtual_ip_(virtual_ip),
       mtu_(mtu),
       wintun_manager_(wintun_manager),
@@ -1934,6 +1940,11 @@ PacketTunnelClient::~PacketTunnelClient() {
     DeleteCriticalSection(&send_lock_);
 }
 
+bool PacketTunnelClient::IsServerVirtualPeer(const std::string& peer_virtual_ip) const {
+    return !server_virtual_ip_.empty() &&
+           peer_virtual_ip == server_virtual_ip_;
+}
+
 bool PacketTunnelClient::Start(std::wstring* error_msg) {
     Stop();
     stop_requested_ = false;
@@ -1942,7 +1953,8 @@ bool PacketTunnelClient::Start(std::wstring* error_msg) {
     }
     PacketTunnelDebugLog("packet tunnel start: server=" + tunnel_server_ip_ +
                          ":" + std::to_string(tunnel_port_) +
-                         " virtual_ip=" + virtual_ip_);
+                         " virtual_ip=" + virtual_ip_ +
+                         " server_virtual_ip=" + server_virtual_ip_);
 
     if (!ConnectSocket(error_msg)) {
         if (error_msg != NULL) {
@@ -2364,7 +2376,9 @@ void PacketTunnelClient::SocketReadLoop() {
         bool learned_direct_endpoint_changed = false;
         std::string learned_direct_reason;
         auto has_fresh_direct_route = [this](const std::string& candidate_peer_virtual_ip) -> bool {
-            if (candidate_peer_virtual_ip.empty() || peer_link_manager_ == NULL) {
+            if (candidate_peer_virtual_ip.empty() ||
+                IsServerVirtualPeer(candidate_peer_virtual_ip) ||
+                peer_link_manager_ == NULL) {
                 return false;
             }
 
@@ -2396,6 +2410,7 @@ void PacketTunnelClient::SocketReadLoop() {
         }
 
         if (frame_type == packet_tunnel::kFrameIpv4Packet && wintun_manager_ != NULL) {
+            const unsigned long long frame_process_start = GetTickCount64();
             const uint8_t* payload = buffer.data() + packet_tunnel::kFrameHeaderSize;
             const bool has_inner_ipv4 =
                 payload_len >= 20 &&
@@ -2452,7 +2467,8 @@ void PacketTunnelClient::SocketReadLoop() {
                 if (!should_learn_direct_endpoint &&
                     inferred_local_virtual_ip == virtual_ip_ &&
                     !inferred_peer_virtual_ip.empty() &&
-                    inferred_peer_virtual_ip != virtual_ip_) {
+                    inferred_peer_virtual_ip != virtual_ip_ &&
+                    !IsServerVirtualPeer(inferred_peer_virtual_ip)) {
                     const std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
                     should_learn_direct_endpoint =
                         IsKnownPeerVirtualIp(peers, inferred_peer_virtual_ip);
@@ -2463,6 +2479,7 @@ void PacketTunnelClient::SocketReadLoop() {
                 if (should_learn_direct_endpoint &&
                     !inferred_peer_virtual_ip.empty() &&
                     inferred_peer_virtual_ip != virtual_ip_ &&
+                    !IsServerVirtualPeer(inferred_peer_virtual_ip) &&
                     inferred_local_virtual_ip == virtual_ip_ &&
                     TryExtractPeerEndpointFromSockaddr(source_addr,
                                                       &endpoint_family,
@@ -2511,7 +2528,8 @@ void PacketTunnelClient::SocketReadLoop() {
                 inner_is_udp &&
                 inner_dst_virtual_ip == virtual_ip_) {
                 const std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
-                if (IsKnownPeerVirtualIp(peers, inner_src_virtual_ip)) {
+                if (!IsServerVirtualPeer(inner_src_virtual_ip) &&
+                    IsKnownPeerVirtualIp(peers, inner_src_virtual_ip)) {
                     relay_peer_virtual_ip = inner_src_virtual_ip;
                 }
             }
@@ -2586,7 +2604,31 @@ void PacketTunnelClient::SocketReadLoop() {
             MaybeLogUdpPayloadIpHints(from_known_peer ? "peer->wintun" : "tunnel->wintun",
                                       payload,
                                       payload_len);
-            wintun_manager_->WritePacket(payload, payload_len, NULL);
+            std::wstring wintun_write_error;
+            const unsigned long long wintun_write_start = GetTickCount64();
+            const bool wintun_write_ok =
+                wintun_manager_->WritePacket(payload, payload_len, &wintun_write_error);
+            const unsigned long long wintun_write_elapsed =
+                GetTickCount64() - wintun_write_start;
+            if (!wintun_write_ok || wintun_write_elapsed >= kSlowWintunWriteWarnMs) {
+                PacketTunnelWarnLog(std::string("slow/failed tunnel->wintun write elapsed_ms=") +
+                                    std::to_string(wintun_write_elapsed) +
+                                    " dir=" + (from_known_peer ? "peer->wintun" : "tunnel->wintun") +
+                                    " src=" + inner_src_virtual_ip + ":" + std::to_string(inner_src_port) +
+                                    " dst=" + inner_dst_virtual_ip + ":" + std::to_string(inner_dst_port) +
+                                    " len=" + std::to_string(payload_len) +
+                                    (wintun_write_ok ? "" : (" error=" + WideToUtf8(wintun_write_error))));
+            }
+            const unsigned long long frame_process_elapsed =
+                GetTickCount64() - frame_process_start;
+            if (frame_process_elapsed >= kSlowPacketProcessWarnMs) {
+                PacketTunnelWarnLog(std::string("slow socket-read processing elapsed_ms=") +
+                                    std::to_string(frame_process_elapsed) +
+                                    " dir=" + (from_known_peer ? "peer->wintun" : "tunnel->wintun") +
+                                    " src=" + inner_src_virtual_ip + ":" + std::to_string(inner_src_port) +
+                                    " dst=" + inner_dst_virtual_ip + ":" + std::to_string(inner_dst_port) +
+                                    " len=" + std::to_string(payload_len));
+            }
             continue;
         }
 
@@ -2618,6 +2660,8 @@ void PacketTunnelClient::WintunReadLoop() {
         if (packet.empty()) {
             continue;
         }
+
+        const unsigned long long frame_process_start = GetTickCount64();
 
         uint8_t version = (packet[0] >> 4) & 0x0F;
         if (version != 4) {
@@ -2754,6 +2798,15 @@ void PacketTunnelClient::WintunReadLoop() {
                                                 direct_packet_view->data(),
                                                 direct_packet_view->size(),
                                                 NULL)) {
+                            const unsigned long long frame_process_elapsed =
+                                GetTickCount64() - frame_process_start;
+                            if (frame_process_elapsed >= kSlowPacketProcessWarnMs) {
+                                PacketTunnelWarnLog(std::string("slow wintun direct-send processing elapsed_ms=") +
+                                                    std::to_string(frame_process_elapsed) +
+                                                    " dst=" + target_peer_virtual_ip + ":" +
+                                                    std::to_string(dst_port) +
+                                                    " len=" + std::to_string(direct_packet_view->size()));
+                            }
                             PacketTunnelDebugLog("udp wintun->peer " + direct_route_desc);
                             continue;
                         }
@@ -2866,6 +2919,13 @@ void PacketTunnelClient::WintunReadLoop() {
         if (!SendFrame(packet_tunnel::kFrameIpv4Packet, packet.data(), packet.size(), NULL)) {
             PacketTunnelDebugLog("wintun read loop send failed");
             break;
+        }
+        const unsigned long long frame_process_elapsed = GetTickCount64() - frame_process_start;
+        if (frame_process_elapsed >= kSlowPacketProcessWarnMs) {
+            PacketTunnelWarnLog(std::string("slow wintun relay-send processing elapsed_ms=") +
+                                std::to_string(frame_process_elapsed) +
+                                " dst=" + dst_virtual_ip + ":" + std::to_string(dst_port) +
+                                " len=" + std::to_string(packet.size()));
         }
 
         if (has_desc) {
@@ -3198,6 +3258,12 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             }
             return true;
         }
+        if (IsServerVirtualPeer(offer.peer_virtual_ip)) {
+            PacketTunnelDebugLog("peer control ignore server_virtual_ip peer_offer: peer=" +
+                                 offer.peer_virtual_ip +
+                                 " endpoint=" + offer.endpoint);
+            return true;
+        }
 
         bool should_send_hello = true;
         if (peer_link_manager_ != NULL) {
@@ -3258,6 +3324,14 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             }
             return true;
         }
+        if (IsServerVirtualPeer(signal.peer_virtual_ip)) {
+            PacketTunnelDebugLog("peer control ignore server_virtual_ip " +
+                                 PacketTunnelFrameName(frame_type) +
+                                 ": peer=" + signal.peer_virtual_ip +
+                                 " version=" + std::to_string(signal.endpoint_version) +
+                                 " nonce=" + std::to_string(signal.nonce));
+            return true;
+        }
 
         if (peer_link_manager_ != NULL) {
             if (frame_type == packet_tunnel::kFramePeerHello) {
@@ -3312,6 +3386,13 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                                  " reason=" + std::to_string(disable.reason));
             return true;
         }
+        if (IsServerVirtualPeer(disable.peer_virtual_ip)) {
+            PacketTunnelDebugLog("peer control ignore server_virtual_ip peer_disable: peer=" +
+                                 disable.peer_virtual_ip +
+                                 " version=" + std::to_string(disable.endpoint_version) +
+                                 " reason=" + std::to_string(disable.reason));
+            return true;
+        }
         if (peer_link_manager_ != NULL) {
             peer_link_manager_->MarkPeerCooldown(disable.peer_virtual_ip,
                                                  disable.endpoint_version);
@@ -3329,6 +3410,9 @@ bool PacketTunnelClient::SendPeerSignalFrame(uint8_t frame_type,
                                              const std::string& target_peer_virtual_ip,
                                              uint64_t endpoint_version,
                                              uint32_t nonce) {
+    if (IsServerVirtualPeer(target_peer_virtual_ip)) {
+        return false;
+    }
     uint32_t peer_virtual_ip_be = 0;
     if (!ParseIpv4StringToBe(target_peer_virtual_ip, &peer_virtual_ip_be)) {
         return false;
@@ -3344,6 +3428,9 @@ bool PacketTunnelClient::SendPeerSignalFrame(uint8_t frame_type,
 bool PacketTunnelClient::SendPeerDisableFrame(const std::string& target_peer_virtual_ip,
                                               uint64_t endpoint_version,
                                               uint8_t reason) {
+    if (IsServerVirtualPeer(target_peer_virtual_ip)) {
+        return false;
+    }
     uint32_t peer_virtual_ip_be = 0;
     if (!ParseIpv4StringToBe(target_peer_virtual_ip, &peer_virtual_ip_be)) {
         return false;
@@ -3360,7 +3447,8 @@ bool PacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtual_ip
                                               UdpEndpoint* endpoint,
                                               bool* direct_path_fresh,
                                               bool* active_direct) const {
-    if (endpoint == NULL || peer_link_manager_ == NULL) {
+    if (endpoint == NULL || peer_link_manager_ == NULL ||
+        IsServerVirtualPeer(peer_virtual_ip)) {
         return false;
     }
 
@@ -3441,6 +3529,9 @@ bool PacketTunnelClient::TryResolvePeerBySource(const sockaddr_storage& source_a
                                                   &route)) {
         return false;
     }
+    if (IsServerVirtualPeer(route.peer_virtual_ip)) {
+        return false;
+    }
 
     if (peer_virtual_ip != NULL) {
         *peer_virtual_ip = route.peer_virtual_ip;
@@ -3463,6 +3554,7 @@ void PacketTunnelClient::LearnPeerUdpPortOwner(const std::string& peer_virtual_i
                                                uint16_t src_port) {
     if (peer_virtual_ip.empty() ||
         peer_virtual_ip == virtual_ip_ ||
+        IsServerVirtualPeer(peer_virtual_ip) ||
         src_port == 0 ||
         IsKnownGameUdpPort(src_port) ||
         IsReservedPeerDirectPort(src_port)) {
@@ -3511,6 +3603,7 @@ bool PacketTunnelClient::TryResolveGatewayUdpPeerTarget(const std::string& dst_v
     auto can_route_peer = [this](const PeerRouteStatus& peer) -> bool {
         return !peer.peer_virtual_ip.empty() &&
                peer.peer_virtual_ip != virtual_ip_ &&
+               !IsServerVirtualPeer(peer.peer_virtual_ip) &&
                peer.state != PeerRouteState::Cooldown &&
                peer.direct_ready &&
                peer.endpoint_family != packet_tunnel::kPeerEndpointFamilyUnknown &&
@@ -3585,6 +3678,7 @@ bool PacketTunnelClient::SendFrameToEndpoint(const UdpEndpoint& endpoint,
                                              const uint8_t* data,
                                              size_t length,
                                              std::wstring* error_msg) {
+    const unsigned long long send_start = GetTickCount64();
     std::vector<uint8_t> frame(packet_tunnel::kFrameHeaderSize + length, 0);
     frame[0] = frame_type;
     *(uint16_t*)(&frame[1]) = htons((uint16_t)length);
@@ -3595,6 +3689,15 @@ bool PacketTunnelClient::SendFrameToEndpoint(const UdpEndpoint& endpoint,
     EnterCriticalSection(&send_lock_);
     bool ok = SendDatagramToEndpoint(endpoint, frame.data(), frame.size(), error_msg);
     LeaveCriticalSection(&send_lock_);
+    const unsigned long long send_elapsed = GetTickCount64() - send_start;
+    if (send_elapsed >= kSlowSocketSendWarnMs) {
+        PacketTunnelWarnLog("slow frame send elapsed_ms=" +
+                            std::to_string(send_elapsed) +
+                            " frame=" + PacketTunnelFrameName(frame_type) +
+                            " endpoint=" + SockaddrToString(endpoint.addr, endpoint.addr_len) +
+                            " payload_len=" + std::to_string(length) +
+                            " ok=" + (ok ? std::string("yes") : std::string("no")));
+    }
     return ok;
 }
 

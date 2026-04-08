@@ -1679,6 +1679,9 @@ private:
     const uint64_t kPeerOfferTimeoutMs = 9000;
     const uint64_t kPeerActiveTimeoutMs = 15000;
     const uint64_t kPacketTunnelUdpIdleTimeoutMs = 30000;
+    const uint64_t kSlowPacketTunnelFrameSendWarnMs = 10;
+    const uint64_t kSlowPacketTunnelTunProcessWarnMs = 20;
+    const uint64_t kSlowPacketTunnelUdpProcessWarnMs = 20;
 
     const char* peer_endpoint_state_name(PeerEndpointState state) {
         switch (state) {
@@ -1808,6 +1811,7 @@ private:
         if (!session || !session->active) {
             return false;
         }
+        const uint64_t send_start_ms = monotonic_millis();
 
         vector<uint8_t> frame(packet_tunnel::kFrameHeaderSize + payload_len, 0);
         frame[0] = frame_type;
@@ -1831,6 +1835,14 @@ private:
                 return false;
             }
             touch_packet_tunnel_session(session);
+            const uint64_t send_elapsed_ms = monotonic_millis() - send_start_ms;
+            if (send_elapsed_ms >= kSlowPacketTunnelFrameSendWarnMs) {
+                Logger::warning("[" + server_name + "|IP Tunnel|" + session->session_uuid +
+                                "] slow frame send elapsed_ms=" + to_string(send_elapsed_ms) +
+                                " frame=" + packet_tunnel_frame_name(frame_type) +
+                                " mode=udp payload_len=" + to_string(payload_len) +
+                                " target=" + describe_scoped_virtual_ip(session));
+            }
             return true;
         }
 
@@ -1846,6 +1858,14 @@ private:
             sent += (size_t)n;
         }
         touch_packet_tunnel_session(session);
+        const uint64_t send_elapsed_ms = monotonic_millis() - send_start_ms;
+        if (send_elapsed_ms >= kSlowPacketTunnelFrameSendWarnMs) {
+            Logger::warning("[" + server_name + "|IP Tunnel|" + session->session_uuid +
+                            "] slow frame send elapsed_ms=" + to_string(send_elapsed_ms) +
+                            " frame=" + packet_tunnel_frame_name(frame_type) +
+                            " mode=tcp payload_len=" + to_string(payload_len) +
+                            " target=" + describe_scoped_virtual_ip(session));
+        }
         return true;
     }
 
@@ -2015,6 +2035,11 @@ private:
         if (!session || !session->active || !session->use_udp) {
             return;
         }
+        if (is_local_or_server_side_session(session)) {
+            Logger::debug("[" + server_name + "|IP Tunnel] skip peer offers for local/server-side session " +
+                          describe_scoped_virtual_ip(session));
+            return;
+        }
 
         vector<PacketTunnelSessionRemoval> expired_sessions =
             cleanup_idle_packet_tunnel_sessions(monotonic_millis());
@@ -2059,7 +2084,8 @@ private:
                  it != packet_tunnel_sessions.end(); ++it) {
                 const shared_ptr<PacketTunnelSession>& peer = it->second;
                 if (!peer || peer == session || !peer->active || !peer->use_udp ||
-                    peer->server_key != session->server_key) {
+                    peer->server_key != session->server_key ||
+                    is_local_or_server_side_session(peer)) {
                     continue;
                 }
                 peers.push_back(peer);
@@ -2182,6 +2208,13 @@ private:
         if (!sender_session || !sender_session->active || !sender_session->use_udp) {
             return false;
         }
+        if (is_local_or_server_side_session(sender_session)) {
+            Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] suppress " +
+                          packet_tunnel_frame_name(frame_type) +
+                          " from local/server-side session " +
+                          describe_scoped_virtual_ip(sender_session));
+            return true;
+        }
 
         log_expired_peer_coord_states(&peer_coord_, server_name);
 
@@ -2198,6 +2231,13 @@ private:
 
         if (!target_session || !target_session->active || !target_session->use_udp) {
             return false;
+        }
+        if (is_local_or_server_side_session(target_session)) {
+            Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] suppress " +
+                          packet_tunnel_frame_name(frame_type) +
+                          " to local/server-side target " +
+                          describe_scoped_virtual_ip(target_session));
+            return true;
         }
 
         const string sender_virtual_ip = ipv4_be_to_string(sender_session->virtual_ip_be);
@@ -2279,6 +2319,12 @@ private:
         if (!sender_session || !sender_session->active || !sender_session->use_udp) {
             return false;
         }
+        if (is_local_or_server_side_session(sender_session)) {
+            Logger::debug("[IP Tunnel|" + sender_session->session_uuid +
+                          "] suppress peer_disable from local/server-side session " +
+                          describe_scoped_virtual_ip(sender_session));
+            return true;
+        }
 
         log_expired_peer_coord_states(&peer_coord_, server_name);
 
@@ -2295,6 +2341,12 @@ private:
 
         if (!target_session || !target_session->active || !target_session->use_udp) {
             return false;
+        }
+        if (is_local_or_server_side_session(target_session)) {
+            Logger::debug("[IP Tunnel|" + sender_session->session_uuid +
+                          "] suppress peer_disable to local/server-side target " +
+                          describe_scoped_virtual_ip(target_session));
+            return true;
         }
 
         const string sender_virtual_ip = ipv4_be_to_string(sender_session->virtual_ip_be);
@@ -2343,6 +2395,7 @@ private:
 
     void packet_tunnel_tun_loop() {
         while (running && tun_manager.IsActive()) {
+            const uint64_t loop_start_ms = monotonic_millis();
             vector<uint8_t> packet;
             string error;
             if (!tun_manager.ReadPacket(&packet, &error)) {
@@ -2439,6 +2492,16 @@ private:
                 session->active = false;
                 if (!session->use_udp && session->client_fd >= 0) {
                     shutdown(session->client_fd, SHUT_RDWR);
+                }
+            } else {
+                const uint64_t process_elapsed_ms = monotonic_millis() - loop_start_ms;
+                if (process_elapsed_ms >= kSlowPacketTunnelTunProcessWarnMs) {
+                    Logger::warning("[" + server_name + "|IP Tunnel|" + session->session_uuid +
+                                    "] slow TUN->client processing elapsed_ms=" +
+                                    to_string(process_elapsed_ms) +
+                                    " src=" + ipv4_be_to_string(src_ip_be) +
+                                    " dst=" + ipv4_be_to_string(dst_ip_be) +
+                                    " len=" + to_string(packet.size()));
                 }
             }
         }
@@ -2650,6 +2713,7 @@ public:
 private:
     void packet_tunnel_udp_loop() {
         while (running && udp_fd >= 0) {
+            const uint64_t loop_start_ms = monotonic_millis();
             uint8_t buffer[65535];
             sockaddr_storage client_addr{};
             socklen_t client_addr_len = sizeof(client_addr);
@@ -3061,6 +3125,16 @@ private:
             if (!tun_manager.WritePacket(payload, payload_len, &tun_error)) {
                 Logger::warning("[IP Tunnel|" + session->session_uuid + "] write TUN failed: " + tun_error);
                 session->active = false;
+            } else {
+                const uint64_t process_elapsed_ms = monotonic_millis() - loop_start_ms;
+                if (process_elapsed_ms >= kSlowPacketTunnelUdpProcessWarnMs) {
+                    Logger::warning("[IP Tunnel|" + session->session_uuid +
+                                    "] slow client->TUN processing elapsed_ms=" +
+                                    to_string(process_elapsed_ms) +
+                                    " src=" + ipv4_be_to_string(src_ip_be) +
+                                    " dst=" + ipv4_be_to_string(dst_ip_be) +
+                                    " len=" + to_string(payload_len));
+                }
             }
         }
     }

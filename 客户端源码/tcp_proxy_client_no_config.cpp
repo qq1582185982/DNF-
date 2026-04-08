@@ -240,6 +240,10 @@ void PacketTunnelDebugLog(const string& msg) {
     Logger::debug("[PacketTunnel] " + msg);
 }
 
+void PacketTunnelWarnLog(const string& msg) {
+    Logger::warning("[PacketTunnel] " + msg);
+}
+
 void PacketTunnelInfoLog(const string& msg) {
     Logger::info("[PacketTunnel] " + msg);
 }
@@ -1353,6 +1357,7 @@ int main(int argc, char* argv[]) {
         TUNNEL_PORT,
         g_session_uuid,
         lease_client_id,
+        granted_lease.server_virtual_ip,
         granted_lease.virtual_ip,
         granted_lease.mtu,
         wintun_manager.get()));
@@ -1434,6 +1439,7 @@ int main(int argc, char* argv[]) {
             TUNNEL_PORT,
             g_session_uuid,
             lease_client_id,
+            recovered_lease.server_virtual_ip,
             recovered_lease.virtual_ip,
             recovered_lease.mtu,
             wintun_manager.get()));
