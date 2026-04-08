@@ -2531,6 +2531,7 @@ public:
     }
 
     bool start() {
+        const int packet_tunnel_socket_buffer_bytes = 4 * 1024 * 1024;
         udp_fd = socket(AF_INET6, SOCK_DGRAM, 0);
         if (udp_fd < 0) {
             Logger::error("[" + server_name + "] create UDP socket failed");
@@ -2539,6 +2540,8 @@ public:
 
         int udp_opt = 1;
         setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &udp_opt, sizeof(udp_opt));
+        setsockopt(udp_fd, SOL_SOCKET, SO_RCVBUF, &packet_tunnel_socket_buffer_bytes, sizeof(packet_tunnel_socket_buffer_bytes));
+        setsockopt(udp_fd, SOL_SOCKET, SO_SNDBUF, &packet_tunnel_socket_buffer_bytes, sizeof(packet_tunnel_socket_buffer_bytes));
 
         int udp_v6only = 0;
         setsockopt(udp_fd, IPPROTO_IPV6, IPV6_V6ONLY, &udp_v6only, sizeof(udp_v6only));
@@ -3268,7 +3271,7 @@ private:
 
         try {
             int flag = 1;
-            int buffer_bytes = 256 * 1024;
+            int buffer_bytes = 4 * 1024 * 1024;
             setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
             setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
             setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &buffer_bytes, sizeof(buffer_bytes));
