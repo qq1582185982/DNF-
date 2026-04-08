@@ -29,7 +29,7 @@ public:
     int GetFd() const { return fd_; }
     const std::string& GetIfName() const { return if_name_; }
 
-    bool ReadPacket(std::vector<uint8_t>* packet, std::string* error);
+    bool ReadPacket(std::vector<uint8_t>* packet, int timeout_ms, std::string* error);
     bool WritePacket(const uint8_t* data, size_t length, std::string* error);
 
 private:

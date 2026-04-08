@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
+#include <poll.h>
 #include <sstream>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -87,12 +88,33 @@ void TunManager::Cleanup() {
     if_name_.clear();
 }
 
-bool TunManager::ReadPacket(std::vector<uint8_t>* packet, std::string* error) {
+bool TunManager::ReadPacket(std::vector<uint8_t>* packet, int timeout_ms, std::string* error) {
     if (packet == NULL) {
         if (error != NULL) {
             *error = "TunManager::ReadPacket packet is null";
         }
         return false;
+    }
+
+    if (timeout_ms >= 0) {
+        pollfd pfd = {};
+        pfd.fd = fd_;
+        pfd.events = POLLIN;
+        int ret = poll(&pfd, 1, timeout_ms);
+        if (ret == 0) {
+            packet->clear();
+            if (error != NULL) {
+                error->clear();
+            }
+            return false;
+        }
+        if (ret < 0) {
+            packet->clear();
+            if (error != NULL) {
+                *error = std::string("poll tun packet failed: ") + strerror(errno);
+            }
+            return false;
+        }
     }
 
     packet->resize(kMaxPacketSize);

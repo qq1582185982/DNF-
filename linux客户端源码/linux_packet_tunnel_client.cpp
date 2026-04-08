@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <deque>
 #include <sstream>
 #include <vector>
 
@@ -34,6 +35,9 @@ const int kSocketSendRetryCount = 2;
 const int kSocketSendRetryDelayMs = 5;
 const int kTunReadWaitMs = 500;
 const int kSocketBufferBytes = 4 * 1024 * 1024;
+const size_t kPacketTunnelBatchMaxDatagramBytes = 1200;
+const size_t kPacketTunnelBatchMaxFrames = 8;
+const size_t kPacketTunnelBatchMaxTcpPayloadBytes = 320;
 const uint16_t kPeerDirectProbeSrcPort = 65401;
 const uint16_t kPeerDirectProbeDstPort = 65402;
 const uint8_t kPeerDirectProbeMagic[4] = {'P', 'T', 'D', 'P'};
@@ -127,6 +131,97 @@ bool ParseLinuxPeerDirectProbePacket(const uint8_t* packet,
         *out_probe_type = payload[5];
     }
     return true;
+}
+
+void AppendPacketTunnelFrame(std::vector<uint8_t>* datagram,
+                             uint8_t frame_type,
+                             const uint8_t* payload,
+                             size_t payload_len) {
+    if (datagram == NULL) {
+        return;
+    }
+
+    const size_t frame_offset = datagram->size();
+    datagram->resize(frame_offset + packet_tunnel::kFrameHeaderSize + payload_len, 0);
+    (*datagram)[frame_offset] = frame_type;
+    *(uint16_t*)(&(*datagram)[frame_offset + 1]) = htons(static_cast<uint16_t>(payload_len));
+    if (payload_len > 0 && payload != NULL) {
+        memcpy(datagram->data() + frame_offset + packet_tunnel::kFrameHeaderSize,
+               payload,
+               payload_len);
+    }
+}
+
+bool TryConsumePacketTunnelFrame(const uint8_t* datagram,
+                                 size_t datagram_len,
+                                 size_t* offset,
+                                 uint8_t* frame_type,
+                                 const uint8_t** payload,
+                                 uint16_t* payload_len) {
+    if (datagram == NULL || offset == NULL || frame_type == NULL ||
+        payload == NULL || payload_len == NULL) {
+        return false;
+    }
+    if (*offset >= datagram_len ||
+        datagram_len - *offset < packet_tunnel::kFrameHeaderSize) {
+        return false;
+    }
+
+    const size_t frame_offset = *offset;
+    const uint16_t next_payload_len = ntohs(*(const uint16_t*)(datagram + frame_offset + 1));
+    const size_t frame_size = packet_tunnel::kFrameHeaderSize + next_payload_len;
+    if (datagram_len - frame_offset < frame_size) {
+        return false;
+    }
+
+    *frame_type = datagram[frame_offset];
+    *payload_len = next_payload_len;
+    *payload = datagram + frame_offset + packet_tunnel::kFrameHeaderSize;
+    *offset = frame_offset + frame_size;
+    return true;
+}
+
+bool IsPacketTunnelMicroBatchEligibleTcpPacket(const uint8_t* packet, size_t packet_len) {
+    if (packet == NULL || packet_len < 20 || ((packet[0] >> 4) & 0x0F) != 4) {
+        return false;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len || packet[9] != IPPROTO_TCP) {
+        return false;
+    }
+
+    const uint16_t total_len = ntohs(*(const uint16_t*)(packet + 2));
+    if (total_len < ip_header_len || packet_len < total_len || total_len > kPacketTunnelBatchMaxTcpPayloadBytes) {
+        return false;
+    }
+
+    const size_t tcp_header_offset = ip_header_len;
+    if (total_len < tcp_header_offset + 20) {
+        return false;
+    }
+
+    const size_t tcp_header_len = static_cast<size_t>((packet[tcp_header_offset + 12] >> 4) & 0x0F) * 4;
+    return tcp_header_len >= 20 && total_len >= tcp_header_offset + tcp_header_len;
+}
+
+bool IsPacketTunnelRelayBatchEligibleTunPacket(const std::vector<uint8_t>& packet,
+                                               const std::string& virtual_ip) {
+    (void)virtual_ip;
+    if (packet.size() < 20) {
+        return false;
+    }
+    if (((packet[0] >> 4) & 0x0F) != 4) {
+        return false;
+    }
+
+    const uint8_t dst_octet0 = packet[16];
+    if ((dst_octet0 >= 224 && dst_octet0 <= 239) ||
+        (packet[16] == 255 && packet[17] == 255 && packet[18] == 255 && packet[19] == 255)) {
+        return false;
+    }
+
+    return IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size());
 }
 
 bool IsLinuxTransientSendError(int error_code) {
@@ -1095,18 +1190,12 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
             continue;
         }
 
-        const uint8_t frame_type = buffer[0];
-        const uint16_t payload_len = ntohs(*(uint16_t*)(&buffer[1]));
-        if (received != static_cast<int>(packet_tunnel::kFrameHeaderSize + payload_len)) {
-            continue;
-        }
-
         const bool from_server = IsServerEndpoint(source_addr, source_addr_len);
-        std::string peer_virtual_ip;
-        bool from_known_peer = !from_server &&
-                               TryResolvePeerBySource(source_addr, source_addr_len, &peer_virtual_ip);
-        bool learned_direct_probe = false;
-        bool learned_direct_endpoint_changed = false;
+        std::string datagram_peer_virtual_ip;
+        bool datagram_from_known_peer = !from_server &&
+                                        TryResolvePeerBySource(source_addr,
+                                                               source_addr_len,
+                                                               &datagram_peer_virtual_ip);
         auto has_fresh_direct_route = [this](const std::string& candidate_peer_virtual_ip) -> bool {
             if (candidate_peer_virtual_ip.empty() || peer_link_manager_ == NULL) {
                 return false;
@@ -1124,23 +1213,41 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
             return route.active_direct && IsDirectPathFresh(route, current_ms);
         };
 
-        if (from_server) {
-            last_receive_ms_ = now_ms();
-            MarkNetworkActivity();
-
-            if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
-                continue;
+        size_t frame_offset = 0;
+        bool datagram_valid = true;
+        while (frame_offset < static_cast<size_t>(received)) {
+            uint8_t frame_type = 0;
+            uint16_t payload_len = 0;
+            const uint8_t* payload = NULL;
+            if (!TryConsumePacketTunnelFrame(buffer.data(),
+                                             static_cast<size_t>(received),
+                                             &frame_offset,
+                                             &frame_type,
+                                             &payload,
+                                             &payload_len)) {
+                datagram_valid = false;
+                break;
             }
 
-            if (HandlePeerControlFrame(frame_type,
-                                       buffer.data() + packet_tunnel::kFrameHeaderSize,
-                                       payload_len)) {
-                continue;
-            }
-        }
+            std::string peer_virtual_ip = datagram_peer_virtual_ip;
+            bool from_known_peer = datagram_from_known_peer;
+            bool learned_direct_probe = false;
+            bool learned_direct_endpoint_changed = false;
 
-        if (frame_type == packet_tunnel::kFrameIpv4Packet && tun_manager_ != NULL) {
-            const uint8_t* payload = buffer.data() + packet_tunnel::kFrameHeaderSize;
+            if (from_server) {
+                last_receive_ms_ = now_ms();
+                MarkNetworkActivity();
+
+                if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
+                    continue;
+                }
+
+                if (HandlePeerControlFrame(frame_type, payload, payload_len)) {
+                    continue;
+                }
+            }
+
+            if (frame_type == packet_tunnel::kFrameIpv4Packet && tun_manager_ != NULL) {
             uint8_t probe_type = 0;
             const bool is_direct_probe =
                 ParseLinuxPeerDirectProbePacket(payload, payload_len, &probe_type);
@@ -1166,6 +1273,8 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
                                                               NULL)) {
                     peer_virtual_ip = inferred_peer_virtual_ip;
                     from_known_peer = true;
+                    datagram_peer_virtual_ip = peer_virtual_ip;
+                    datagram_from_known_peer = true;
                     learned_direct_probe = true;
                     LogInfo("learn direct probe endpoint peer=" + peer_virtual_ip +
                             " source=" + LinuxSockaddrToString(source_addr, source_addr_len) +
@@ -1184,6 +1293,8 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
                 continue;
             }
             if (from_known_peer) {
+                datagram_peer_virtual_ip = peer_virtual_ip;
+                datagram_from_known_peer = true;
                 MarkNetworkActivity();
                 if (peer_link_manager_ != NULL) {
                     peer_link_manager_->TouchPeerDirectData(peer_virtual_ip, 0);
@@ -1247,6 +1358,10 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
                 LogInfo(std::string(from_known_peer ? "udp peer->tun " : "udp tunnel->tun ") +
                         udp_desc);
             }
+            continue;
+        }
+        }
+        if (!datagram_valid) {
             continue;
         }
     }
@@ -1604,11 +1719,15 @@ int LinuxPacketTunnelClient::RecvDatagramFrom(uint8_t* data,
 
 void LinuxPacketTunnelClient::TunReadLoop() {
     uint32_t local_virtual_ip_be = 0;
+    std::deque<std::vector<uint8_t>> deferred_packets;
     ParseLinuxIpv4StringToBe(virtual_ip_, &local_virtual_ip_be);
     while (!stop_requested_) {
         std::vector<uint8_t> packet;
         std::string error;
-        if (!tun_manager_ || !tun_manager_->ReadPacket(&packet, kTunReadWaitMs, &error)) {
+        if (!deferred_packets.empty()) {
+            packet = std::move(deferred_packets.front());
+            deferred_packets.pop_front();
+        } else if (!tun_manager_ || !tun_manager_->ReadPacket(&packet, kTunReadWaitMs, &error)) {
             continue;
         }
         if (packet.empty()) {
@@ -1714,7 +1833,62 @@ void LinuxPacketTunnelClient::TunReadLoop() {
             }
         }
 
-        if (!SendFrame(packet_tunnel::kFrameIpv4Packet, packet.data(), packet.size(), NULL)) {
+        bool relay_send_ok = true;
+        size_t relay_batch_frames = 1;
+        if (IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size())) {
+            std::vector<uint8_t> relay_datagram;
+            AppendPacketTunnelFrame(&relay_datagram,
+                                    packet_tunnel::kFrameIpv4Packet,
+                                    packet.data(),
+                                    packet.size());
+
+            while (relay_batch_frames < kPacketTunnelBatchMaxFrames &&
+                   relay_datagram.size() < kPacketTunnelBatchMaxDatagramBytes) {
+                std::vector<uint8_t> next_packet;
+                std::string next_error;
+                if (!tun_manager_ ||
+                    !tun_manager_->ReadPacket(&next_packet, 0, &next_error) ||
+                    next_packet.empty()) {
+                    break;
+                }
+
+                if (!IsPacketTunnelRelayBatchEligibleTunPacket(next_packet, virtual_ip_)) {
+                    deferred_packets.push_front(std::move(next_packet));
+                    break;
+                }
+
+                const size_t next_frame_size =
+                    packet_tunnel::kFrameHeaderSize + next_packet.size();
+                if (relay_datagram.size() + next_frame_size > kPacketTunnelBatchMaxDatagramBytes) {
+                    deferred_packets.push_front(std::move(next_packet));
+                    break;
+                }
+
+                AppendPacketTunnelFrame(&relay_datagram,
+                                        packet_tunnel::kFrameIpv4Packet,
+                                        next_packet.data(),
+                                        next_packet.size());
+                ++relay_batch_frames;
+            }
+
+            std::lock_guard<std::mutex> lock(send_mutex_);
+            relay_send_ok = SendDatagramToEndpoint(server_endpoint_,
+                                                   relay_datagram.data(),
+                                                   relay_datagram.size(),
+                                                   NULL);
+            if (relay_batch_frames > 1) {
+                LogInfo("tcp tun->tunnel batched frames=" +
+                        std::to_string(relay_batch_frames) +
+                        " bytes=" + std::to_string(relay_datagram.size()));
+            }
+        } else {
+            relay_send_ok = SendFrame(packet_tunnel::kFrameIpv4Packet,
+                                      packet.data(),
+                                      packet.size(),
+                                      NULL);
+        }
+
+        if (!relay_send_ok) {
             break;
         }
 

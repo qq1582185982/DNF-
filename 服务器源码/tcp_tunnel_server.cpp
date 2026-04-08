@@ -190,6 +190,7 @@
 
 #include <iostream>
 #include <string>
+#include <deque>
 #include <map>
 #include <set>
 #include <vector>
@@ -652,6 +653,81 @@ static bool ipv4_udp_ports(const uint8_t* packet, size_t packet_len, uint16_t* o
 
 static bool ipv4_udp_ports(const vector<uint8_t>& packet, uint16_t* out_src_port, uint16_t* out_dst_port) {
     return ipv4_udp_ports(packet.data(), packet.size(), out_src_port, out_dst_port);
+}
+
+static void append_packet_tunnel_frame(vector<uint8_t>* datagram,
+                                       uint8_t frame_type,
+                                       const uint8_t* payload,
+                                       size_t payload_len) {
+    if (datagram == nullptr) {
+        return;
+    }
+
+    const size_t frame_offset = datagram->size();
+    datagram->resize(frame_offset + packet_tunnel::kFrameHeaderSize + payload_len, 0);
+    (*datagram)[frame_offset] = frame_type;
+    *(uint16_t*)(&(*datagram)[frame_offset + 1]) = htons(static_cast<uint16_t>(payload_len));
+    if (payload_len > 0 && payload != nullptr) {
+        memcpy(datagram->data() + frame_offset + packet_tunnel::kFrameHeaderSize,
+               payload,
+               payload_len);
+    }
+}
+
+static bool try_consume_packet_tunnel_frame(const uint8_t* datagram,
+                                            size_t datagram_len,
+                                            size_t* offset,
+                                            uint8_t* frame_type,
+                                            const uint8_t** payload,
+                                            uint16_t* payload_len) {
+    if (datagram == nullptr || offset == nullptr || frame_type == nullptr ||
+        payload == nullptr || payload_len == nullptr) {
+        return false;
+    }
+    if (*offset >= datagram_len ||
+        datagram_len - *offset < packet_tunnel::kFrameHeaderSize) {
+        return false;
+    }
+
+    const size_t frame_offset = *offset;
+    const uint16_t next_payload_len = ntohs(*(const uint16_t*)(datagram + frame_offset + 1));
+    const size_t frame_size = packet_tunnel::kFrameHeaderSize + next_payload_len;
+    if (datagram_len - frame_offset < frame_size) {
+        return false;
+    }
+
+    *frame_type = datagram[frame_offset];
+    *payload_len = next_payload_len;
+    *payload = datagram + frame_offset + packet_tunnel::kFrameHeaderSize;
+    *offset = frame_offset + frame_size;
+    return true;
+}
+
+static bool is_packet_tunnel_micro_batch_eligible_tcp_packet(const uint8_t* packet,
+                                                             size_t packet_len) {
+    if (packet == nullptr || packet_len < 20 || ((packet[0] >> 4) & 0x0F) != 4) {
+        return false;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len || packet[9] != IPPROTO_TCP) {
+        return false;
+    }
+
+    const uint16_t total_len =
+        (static_cast<uint16_t>(packet[2]) << 8) | static_cast<uint16_t>(packet[3]);
+    if (total_len < ip_header_len || packet_len < total_len || total_len > 320) {
+        return false;
+    }
+
+    const size_t tcp_header_offset = ip_header_len;
+    if (total_len < tcp_header_offset + 20) {
+        return false;
+    }
+
+    const size_t tcp_header_len =
+        static_cast<size_t>((packet[tcp_header_offset + 12] >> 4) & 0x0F) * 4;
+    return tcp_header_len >= 20 && total_len >= tcp_header_offset + tcp_header_len;
 }
 
 static uint16_t internet_checksum(const uint8_t* data, size_t len) {
@@ -1685,6 +1761,8 @@ private:
     const uint64_t kSlowPacketTunnelFrameSendWarnMs = 10;
     const uint64_t kSlowPacketTunnelTunProcessWarnMs = 20;
     const uint64_t kSlowPacketTunnelUdpProcessWarnMs = 20;
+    const size_t kPacketTunnelBatchMaxDatagramBytes = 1200;
+    const size_t kPacketTunnelBatchMaxFrames = 8;
 
     const char* peer_endpoint_state_name(PeerEndpointState state) {
         switch (state) {
@@ -1807,21 +1885,16 @@ private:
         }
     }
 
-    bool send_packet_tunnel_frame(const shared_ptr<PacketTunnelSession>& session,
-                                  uint8_t frame_type,
-                                  const uint8_t* payload,
-                                  size_t payload_len) {
+    bool send_packet_tunnel_datagram(const shared_ptr<PacketTunnelSession>& session,
+                                     const uint8_t* datagram,
+                                     size_t datagram_len,
+                                     size_t frame_count,
+                                     const string& frame_label,
+                                     size_t payload_len) {
         if (!session || !session->active) {
             return false;
         }
         const uint64_t send_start_ms = monotonic_millis();
-
-        vector<uint8_t> frame(packet_tunnel::kFrameHeaderSize + payload_len, 0);
-        frame[0] = frame_type;
-        *(uint16_t*)(&frame[1]) = htons((uint16_t)payload_len);
-        if (payload_len > 0 && payload != nullptr) {
-            memcpy(&frame[packet_tunnel::kFrameHeaderSize], payload, payload_len);
-        }
 
         lock_guard<mutex> lock(session->send_mutex);
         if (session->use_udp) {
@@ -1829,12 +1902,12 @@ private:
                 return false;
             }
             int n = sendto(udp_fd,
-                           (const char*)frame.data(),
-                           frame.size(),
+                           (const char*)datagram,
+                           datagram_len,
                            MSG_NOSIGNAL,
                            (const sockaddr*)&session->udp_addr,
                            session->udp_addr_len);
-            if (n != (int)frame.size()) {
+            if (n != (int)datagram_len) {
                 return false;
             }
             touch_packet_tunnel_session(session);
@@ -1842,7 +1915,8 @@ private:
             if (send_elapsed_ms >= kSlowPacketTunnelFrameSendWarnMs) {
                 Logger::warning("[" + server_name + "|IP Tunnel|" + session->session_uuid +
                                 "] slow frame send elapsed_ms=" + to_string(send_elapsed_ms) +
-                                " frame=" + packet_tunnel_frame_name(frame_type) +
+                                " frame=" + frame_label +
+                                " frames=" + to_string(frame_count) +
                                 " mode=udp payload_len=" + to_string(payload_len) +
                                 " target=" + describe_scoped_virtual_ip(session));
             }
@@ -1850,10 +1924,10 @@ private:
         }
 
         size_t sent = 0;
-        while (sent < frame.size()) {
+        while (sent < datagram_len) {
             int n = send(session->client_fd,
-                         (const char*)frame.data() + sent,
-                         frame.size() - sent,
+                         (const char*)datagram + sent,
+                         datagram_len - sent,
                          MSG_NOSIGNAL);
             if (n <= 0) {
                 return false;
@@ -1865,11 +1939,26 @@ private:
         if (send_elapsed_ms >= kSlowPacketTunnelFrameSendWarnMs) {
             Logger::warning("[" + server_name + "|IP Tunnel|" + session->session_uuid +
                             "] slow frame send elapsed_ms=" + to_string(send_elapsed_ms) +
-                            " frame=" + packet_tunnel_frame_name(frame_type) +
+                            " frame=" + frame_label +
+                            " frames=" + to_string(frame_count) +
                             " mode=tcp payload_len=" + to_string(payload_len) +
                             " target=" + describe_scoped_virtual_ip(session));
         }
         return true;
+    }
+
+    bool send_packet_tunnel_frame(const shared_ptr<PacketTunnelSession>& session,
+                                  uint8_t frame_type,
+                                  const uint8_t* payload,
+                                  size_t payload_len) {
+        vector<uint8_t> frame;
+        append_packet_tunnel_frame(&frame, frame_type, payload, payload_len);
+        return send_packet_tunnel_datagram(session,
+                                           frame.data(),
+                                           frame.size(),
+                                           1,
+                                           packet_tunnel_frame_name(frame_type),
+                                           payload_len);
     }
 
     bool relay_virtual_peer_packet(const shared_ptr<PacketTunnelSession>& sender_session,
@@ -2416,11 +2505,15 @@ private:
     }
 
     void packet_tunnel_tun_loop() {
+        deque<vector<uint8_t>> deferred_packets;
         while (running && tun_manager.IsActive()) {
             const uint64_t loop_start_ms = monotonic_millis();
             vector<uint8_t> packet;
             string error;
-            if (!tun_manager.ReadPacket(&packet, &error)) {
+            if (!deferred_packets.empty()) {
+                packet = std::move(deferred_packets.front());
+                deferred_packets.pop_front();
+            } else if (!tun_manager.ReadPacket(&packet, -1, &error)) {
                 if (!running) {
                     break;
                 }
@@ -2508,7 +2601,102 @@ private:
                               " len=" + to_string(packet.size()));
             }
 
-            if (!send_packet_tunnel_frame(session, packet_tunnel::kFrameIpv4Packet, packet.data(), packet.size())) {
+            bool send_ok = false;
+            if (session->use_udp &&
+                protocol == IPPROTO_TCP &&
+                is_packet_tunnel_micro_batch_eligible_tcp_packet(packet.data(), packet.size())) {
+                vector<uint8_t> datagram;
+                append_packet_tunnel_frame(&datagram,
+                                           packet_tunnel::kFrameIpv4Packet,
+                                           packet.data(),
+                                           packet.size());
+                size_t batched_frames = 1;
+
+                while (batched_frames < kPacketTunnelBatchMaxFrames &&
+                       datagram.size() < kPacketTunnelBatchMaxDatagramBytes) {
+                    vector<uint8_t> next_packet;
+                    string next_error;
+                    if (!tun_manager.ReadPacket(&next_packet, 0, &next_error) ||
+                        next_packet.empty()) {
+                        break;
+                    }
+
+                    if (next_packet.size() < 20 ||
+                        ((next_packet[0] >> 4) & 0x0F) != 4 ||
+                        !is_packet_tunnel_micro_batch_eligible_tcp_packet(next_packet.data(),
+                                                                          next_packet.size())) {
+                        deferred_packets.push_front(std::move(next_packet));
+                        break;
+                    }
+
+                    uint32_t next_dst_ip_be = 0;
+                    uint32_t next_src_ip_be = 0;
+                    memcpy(&next_src_ip_be, &next_packet[12], sizeof(next_src_ip_be));
+                    memcpy(&next_dst_ip_be, &next_packet[16], sizeof(next_dst_ip_be));
+                    if (has_virtual_subnet_be &&
+                        !ipv4_in_subnet_be(next_dst_ip_be, virtual_network_ip_be, virtual_subnet_mask_be)) {
+                        deferred_packets.push_front(std::move(next_packet));
+                        break;
+                    }
+
+                    string next_scoped_server_key;
+                    map<uint32_t, string>::const_iterator next_local_node_it =
+                        local_node_server_keys_by_ip_be.find(next_src_ip_be);
+                    if (next_local_node_it != local_node_server_keys_by_ip_be.end()) {
+                        next_scoped_server_key = next_local_node_it->second;
+                    } else if (local_node_server_keys_by_ip_be.size() == 1) {
+                        next_scoped_server_key = local_node_server_keys_by_ip_be.begin()->second;
+                    }
+
+                    shared_ptr<PacketTunnelSession> next_session;
+                    if (!next_scoped_server_key.empty()) {
+                        lock_guard<mutex> lock(packet_tunnel_mutex);
+                        map<string, shared_ptr<PacketTunnelSession>>::const_iterator next_it =
+                            packet_tunnel_sessions.find(build_scoped_virtual_ip_key(next_scoped_server_key,
+                                                                                    next_dst_ip_be));
+                        if (next_it != packet_tunnel_sessions.end()) {
+                            next_session = next_it->second;
+                        }
+                    }
+
+                    if (!next_session || next_session != session) {
+                        deferred_packets.push_front(std::move(next_packet));
+                        break;
+                    }
+
+                    const size_t next_frame_size =
+                        packet_tunnel::kFrameHeaderSize + next_packet.size();
+                    if (datagram.size() + next_frame_size > kPacketTunnelBatchMaxDatagramBytes) {
+                        deferred_packets.push_front(std::move(next_packet));
+                        break;
+                    }
+
+                    append_packet_tunnel_frame(&datagram,
+                                               packet_tunnel::kFrameIpv4Packet,
+                                               next_packet.data(),
+                                               next_packet.size());
+                    ++batched_frames;
+                }
+
+                send_ok = send_packet_tunnel_datagram(session,
+                                                      datagram.data(),
+                                                      datagram.size(),
+                                                      batched_frames,
+                                                      "batched_ipv4_packet",
+                                                      packet.size());
+                if (send_ok && batched_frames > 1) {
+                    Logger::debug("[" + server_name + "|IP Tunnel|" + session->session_uuid +
+                                  "] tcp TUN->client batched frames=" + to_string(batched_frames) +
+                                  " bytes=" + to_string(datagram.size()));
+                }
+            } else {
+                send_ok = send_packet_tunnel_frame(session,
+                                                   packet_tunnel::kFrameIpv4Packet,
+                                                   packet.data(),
+                                                   packet.size());
+            }
+
+            if (!send_ok) {
                 Logger::warning("[" + server_name + "|IP Tunnel|" + session->session_uuid +
                                 "] send TUN packet to client failed");
                 session->active = false;
@@ -2985,13 +3173,21 @@ private:
                 continue;
             }
 
-            uint8_t frame_type = buffer[0];
-            uint16_t payload_len = ntohs(*(uint16_t*)(buffer + 1));
-            if ((size_t)n != packet_tunnel::kFrameHeaderSize + payload_len) {
-                continue;
+            size_t frame_offset = 0;
+            bool datagram_valid = true;
+            while (frame_offset < (size_t)n) {
+            uint8_t frame_type = 0;
+            uint16_t payload_len = 0;
+            const uint8_t* payload = nullptr;
+            if (!try_consume_packet_tunnel_frame(buffer,
+                                                 (size_t)n,
+                                                 &frame_offset,
+                                                 &frame_type,
+                                                 &payload,
+                                                 &payload_len)) {
+                datagram_valid = false;
+                break;
             }
-
-            const uint8_t* payload = buffer + packet_tunnel::kFrameHeaderSize;
             if (frame_type == packet_tunnel::kFrameHeartbeat && payload_len == 0) {
                 if (!send_packet_tunnel_frame(session, packet_tunnel::kFrameHeartbeatAck, nullptr, 0)) {
                     session->active = false;
@@ -3160,6 +3356,10 @@ private:
                                     " dst=" + ipv4_be_to_string(dst_ip_be) +
                                     " len=" + to_string(payload_len));
                 }
+            }
+            }
+            if (!datagram_valid) {
+                continue;
             }
         }
     }
