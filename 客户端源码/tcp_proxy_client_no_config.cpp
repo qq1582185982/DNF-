@@ -91,6 +91,7 @@
 #include <mutex>
 #include <atomic>
 #include <memory>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
@@ -246,6 +247,32 @@ void PacketTunnelWarnLog(const string& msg) {
 
 void PacketTunnelInfoLog(const string& msg) {
     Logger::info("[PacketTunnel] " + msg);
+}
+
+bool PacketTunnelDebugEnabled() {
+    return Logger::is_debug_enabled();
+}
+
+static string normalize_log_level(string level) {
+    transform(level.begin(),
+              level.end(),
+              level.begin(),
+              [](unsigned char ch) { return static_cast<char>(toupper(ch)); });
+    if (level == "DEBUG" || level == "INFO" || level == "WARN" || level == "ERROR") {
+        return level;
+    }
+    return "INFO";
+}
+
+static string determine_initial_log_level() {
+    char value[32] = {};
+    DWORD length = GetEnvironmentVariableA("DNF_PROXY_LOG_LEVEL",
+                                           value,
+                                           static_cast<DWORD>(sizeof(value)));
+    if (length == 0 || length >= sizeof(value)) {
+        return "INFO";
+    }
+    return normalize_log_level(string(value, length));
 }
 
 string g_session_uuid;
@@ -1082,8 +1109,9 @@ int main(int argc, char* argv[]) {
 
     // 初始化日志系统
     Logger::init(log_filename);
-    Logger::set_log_level("DEBUG");
-    Logger::info("[Log] Default log level: DEBUG");
+    const string initial_log_level = determine_initial_log_level();
+    Logger::set_log_level(initial_log_level);
+    Logger::info("[Log] Default log level: " + initial_log_level);
 
     // 生成会话UUID
     g_session_uuid = generate_session_uuid();

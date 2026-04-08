@@ -23,6 +23,14 @@
 void PacketTunnelDebugLog(const std::string& msg);
 void PacketTunnelWarnLog(const std::string& msg);
 void PacketTunnelInfoLog(const std::string& msg);
+bool PacketTunnelDebugEnabled();
+
+#define PT_DEBUG(message_expr)            \
+    do {                                  \
+        if (PacketTunnelDebugEnabled()) { \
+            PacketTunnelDebugLog((message_expr)); \
+        }                                 \
+    } while (0)
 
 namespace {
 
@@ -81,6 +89,10 @@ void MaybeLogDnfUdpSignature(const std::string& direction,
                              uint16_t dst_port,
                              const uint8_t* udp_payload,
                              size_t udp_payload_len) {
+    if (!PacketTunnelDebugEnabled()) {
+        return;
+    }
+
     if (udp_payload == NULL) {
         return;
     }
@@ -2411,6 +2423,7 @@ void PacketTunnelClient::SocketReadLoop() {
 
         if (frame_type == packet_tunnel::kFrameIpv4Packet && wintun_manager_ != NULL) {
             const unsigned long long frame_process_start = GetTickCount64();
+            const bool debug_enabled = PacketTunnelDebugEnabled();
             const uint8_t* payload = buffer.data() + packet_tunnel::kFrameHeaderSize;
             const bool has_inner_ipv4 =
                 payload_len >= 20 &&
@@ -2428,19 +2441,22 @@ void PacketTunnelClient::SocketReadLoop() {
                     inner_is_udp = true;
                     inner_src_port = ntohs(*(const uint16_t*)(payload + ip_header_len));
                     inner_dst_port = ntohs(*(const uint16_t*)(payload + ip_header_len + 2));
-                    MaybeLogDnfUdpSignature(from_server ? "tunnel->wintun" : "peer->wintun",
-                                            inner_src_virtual_ip,
-                                            inner_src_port,
-                                            inner_dst_virtual_ip,
-                                            inner_dst_port,
-                                            payload + ip_header_len + 8,
-                                            payload_len - ip_header_len - 8);
+                    if (debug_enabled) {
+                        MaybeLogDnfUdpSignature(from_server ? "tunnel->wintun" : "peer->wintun",
+                                                inner_src_virtual_ip,
+                                                inner_src_port,
+                                                inner_dst_virtual_ip,
+                                                inner_dst_port,
+                                                payload + ip_header_len + 8,
+                                                payload_len - ip_header_len - 8);
+                    }
                 }
             }
 
             uint8_t probe_type = 0;
             const bool is_direct_probe = ParsePeerDirectProbePacket(payload, payload_len, &probe_type);
-            if (!from_server &&
+            if (debug_enabled &&
+                !from_server &&
                 inner_is_udp &&
                 (is_direct_probe || inner_src_port == 5063 || inner_dst_port == 5063) &&
                 !IsNoisyUdpForLogging(payload, payload_len)) {
@@ -2448,16 +2464,16 @@ void PacketTunnelClient::SocketReadLoop() {
                     probe_type == kPeerDirectProbeRequest
                         ? "request"
                         : (probe_type == kPeerDirectProbeResponse ? "response" : "none");
-                PacketTunnelDebugLog("recv non-server ipv4 source=" +
-                                     SockaddrToString(source_addr, source_addr_len) +
-                                     " known_peer=" + (from_known_peer ? "yes" : "no") +
-                                     " peer=" + (peer_virtual_ip.empty() ? "-" : peer_virtual_ip) +
-                                     " inner_src=" + inner_src_virtual_ip + ":" +
-                                     std::to_string(inner_src_port) +
-                                     " inner_dst=" + inner_dst_virtual_ip + ":" +
-                                     std::to_string(inner_dst_port) +
-                                     " probe=" + probe_kind +
-                                     " len=" + std::to_string(payload_len));
+                PT_DEBUG("recv non-server ipv4 source=" +
+                         SockaddrToString(source_addr, source_addr_len) +
+                         " known_peer=" + (from_known_peer ? "yes" : "no") +
+                         " peer=" + (peer_virtual_ip.empty() ? "-" : peer_virtual_ip) +
+                         " inner_src=" + inner_src_virtual_ip + ":" +
+                         std::to_string(inner_src_port) +
+                         " inner_dst=" + inner_dst_virtual_ip + ":" +
+                         std::to_string(inner_dst_port) +
+                         " probe=" + probe_kind +
+                         " len=" + std::to_string(payload_len));
             }
             if (!from_server && !from_known_peer && peer_link_manager_ != NULL &&
                 payload_len >= 20 && inner_is_udp) {
@@ -2499,26 +2515,32 @@ void PacketTunnelClient::SocketReadLoop() {
                         probe_type == kPeerDirectProbeRequest
                             ? "request"
                             : (probe_type == kPeerDirectProbeResponse ? "response" : "unknown");
-                    PacketTunnelDebugLog("learn direct endpoint peer=" +
-                                         peer_virtual_ip +
-                                         " reason=" + learned_direct_reason +
-                                         " probe_type=" + probe_kind +
-                                         " src_virtual_ip=" + inferred_peer_virtual_ip +
-                                         " dst_virtual_ip=" + inferred_local_virtual_ip +
-                                         " source=" + SockaddrToString(source_addr, source_addr_len) +
-                                         (learned_direct_endpoint_changed ? " changed=yes" : " changed=no"));
+                    if (debug_enabled) {
+                        PT_DEBUG("learn direct endpoint peer=" +
+                                 peer_virtual_ip +
+                                 " reason=" + learned_direct_reason +
+                                 " probe_type=" + probe_kind +
+                                 " src_virtual_ip=" + inferred_peer_virtual_ip +
+                                 " dst_virtual_ip=" + inferred_local_virtual_ip +
+                                 " source=" + SockaddrToString(source_addr, source_addr_len) +
+                                 (learned_direct_endpoint_changed ? " changed=yes" : " changed=no"));
+                    }
                 }
             }
             if (!from_server && !from_known_peer) {
-                PacketTunnelDebugLog("ignore ipv4 packet from unknown endpoint source=" +
-                                     SockaddrToString(source_addr, source_addr_len));
+                if (debug_enabled) {
+                    PT_DEBUG("ignore ipv4 packet from unknown endpoint source=" +
+                             SockaddrToString(source_addr, source_addr_len));
+                }
                 continue;
             }
             if (from_known_peer &&
                 (payload_len < 20 ||
                  Ipv4ToString(payload + 12) != peer_virtual_ip)) {
-                PacketTunnelDebugLog("ignore peer ipv4 packet with mismatched inner src peer=" +
-                                     peer_virtual_ip);
+                if (debug_enabled) {
+                    PT_DEBUG("ignore peer ipv4 packet with mismatched inner src peer=" +
+                             peer_virtual_ip);
+                }
                 continue;
             }
 
@@ -2562,9 +2584,11 @@ void PacketTunnelClient::SocketReadLoop() {
                                                     probe_response.data(),
                                                     probe_response.size(),
                                                     NULL);
-                                PacketTunnelDebugLog("reply direct probe peer=" + peer_virtual_ip +
-                                                     " endpoint=" +
-                                                     SockaddrToString(source_addr, source_addr_len));
+                                if (debug_enabled) {
+                                    PT_DEBUG("reply direct probe peer=" + peer_virtual_ip +
+                                             " endpoint=" +
+                                             SockaddrToString(source_addr, source_addr_len));
+                                }
                             }
                         }
                     }
@@ -2594,16 +2618,19 @@ void PacketTunnelClient::SocketReadLoop() {
                 continue;
             }
             std::string desc;
-            if (!IsNoisyUdpForLogging(payload, payload_len) &&
+            if (debug_enabled &&
+                !IsNoisyUdpForLogging(payload, payload_len) &&
                 TryDescribeUdpPacket(payload, payload_len, &desc)) {
-                PacketTunnelDebugLog(std::string(from_known_peer ? "udp peer->wintun " : "udp tunnel->wintun ") + desc);
+                PT_DEBUG(std::string(from_known_peer ? "udp peer->wintun " : "udp tunnel->wintun ") + desc);
             }
-            MaybeLogTcpPayloadIpHints(from_known_peer ? "peer->wintun" : "tunnel->wintun",
-                                      payload,
-                                      payload_len);
-            MaybeLogUdpPayloadIpHints(from_known_peer ? "peer->wintun" : "tunnel->wintun",
-                                      payload,
-                                      payload_len);
+            if (debug_enabled) {
+                MaybeLogTcpPayloadIpHints(from_known_peer ? "peer->wintun" : "tunnel->wintun",
+                                          payload,
+                                          payload_len);
+                MaybeLogUdpPayloadIpHints(from_known_peer ? "peer->wintun" : "tunnel->wintun",
+                                          payload,
+                                          payload_len);
+            }
             std::wstring wintun_write_error;
             const unsigned long long wintun_write_start = GetTickCount64();
             const bool wintun_write_ok =
@@ -2633,9 +2660,9 @@ void PacketTunnelClient::SocketReadLoop() {
         }
 
     if (!from_server && !from_known_peer) {
-        PacketTunnelDebugLog("ignore packet from unknown endpoint source=" +
-                             SockaddrToString(source_addr, source_addr_len) +
-                             " frame=" + PacketTunnelFrameName(frame_type));
+        PT_DEBUG("ignore packet from unknown endpoint source=" +
+                 SockaddrToString(source_addr, source_addr_len) +
+                 " frame=" + PacketTunnelFrameName(frame_type));
     }
     }
 
@@ -2662,6 +2689,7 @@ void PacketTunnelClient::WintunReadLoop() {
         }
 
         const unsigned long long frame_process_start = GetTickCount64();
+        const bool debug_enabled = PacketTunnelDebugEnabled();
 
         uint8_t version = (packet[0] >> 4) & 0x0F;
         if (version != 4) {
@@ -2683,10 +2711,13 @@ void PacketTunnelClient::WintunReadLoop() {
 
         std::string desc;
         const bool has_desc =
+            debug_enabled &&
             !IsNoisyUdpForLogging(packet.data(), packet.size()) &&
             TryDescribeUdpPacket(packet.data(), packet.size(), &desc);
-        MaybeLogTcpPayloadIpHints("wintun->tunnel", packet.data(), packet.size());
-        MaybeLogUdpPayloadIpHints("wintun->tunnel", packet.data(), packet.size());
+        if (debug_enabled) {
+            MaybeLogTcpPayloadIpHints("wintun->tunnel", packet.data(), packet.size());
+            MaybeLogUdpPayloadIpHints("wintun->tunnel", packet.data(), packet.size());
+        }
         const bool is_udp = packet.size() >= 20 && packet[9] == IPPROTO_UDP;
         std::string dst_virtual_ip;
         std::string route_desc;
@@ -2704,15 +2735,19 @@ void PacketTunnelClient::WintunReadLoop() {
                             ? desc
                             : ("dst=" + dst_virtual_ip + ":" + std::to_string(dst_port) +
                                " len=" + std::to_string(packet.size()));
-            MaybeLogWintunTargetIntent(dst_virtual_ip, dst_port, route_desc);
+            if (debug_enabled) {
+                MaybeLogWintunTargetIntent(dst_virtual_ip, dst_port, route_desc);
+            }
             if (ip_header_len >= 20 && packet.size() >= ip_header_len + 8) {
-                MaybeLogDnfUdpSignature("wintun->tunnel",
-                                        src_virtual_ip,
-                                        src_port,
-                                        dst_virtual_ip,
-                                        dst_port,
-                                        packet.data() + ip_header_len + 8,
-                                        packet.size() - ip_header_len - 8);
+                if (debug_enabled) {
+                    MaybeLogDnfUdpSignature("wintun->tunnel",
+                                            src_virtual_ip,
+                                            src_port,
+                                            dst_virtual_ip,
+                                            dst_port,
+                                            packet.data() + ip_header_len + 8,
+                                            packet.size() - ip_header_len - 8);
+                }
             }
         }
         if (is_udp && peer_direct_allowed_) {
@@ -2746,11 +2781,13 @@ void PacketTunnelClient::WintunReadLoop() {
                                              &direct_path_fresh,
                                              &active_direct);
                     if (resolved_gateway_target) {
-                        PacketTunnelDebugLog("udp gateway peer resolve dst=" +
-                                             original_dst_virtual_ip + ":" +
-                                             std::to_string(dst_port) +
-                                             " -> peer=" + target_peer_virtual_ip +
-                                             " resolver=" + target_resolution);
+                        if (debug_enabled) {
+                            PT_DEBUG("udp gateway peer resolve dst=" +
+                                     original_dst_virtual_ip + ":" +
+                                     std::to_string(dst_port) +
+                                     " -> peer=" + target_peer_virtual_ip +
+                                     " resolver=" + target_resolution);
+                        }
                     }
                 }
             }
@@ -2768,11 +2805,13 @@ void PacketTunnelClient::WintunReadLoop() {
                                                 original_dst_ip_be,
                                                 target_peer_ip_be)) {
                     direct_payload_ready = false;
-                    PacketTunnelDebugLog("udp gateway peer rewrite failed dst=" +
-                                         original_dst_virtual_ip + ":" +
-                                         std::to_string(dst_port) +
-                                         " peer=" + target_peer_virtual_ip +
-                                         " resolver=" + target_resolution);
+                    if (debug_enabled) {
+                        PT_DEBUG("udp gateway peer rewrite failed dst=" +
+                                 original_dst_virtual_ip + ":" +
+                                 std::to_string(dst_port) +
+                                 " peer=" + target_peer_virtual_ip +
+                                 " resolver=" + target_resolution);
+                    }
                 } else {
                     direct_packet_view = &direct_packet;
                 }
@@ -2791,7 +2830,9 @@ void PacketTunnelClient::WintunReadLoop() {
                 if (prefer_direct_send) {
                     if (direct_payload_ready) {
                         if (!direct_path_fresh && active_direct && resolved_gateway_target) {
-                            PacketTunnelDebugLog("udp stale active direct send " + direct_route_desc);
+                            if (debug_enabled) {
+                                PT_DEBUG("udp stale active direct send " + direct_route_desc);
+                            }
                         }
                         if (SendFrameToEndpoint(peer_endpoint,
                                                 packet_tunnel::kFrameIpv4Packet,
@@ -2807,7 +2848,9 @@ void PacketTunnelClient::WintunReadLoop() {
                                                     std::to_string(dst_port) +
                                                     " len=" + std::to_string(direct_packet_view->size()));
                             }
-                            PacketTunnelDebugLog("udp wintun->peer " + direct_route_desc);
+                            if (debug_enabled) {
+                                PT_DEBUG("udp wintun->peer " + direct_route_desc);
+                            }
                             continue;
                         }
                         PeerRouteStatus failed_status = {};
@@ -2817,11 +2860,15 @@ void PacketTunnelClient::WintunReadLoop() {
                                                                         0,
                                                                         active_direct,
                                                                         &failed_status);
-                        PacketTunnelDebugLog("udp active direct send failed, fallback to relay " +
-                                             direct_route_desc);
-                        if (state_changed && failed_status.state == PeerRouteState::Cooldown) {
-                            PacketTunnelDebugLog("udp direct route entered cooldown peer=" +
-                                                 failed_status.peer_virtual_ip);
+                        if (debug_enabled) {
+                            PT_DEBUG("udp active direct send failed, fallback to relay " +
+                                     direct_route_desc);
+                        }
+                        if (debug_enabled &&
+                            state_changed &&
+                            failed_status.state == PeerRouteState::Cooldown) {
+                            PT_DEBUG("udp direct route entered cooldown peer=" +
+                                     failed_status.peer_virtual_ip);
                         }
                     } else {
                         MaybeLogDirectRouteFallback(target_peer_virtual_ip, "rewrite_failed");
@@ -2849,10 +2896,12 @@ void PacketTunnelClient::WintunReadLoop() {
                                             NULL)) {
                         peer_probe_send_tick_[target_peer_virtual_ip] = now_tick;
                         sent_shadow_payload = true;
-                        PacketTunnelDebugLog("udp direct shadow send " + direct_route_desc +
-                                             " endpoint=" +
-                                             SockaddrToString(peer_endpoint.addr,
-                                                              peer_endpoint.addr_len));
+                        if (debug_enabled) {
+                            PT_DEBUG("udp direct shadow send " + direct_route_desc +
+                                     " endpoint=" +
+                                     SockaddrToString(peer_endpoint.addr,
+                                                      peer_endpoint.addr_len));
+                        }
                     } else if (can_shadow_send_payload) {
                         PeerRouteStatus failed_status = {};
                         const bool state_changed =
@@ -2861,11 +2910,15 @@ void PacketTunnelClient::WintunReadLoop() {
                                                                         0,
                                                                         active_direct,
                                                                         &failed_status);
-                        PacketTunnelDebugLog("udp direct shadow send failed, keep relay primary " +
-                                             direct_route_desc);
-                        if (state_changed && failed_status.state == PeerRouteState::Cooldown) {
-                            PacketTunnelDebugLog("udp direct route entered cooldown peer=" +
-                                                 failed_status.peer_virtual_ip);
+                        if (debug_enabled) {
+                            PT_DEBUG("udp direct shadow send failed, keep relay primary " +
+                                     direct_route_desc);
+                        }
+                        if (debug_enabled &&
+                            state_changed &&
+                            failed_status.state == PeerRouteState::Cooldown) {
+                            PT_DEBUG("udp direct route entered cooldown peer=" +
+                                     failed_status.peer_virtual_ip);
                         }
                     }
                     if (should_send_probe) {
@@ -2883,9 +2936,11 @@ void PacketTunnelClient::WintunReadLoop() {
                                                 probe_packet.size(),
                                                 NULL)) {
                             peer_probe_send_tick_[target_peer_virtual_ip] = now_tick;
-                            PacketTunnelDebugLog(std::string("udp direct probe request ") +
-                                                 direct_route_desc +
-                                                 (sent_shadow_payload ? " alongside=shadow_payload" : ""));
+                            if (debug_enabled) {
+                                PT_DEBUG(std::string("udp direct probe request ") +
+                                         direct_route_desc +
+                                         (sent_shadow_payload ? " alongside=shadow_payload" : ""));
+                            }
                         } else {
                             PeerRouteStatus failed_status = {};
                             const bool state_changed =
@@ -2894,16 +2949,20 @@ void PacketTunnelClient::WintunReadLoop() {
                                                                             0,
                                                                             active_direct,
                                                                             &failed_status);
-                            if (active_direct) {
-                                PacketTunnelDebugLog("udp active direct probe failed, fallback to relay " +
-                                                     direct_route_desc);
-                            } else {
-                                PacketTunnelDebugLog("udp direct probe send failed, keep relay primary " +
-                                                     direct_route_desc);
+                            if (debug_enabled) {
+                                if (active_direct) {
+                                    PT_DEBUG("udp active direct probe failed, fallback to relay " +
+                                             direct_route_desc);
+                                } else {
+                                    PT_DEBUG("udp direct probe send failed, keep relay primary " +
+                                             direct_route_desc);
+                                }
                             }
-                            if (state_changed && failed_status.state == PeerRouteState::Cooldown) {
-                                PacketTunnelDebugLog("udp direct route entered cooldown peer=" +
-                                                     failed_status.peer_virtual_ip);
+                            if (debug_enabled &&
+                                state_changed &&
+                                failed_status.state == PeerRouteState::Cooldown) {
+                                PT_DEBUG("udp direct route entered cooldown peer=" +
+                                         failed_status.peer_virtual_ip);
                             }
                         }
                     }
@@ -2917,7 +2976,9 @@ void PacketTunnelClient::WintunReadLoop() {
         }
 
         if (!SendFrame(packet_tunnel::kFrameIpv4Packet, packet.data(), packet.size(), NULL)) {
-            PacketTunnelDebugLog("wintun read loop send failed");
+            if (debug_enabled) {
+                PT_DEBUG("wintun read loop send failed");
+            }
             break;
         }
         const unsigned long long frame_process_elapsed = GetTickCount64() - frame_process_start;
@@ -2928,8 +2989,8 @@ void PacketTunnelClient::WintunReadLoop() {
                                 " len=" + std::to_string(packet.size()));
         }
 
-        if (has_desc) {
-            PacketTunnelDebugLog("udp wintun->tunnel " + desc);
+        if (debug_enabled && has_desc) {
+            PT_DEBUG("udp wintun->tunnel " + desc);
         }
     }
 
@@ -3006,6 +3067,10 @@ void PacketTunnelClient::HeartbeatLoop() {
 
 void PacketTunnelClient::MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip,
                                                      const std::string& reason) {
+    if (!PacketTunnelDebugEnabled()) {
+        return;
+    }
+
     if (peer_link_manager_ == NULL || peer_virtual_ip.empty()) {
         return;
     }
@@ -3031,6 +3096,10 @@ void PacketTunnelClient::MaybeLogDirectRouteFallback(const std::string& peer_vir
 void PacketTunnelClient::MaybeLogWintunTargetIntent(const std::string& dst_virtual_ip,
                                                     uint16_t dst_port,
                                                     const std::string& route_desc) {
+    if (!PacketTunnelDebugEnabled()) {
+        return;
+    }
+
     if (dst_virtual_ip.empty()) {
         return;
     }
@@ -3081,6 +3150,10 @@ void PacketTunnelClient::MaybeLogWintunTargetIntent(const std::string& dst_virtu
 void PacketTunnelClient::MaybeLogTcpPayloadIpHints(const std::string& direction,
                                                    const uint8_t* packet,
                                                    size_t packet_len) {
+    if (!PacketTunnelDebugEnabled()) {
+        return;
+    }
+
     size_t ip_header_len = 0;
     size_t tcp_header_len = 0;
     uint16_t src_port = 0;
@@ -3164,6 +3237,10 @@ void PacketTunnelClient::MaybeLogTcpPayloadIpHints(const std::string& direction,
 void PacketTunnelClient::MaybeLogUdpPayloadIpHints(const std::string& direction,
                                                    const uint8_t* packet,
                                                    size_t packet_len) {
+    if (!PacketTunnelDebugEnabled()) {
+        return;
+    }
+
     if (packet == NULL || packet_len < 28 || ((packet[0] >> 4) & 0x0F) != 4 || packet[9] != IPPROTO_UDP) {
         return;
     }
