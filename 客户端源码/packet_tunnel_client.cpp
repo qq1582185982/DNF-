@@ -56,6 +56,7 @@ const int kSocketBufferBytes = 4 * 1024 * 1024;
 const unsigned long long kSlowSocketSendWarnMs = 10;
 const unsigned long long kSlowWintunWriteWarnMs = 10;
 const unsigned long long kSlowPacketProcessWarnMs = 20;
+const unsigned long long kSlowWintunQueueWarnMs = 10;
 const uint16_t kPeerDirectProbeSrcPort = 65401;
 const uint16_t kPeerDirectProbeDstPort = 65402;
 const uint8_t kPeerDirectProbeMagic[4] = {'P', 'T', 'D', 'P'};
@@ -1960,6 +1961,15 @@ bool PacketTunnelClient::IsServerVirtualPeer(const std::string& peer_virtual_ip)
 bool PacketTunnelClient::Start(std::wstring* error_msg) {
     Stop();
     stop_requested_ = false;
+    peer_route_debug_log_tick_.clear();
+    wintun_target_debug_log_tick_.clear();
+    payload_ip_debug_log_tick_.clear();
+    peer_probe_send_tick_.clear();
+    peer_udp_port_owners_.clear();
+    {
+        std::lock_guard<std::mutex> lock(wintun_write_mutex_);
+        wintun_write_queue_.clear();
+    }
     if (peer_link_manager_ != NULL) {
         peer_link_manager_->SetLocalVirtualIp(virtual_ip_);
     }
@@ -2020,9 +2030,17 @@ void PacketTunnelClient::Stop() {
         closesocket(sock_);
         sock_ = INVALID_SOCKET;
     }
+    {
+        std::lock_guard<std::mutex> lock(wintun_write_mutex_);
+        wintun_write_queue_.clear();
+    }
+    wintun_write_cv_.notify_all();
 
     if (socket_read_thread_.joinable()) {
         socket_read_thread_.join();
+    }
+    if (wintun_write_thread_.joinable()) {
+        wintun_write_thread_.join();
     }
     if (wintun_read_thread_.joinable()) {
         wintun_read_thread_.join();
@@ -2030,6 +2048,8 @@ void PacketTunnelClient::Stop() {
     if (heartbeat_thread_.joinable()) {
         heartbeat_thread_.join();
     }
+    peer_probe_send_tick_.clear();
+    peer_udp_port_owners_.clear();
 
     PacketTunnelDebugLog("packet tunnel stopped");
 }
@@ -2344,8 +2364,102 @@ bool PacketTunnelClient::StartThreads(std::wstring* error_msg) {
     }
 
     socket_read_thread_ = std::thread(&PacketTunnelClient::SocketReadLoop, this);
+    wintun_write_thread_ = std::thread(&PacketTunnelClient::WintunWriteLoop, this);
     wintun_read_thread_ = std::thread(&PacketTunnelClient::WintunReadLoop, this);
     heartbeat_thread_ = std::thread(&PacketTunnelClient::HeartbeatLoop, this);
+    return true;
+}
+
+void PacketTunnelClient::WintunWriteLoop() {
+    while (true) {
+        QueuedWintunPacket queued_packet;
+        {
+            std::unique_lock<std::mutex> lock(wintun_write_mutex_);
+            wintun_write_cv_.wait(lock, [this]() {
+                return stop_requested_ || !wintun_write_queue_.empty();
+            });
+            if (wintun_write_queue_.empty()) {
+                if (stop_requested_) {
+                    break;
+                }
+                continue;
+            }
+            queued_packet = std::move(wintun_write_queue_.front());
+            wintun_write_queue_.pop_front();
+        }
+
+        if (!wintun_manager_ || queued_packet.payload.empty()) {
+            if (stop_requested_) {
+                break;
+            }
+            continue;
+        }
+
+        const unsigned long long queue_wait_elapsed =
+            GetTickCount64() - queued_packet.enqueue_tick_ms;
+        std::wstring wintun_write_error;
+        const unsigned long long wintun_write_start = GetTickCount64();
+        const bool wintun_write_ok =
+            wintun_manager_->WritePacket(queued_packet.payload.data(),
+                                         queued_packet.payload.size(),
+                                         &wintun_write_error);
+        const unsigned long long wintun_write_elapsed =
+            GetTickCount64() - wintun_write_start;
+        const unsigned long long total_elapsed =
+            GetTickCount64() - queued_packet.enqueue_tick_ms;
+        if (!wintun_write_ok ||
+            queue_wait_elapsed >= kSlowWintunQueueWarnMs ||
+            wintun_write_elapsed >= kSlowWintunWriteWarnMs ||
+            total_elapsed >= kSlowPacketProcessWarnMs) {
+            PacketTunnelWarnLog(std::string("slow/failed queued tunnel->wintun write queue_ms=") +
+                                std::to_string(queue_wait_elapsed) +
+                                " write_ms=" + std::to_string(wintun_write_elapsed) +
+                                " total_ms=" + std::to_string(total_elapsed) +
+                                " dir=" +
+                                (queued_packet.from_known_peer ? "peer->wintun" : "tunnel->wintun") +
+                                " src=" + queued_packet.inner_src_virtual_ip + ":" +
+                                std::to_string(queued_packet.inner_src_port) +
+                                " dst=" + queued_packet.inner_dst_virtual_ip + ":" +
+                                std::to_string(queued_packet.inner_dst_port) +
+                                " len=" + std::to_string(queued_packet.payload.size()) +
+                                (wintun_write_ok ? "" : (" error=" + WideToUtf8(wintun_write_error))));
+        }
+        if (!wintun_write_ok) {
+            connected_ = false;
+            stop_requested_ = true;
+            break;
+        }
+    }
+}
+
+bool PacketTunnelClient::EnqueueWintunPacket(const uint8_t* payload,
+                                             size_t payload_len,
+                                             bool from_known_peer,
+                                             const std::string& inner_src_virtual_ip,
+                                             uint16_t inner_src_port,
+                                             const std::string& inner_dst_virtual_ip,
+                                             uint16_t inner_dst_port) {
+    if (payload == NULL || payload_len == 0 || stop_requested_) {
+        return false;
+    }
+
+    QueuedWintunPacket queued_packet;
+    queued_packet.payload.assign(payload, payload + payload_len);
+    queued_packet.from_known_peer = from_known_peer;
+    queued_packet.inner_src_virtual_ip = inner_src_virtual_ip;
+    queued_packet.inner_src_port = inner_src_port;
+    queued_packet.inner_dst_virtual_ip = inner_dst_virtual_ip;
+    queued_packet.inner_dst_port = inner_dst_port;
+    queued_packet.enqueue_tick_ms = GetTickCount64();
+
+    {
+        std::lock_guard<std::mutex> lock(wintun_write_mutex_);
+        if (stop_requested_) {
+            return false;
+        }
+        wintun_write_queue_.push_back(std::move(queued_packet));
+    }
+    wintun_write_cv_.notify_one();
     return true;
 }
 
@@ -2389,7 +2503,6 @@ void PacketTunnelClient::SocketReadLoop() {
         std::string learned_direct_reason;
         auto has_fresh_direct_route = [this](const std::string& candidate_peer_virtual_ip) -> bool {
             if (candidate_peer_virtual_ip.empty() ||
-                IsServerVirtualPeer(candidate_peer_virtual_ip) ||
                 peer_link_manager_ == NULL) {
                 return false;
             }
@@ -2631,20 +2744,23 @@ void PacketTunnelClient::SocketReadLoop() {
                                           payload,
                                           payload_len);
             }
-            std::wstring wintun_write_error;
-            const unsigned long long wintun_write_start = GetTickCount64();
-            const bool wintun_write_ok =
-                wintun_manager_->WritePacket(payload, payload_len, &wintun_write_error);
-            const unsigned long long wintun_write_elapsed =
-                GetTickCount64() - wintun_write_start;
-            if (!wintun_write_ok || wintun_write_elapsed >= kSlowWintunWriteWarnMs) {
-                PacketTunnelWarnLog(std::string("slow/failed tunnel->wintun write elapsed_ms=") +
-                                    std::to_string(wintun_write_elapsed) +
-                                    " dir=" + (from_known_peer ? "peer->wintun" : "tunnel->wintun") +
-                                    " src=" + inner_src_virtual_ip + ":" + std::to_string(inner_src_port) +
-                                    " dst=" + inner_dst_virtual_ip + ":" + std::to_string(inner_dst_port) +
-                                    " len=" + std::to_string(payload_len) +
-                                    (wintun_write_ok ? "" : (" error=" + WideToUtf8(wintun_write_error))));
+            if (!EnqueueWintunPacket(payload,
+                                     payload_len,
+                                     from_known_peer,
+                                     inner_src_virtual_ip,
+                                     inner_src_port,
+                                     inner_dst_virtual_ip,
+                                     inner_dst_port)) {
+                if (!stop_requested_) {
+                    PacketTunnelWarnLog(std::string("failed tunnel->wintun enqueue dir=") +
+                                        (from_known_peer ? "peer->wintun" : "tunnel->wintun") +
+                                        " src=" + inner_src_virtual_ip + ":" +
+                                        std::to_string(inner_src_port) +
+                                        " dst=" + inner_dst_virtual_ip + ":" +
+                                        std::to_string(inner_dst_port) +
+                                        " len=" + std::to_string(payload_len));
+                }
+                break;
             }
             const unsigned long long frame_process_elapsed =
                 GetTickCount64() - frame_process_start;
@@ -3038,7 +3154,7 @@ void PacketTunnelClient::HeartbeatLoop() {
                 last_peer_snapshot_log_tick = now_tick;
             }
             for (size_t i = 0; i < peers.size(); ++i) {
-                if (!peers[i].direct_ready || peers[i].endpoint_version == 0) {
+                if (!peers[i].active_direct || peers[i].endpoint_version == 0) {
                     continue;
                 }
                 const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
@@ -3335,13 +3451,6 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             }
             return true;
         }
-        if (IsServerVirtualPeer(offer.peer_virtual_ip)) {
-            PacketTunnelDebugLog("peer control ignore server_virtual_ip peer_offer: peer=" +
-                                 offer.peer_virtual_ip +
-                                 " endpoint=" + offer.endpoint);
-            return true;
-        }
-
         bool should_send_hello = true;
         if (peer_link_manager_ != NULL) {
             should_send_hello = peer_link_manager_->UpdatePeerOffer(offer.peer_virtual_ip,
@@ -3401,15 +3510,6 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             }
             return true;
         }
-        if (IsServerVirtualPeer(signal.peer_virtual_ip)) {
-            PacketTunnelDebugLog("peer control ignore server_virtual_ip " +
-                                 PacketTunnelFrameName(frame_type) +
-                                 ": peer=" + signal.peer_virtual_ip +
-                                 " version=" + std::to_string(signal.endpoint_version) +
-                                 " nonce=" + std::to_string(signal.nonce));
-            return true;
-        }
-
         if (peer_link_manager_ != NULL) {
             if (frame_type == packet_tunnel::kFramePeerHello) {
                 peer_link_manager_->MarkPeerProbing(signal.peer_virtual_ip, signal.endpoint_version);
@@ -3463,13 +3563,6 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                                  " reason=" + std::to_string(disable.reason));
             return true;
         }
-        if (IsServerVirtualPeer(disable.peer_virtual_ip)) {
-            PacketTunnelDebugLog("peer control ignore server_virtual_ip peer_disable: peer=" +
-                                 disable.peer_virtual_ip +
-                                 " version=" + std::to_string(disable.endpoint_version) +
-                                 " reason=" + std::to_string(disable.reason));
-            return true;
-        }
         if (peer_link_manager_ != NULL) {
             peer_link_manager_->MarkPeerCooldown(disable.peer_virtual_ip,
                                                  disable.endpoint_version);
@@ -3487,9 +3580,6 @@ bool PacketTunnelClient::SendPeerSignalFrame(uint8_t frame_type,
                                              const std::string& target_peer_virtual_ip,
                                              uint64_t endpoint_version,
                                              uint32_t nonce) {
-    if (IsServerVirtualPeer(target_peer_virtual_ip)) {
-        return false;
-    }
     uint32_t peer_virtual_ip_be = 0;
     if (!ParseIpv4StringToBe(target_peer_virtual_ip, &peer_virtual_ip_be)) {
         return false;
@@ -3505,9 +3595,6 @@ bool PacketTunnelClient::SendPeerSignalFrame(uint8_t frame_type,
 bool PacketTunnelClient::SendPeerDisableFrame(const std::string& target_peer_virtual_ip,
                                               uint64_t endpoint_version,
                                               uint8_t reason) {
-    if (IsServerVirtualPeer(target_peer_virtual_ip)) {
-        return false;
-    }
     uint32_t peer_virtual_ip_be = 0;
     if (!ParseIpv4StringToBe(target_peer_virtual_ip, &peer_virtual_ip_be)) {
         return false;
@@ -3524,8 +3611,7 @@ bool PacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtual_ip
                                               UdpEndpoint* endpoint,
                                               bool* direct_path_fresh,
                                               bool* active_direct) const {
-    if (endpoint == NULL || peer_link_manager_ == NULL ||
-        IsServerVirtualPeer(peer_virtual_ip)) {
+    if (endpoint == NULL || peer_link_manager_ == NULL) {
         return false;
     }
 
@@ -3606,10 +3692,6 @@ bool PacketTunnelClient::TryResolvePeerBySource(const sockaddr_storage& source_a
                                                   &route)) {
         return false;
     }
-    if (IsServerVirtualPeer(route.peer_virtual_ip)) {
-        return false;
-    }
-
     if (peer_virtual_ip != NULL) {
         *peer_virtual_ip = route.peer_virtual_ip;
     }

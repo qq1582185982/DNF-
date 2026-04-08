@@ -107,6 +107,15 @@ uint64_t PeerCoord::GetEndpointVersion(const std::string& peer_virtual_ip) const
     return it->second.endpoint_version;
 }
 
+PeerEndpointState PeerCoord::GetState(const std::string& peer_virtual_ip) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::map<std::string, Entry>::const_iterator it = peers_.find(peer_virtual_ip);
+    if (it == peers_.end()) {
+        return PeerEndpointState::Unknown;
+    }
+    return it->second.state;
+}
+
 std::vector<PeerCoordStatus> PeerCoord::Snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<PeerCoordStatus> snapshot;

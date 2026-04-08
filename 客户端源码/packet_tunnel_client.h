@@ -9,9 +9,13 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
+#include <deque>
 #include <map>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 class PeerLinkManager;
 class WintunManager;
@@ -51,11 +55,29 @@ private:
         }
     };
 
+    struct QueuedWintunPacket {
+        std::vector<uint8_t> payload;
+        bool from_known_peer;
+        std::string inner_src_virtual_ip;
+        std::string inner_dst_virtual_ip;
+        uint16_t inner_src_port;
+        uint16_t inner_dst_port;
+        unsigned long long enqueue_tick_ms;
+
+        QueuedWintunPacket()
+            : from_known_peer(false),
+              inner_src_port(0),
+              inner_dst_port(0),
+              enqueue_tick_ms(0) {
+        }
+    };
+
     bool ConnectSocket(std::wstring* error_msg);
     bool SendHandshake(std::wstring* error_msg);
     bool ReceiveHandshakeAck(std::wstring* error_msg);
     bool StartThreads(std::wstring* error_msg);
     void SocketReadLoop();
+    void WintunWriteLoop();
     void WintunReadLoop();
     void HeartbeatLoop();
     bool HandlePeerControlFrame(uint8_t frame_type, const uint8_t* payload, size_t length);
@@ -81,6 +103,13 @@ private:
                           int source_addr_len) const;
     bool IsServerVirtualPeer(const std::string& peer_virtual_ip) const;
     void LearnPeerUdpPortOwner(const std::string& peer_virtual_ip, uint16_t src_port);
+    bool EnqueueWintunPacket(const uint8_t* payload,
+                             size_t payload_len,
+                             bool from_known_peer,
+                             const std::string& inner_src_virtual_ip,
+                             uint16_t inner_src_port,
+                             const std::string& inner_dst_virtual_ip,
+                             uint16_t inner_dst_port);
     bool SendFrameToEndpoint(const UdpEndpoint& endpoint,
                              uint8_t frame_type,
                              const uint8_t* data,
@@ -129,9 +158,13 @@ private:
     std::atomic<unsigned long long> last_receive_tick_;
     std::atomic<unsigned long long> last_network_activity_tick_;
     std::thread socket_read_thread_;
+    std::thread wintun_write_thread_;
     std::thread wintun_read_thread_;
     std::thread heartbeat_thread_;
     CRITICAL_SECTION send_lock_;
+    std::mutex wintun_write_mutex_;
+    std::condition_variable wintun_write_cv_;
+    std::deque<QueuedWintunPacket> wintun_write_queue_;
     PeerLinkManager* peer_link_manager_;
     std::atomic<uint32_t> peer_signal_nonce_;
     std::map<std::string, unsigned long long> peer_route_debug_log_tick_;

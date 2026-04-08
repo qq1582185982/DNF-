@@ -1911,6 +1911,25 @@ private:
             return false;
         }
 
+        if (is_udp_payload &&
+            sender_session->allow_peer_direct &&
+            target_session->allow_peer_direct &&
+            (is_known_game_udp_port(src_port) || is_known_game_udp_port(dst_port))) {
+            const string sender_scope_key =
+                build_scoped_virtual_ip_key(sender_session->server_key, src_ip_be);
+            const string target_scope_key =
+                build_scoped_virtual_ip_key(target_session->server_key, dst_ip_be);
+            if (peer_coord_.GetState(sender_scope_key) == PeerEndpointState::Active &&
+                peer_coord_.GetState(target_scope_key) == PeerEndpointState::Active) {
+                Logger::debug("[IP Tunnel|" + sender_session->session_uuid +
+                              "] bypass relay peer UDP src=" +
+                              ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
+                              " dst=" + ipv4_be_to_string(dst_ip_be) + ":" + to_string(dst_port) +
+                              " reason=peer_direct_active");
+                return true;
+            }
+        }
+
         if (is_udp_payload) {
             maybe_log_virtual_peer_udp_relay(sender_session,
                                              target_session,
@@ -2282,13 +2301,13 @@ private:
         }
 
         if (frame_type == packet_tunnel::kFramePeerKeepalive) {
-            peer_coord_.TouchPeer(sender_scope_key, sender_version);
+            peer_coord_.ObservePeerFrame(sender_scope_key,
+                                         sender_version,
+                                         PeerEndpointState::Active);
         } else {
             peer_coord_.ObservePeerFrame(sender_scope_key,
                                          sender_version,
-                                         frame_type == packet_tunnel::kFramePeerAck
-                                             ? PeerEndpointState::Active
-                                             : PeerEndpointState::OfferPending);
+                                         PeerEndpointState::OfferPending);
         }
 
         Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] relay " +
@@ -3037,9 +3056,7 @@ private:
                     peer_coord_.ObservePeerFrame(build_scoped_virtual_ip_key(session->server_key,
                                                                               signal.peer_virtual_ip_be),
                                                  signal.endpoint_version,
-                                                 frame_type == packet_tunnel::kFramePeerAck
-                                                     ? PeerEndpointState::Active
-                                                     : PeerEndpointState::OfferPending);
+                                                 PeerEndpointState::OfferPending);
                 }
                 Logger::debug("[IP Tunnel|" + session->session_uuid + "] peer control " +
                               packet_tunnel_frame_name(frame_type) +
@@ -3484,9 +3501,7 @@ private:
                         peer_coord_.ObservePeerFrame(build_scoped_virtual_ip_key(session->server_key,
                                                                                   signal.peer_virtual_ip_be),
                                                      signal.endpoint_version,
-                                                     frame_type == packet_tunnel::kFramePeerAck
-                                                         ? PeerEndpointState::Active
-                                                         : PeerEndpointState::OfferPending);
+                                                     PeerEndpointState::OfferPending);
                     }
                     Logger::debug("[IP Tunnel|" + session_uuid + "] peer control " +
                                   packet_tunnel_frame_name(frame_type) +

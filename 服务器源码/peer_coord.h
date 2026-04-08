@@ -37,6 +37,7 @@ public:
                                                   uint64_t offer_timeout_ms,
                                                   uint64_t active_timeout_ms);
     uint64_t GetEndpointVersion(const std::string& peer_virtual_ip) const;
+    PeerEndpointState GetState(const std::string& peer_virtual_ip) const;
     std::vector<PeerCoordStatus> Snapshot() const;
 
 private:
