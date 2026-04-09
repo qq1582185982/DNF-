@@ -72,6 +72,50 @@ private:
         }
     };
 
+    struct WatchedTcpFlowTrace {
+        std::string client_ip;
+        std::string server_ip;
+        uint16_t client_port;
+        uint16_t server_port;
+        unsigned long long created_ms;
+        unsigned long long last_seen_ms;
+        unsigned long long syn_ms;
+        unsigned long long synack_ms;
+        unsigned long long established_ms;
+        unsigned long long first_client_payload_ms;
+        unsigned long long first_server_payload_ms;
+        unsigned long long last_client_payload_ms;
+        unsigned long long last_server_payload_ms;
+        unsigned long long last_client_ack_only_ms;
+        unsigned long long pending_request_ms;
+        unsigned long long pending_server_enqueue_ms;
+        unsigned long long closed_ms;
+        size_t client_payload_count;
+        size_t server_payload_count;
+        bool close_logged;
+
+        WatchedTcpFlowTrace()
+            : client_port(0),
+              server_port(0),
+              created_ms(0),
+              last_seen_ms(0),
+              syn_ms(0),
+              synack_ms(0),
+              established_ms(0),
+              first_client_payload_ms(0),
+              first_server_payload_ms(0),
+              last_client_payload_ms(0),
+              last_server_payload_ms(0),
+              last_client_ack_only_ms(0),
+              pending_request_ms(0),
+              pending_server_enqueue_ms(0),
+              closed_ms(0),
+              client_payload_count(0),
+              server_payload_count(0),
+              close_logged(false) {
+        }
+    };
+
     bool ConnectSocket(std::wstring* error_msg);
     bool SendHandshake(std::wstring* error_msg);
     bool ReceiveHandshakeAck(std::wstring* error_msg);
@@ -140,6 +184,13 @@ private:
     void MaybeLogUdpPayloadIpHints(const std::string& direction,
                                    const uint8_t* packet,
                                    size_t packet_len);
+    void PruneWatchedTcpFlows(unsigned long long now_tick);
+    void MarkWatchedTcpEnqueue(const uint8_t* packet,
+                               size_t packet_len,
+                               const char* origin);
+    void TraceWatchedTcpPacket(const uint8_t* packet,
+                               size_t packet_len,
+                               const char* path);
     void MarkNetworkActivity();
 
     std::string tunnel_server_ip_;
@@ -165,11 +216,13 @@ private:
     std::mutex wintun_write_mutex_;
     std::condition_variable wintun_write_cv_;
     std::deque<QueuedWintunPacket> wintun_write_queue_;
+    std::mutex watched_tcp_mutex_;
     PeerLinkManager* peer_link_manager_;
     std::atomic<uint32_t> peer_signal_nonce_;
     std::map<std::string, unsigned long long> peer_route_debug_log_tick_;
     std::map<std::string, unsigned long long> wintun_target_debug_log_tick_;
     std::map<std::string, unsigned long long> payload_ip_debug_log_tick_;
+    std::map<std::string, WatchedTcpFlowTrace> watched_tcp_flows_;
     std::map<std::string, unsigned long long> peer_probe_send_tick_;
     std::map<uint16_t, PeerUdpPortOwner> peer_udp_port_owners_;
     bool peer_direct_allowed_;

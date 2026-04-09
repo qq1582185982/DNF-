@@ -60,6 +60,9 @@ const unsigned long long kSlowSocketSendWarnMs = 10;
 const unsigned long long kSlowWintunWriteWarnMs = 10;
 const unsigned long long kSlowPacketProcessWarnMs = 20;
 const unsigned long long kSlowWintunQueueWarnMs = 10;
+const unsigned long long kWatchedTcpFlowIdleCleanupMs = 180000;
+const unsigned long long kWatchedTcpClosedRetentionMs = 10000;
+const unsigned long long kWatchedTcpServerWaitLogMs = 200;
 const size_t kPacketTunnelBatchMaxDatagramBytes = 1200;
 const size_t kPacketTunnelBatchMaxFrames = 8;
 const size_t kPacketTunnelBatchMaxTcpPayloadBytes = 320;
@@ -71,6 +74,7 @@ const uint8_t kPeerDirectProbeRequest = 1;
 const uint8_t kPeerDirectProbeResponse = 2;
 
 bool IsKnownGameUdpPort(uint16_t port);
+bool IsWatchedBusinessTcpPort(uint16_t port);
 
 std::string HexPrefix(const uint8_t* data, size_t length, size_t max_bytes) {
     if (data == NULL || length == 0 || max_bytes == 0) {
@@ -735,6 +739,35 @@ struct TcpPayloadVirtualIpHit {
     std::string context_hex;
 };
 
+struct WatchedTcpPacketInfo {
+    std::string flow_key;
+    std::string client_ip;
+    std::string server_ip;
+    uint16_t client_port;
+    uint16_t server_port;
+    uint8_t flags;
+    size_t payload_len;
+    bool from_client;
+    bool syn;
+    bool ack;
+    bool fin;
+    bool rst;
+    bool has_payload;
+
+    WatchedTcpPacketInfo()
+        : client_port(0),
+          server_port(0),
+          flags(0),
+          payload_len(0),
+          from_client(false),
+          syn(false),
+          ack(false),
+          fin(false),
+          rst(false),
+          has_payload(false) {
+    }
+};
+
 bool TryParseTcpPacket(const uint8_t* packet,
                        size_t packet_len,
                        size_t* out_ip_header_len,
@@ -768,6 +801,103 @@ bool TryParseTcpPacket(const uint8_t* packet,
     if (out_dst_port != NULL) {
         *out_dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
     }
+    return true;
+}
+
+std::string FormatWatchedTcpElapsed(unsigned long long start_ms, unsigned long long now_ms) {
+    if (start_ms == 0 || now_ms < start_ms) {
+        return "-";
+    }
+    return std::to_string(now_ms - start_ms);
+}
+
+std::string DescribeWatchedTcpFlags(uint8_t flags) {
+    std::vector<std::string> parts;
+    if ((flags & 0x10) != 0) {
+        parts.push_back("ACK");
+    }
+    if ((flags & 0x02) != 0) {
+        parts.push_back("SYN");
+    }
+    if ((flags & 0x01) != 0) {
+        parts.push_back("FIN");
+    }
+    if ((flags & 0x04) != 0) {
+        parts.push_back("RST");
+    }
+    if ((flags & 0x08) != 0) {
+        parts.push_back("PSH");
+    }
+    if ((flags & 0x20) != 0) {
+        parts.push_back("URG");
+    }
+    if (parts.empty()) {
+        parts.push_back("NONE");
+    }
+
+    std::ostringstream ss;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i != 0) {
+            ss << "|";
+        }
+        ss << parts[i];
+    }
+    return ss.str();
+}
+
+bool TryParseWatchedTcpPacket(const uint8_t* packet,
+                              size_t packet_len,
+                              const std::string& local_virtual_ip,
+                              WatchedTcpPacketInfo* out_info) {
+    if (out_info == NULL) {
+        return false;
+    }
+
+    size_t ip_header_len = 0;
+    size_t tcp_header_len = 0;
+    uint16_t src_port = 0;
+    uint16_t dst_port = 0;
+    if (!TryParseTcpPacket(packet,
+                           packet_len,
+                           &ip_header_len,
+                           &tcp_header_len,
+                           &src_port,
+                           &dst_port)) {
+        return false;
+    }
+
+    if (!IsWatchedBusinessTcpPort(src_port) && !IsWatchedBusinessTcpPort(dst_port)) {
+        return false;
+    }
+
+    const uint16_t total_len = ntohs(*(const uint16_t*)(packet + 2));
+    if (total_len < ip_header_len + tcp_header_len || packet_len < total_len) {
+        return false;
+    }
+
+    const std::string src_ip = Ipv4ToString(packet + 12);
+    const std::string dst_ip = Ipv4ToString(packet + 16);
+    if (src_ip != local_virtual_ip && dst_ip != local_virtual_ip) {
+        return false;
+    }
+
+    const bool from_client = src_ip == local_virtual_ip;
+    out_info->client_ip = from_client ? src_ip : dst_ip;
+    out_info->server_ip = from_client ? dst_ip : src_ip;
+    out_info->client_port = from_client ? src_port : dst_port;
+    out_info->server_port = from_client ? dst_port : src_port;
+    out_info->flow_key = out_info->client_ip + ":" + std::to_string(out_info->client_port) +
+                         ">" + out_info->server_ip + ":" + std::to_string(out_info->server_port);
+    out_info->from_client = from_client;
+
+    const size_t tcp_header_offset = ip_header_len;
+    out_info->flags = packet[tcp_header_offset + 13];
+    out_info->syn = (out_info->flags & 0x02) != 0;
+    out_info->ack = (out_info->flags & 0x10) != 0;
+    out_info->fin = (out_info->flags & 0x01) != 0;
+    out_info->rst = (out_info->flags & 0x04) != 0;
+    out_info->payload_len = total_len - ip_header_len - tcp_header_len;
+    out_info->has_payload = out_info->payload_len != 0;
     return true;
 }
 
@@ -2479,6 +2609,207 @@ bool PacketTunnelClient::StartThreads(std::wstring* error_msg) {
     return true;
 }
 
+void PacketTunnelClient::PruneWatchedTcpFlows(unsigned long long now_tick) {
+    for (std::map<std::string, WatchedTcpFlowTrace>::iterator it = watched_tcp_flows_.begin();
+         it != watched_tcp_flows_.end();) {
+        const WatchedTcpFlowTrace& trace = it->second;
+        const bool closed_expired =
+            trace.close_logged &&
+            now_tick >= trace.closed_ms &&
+            (now_tick - trace.closed_ms) > kWatchedTcpClosedRetentionMs;
+        const bool idle_expired =
+            trace.last_seen_ms != 0 &&
+            now_tick >= trace.last_seen_ms &&
+            (now_tick - trace.last_seen_ms) > kWatchedTcpFlowIdleCleanupMs;
+        if (closed_expired || idle_expired) {
+            it = watched_tcp_flows_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void PacketTunnelClient::MarkWatchedTcpEnqueue(const uint8_t* packet,
+                                               size_t packet_len,
+                                               const char* origin) {
+    WatchedTcpPacketInfo info;
+    if (!TryParseWatchedTcpPacket(packet, packet_len, virtual_ip_, &info) ||
+        info.from_client ||
+        !info.has_payload) {
+        return;
+    }
+
+    const unsigned long long tick = GetTickCount64();
+    std::lock_guard<std::mutex> lock(watched_tcp_mutex_);
+    PruneWatchedTcpFlows(tick);
+
+    std::map<std::string, WatchedTcpFlowTrace>::iterator it = watched_tcp_flows_.find(info.flow_key);
+    if (it == watched_tcp_flows_.end()) {
+        return;
+    }
+
+    WatchedTcpFlowTrace& trace = it->second;
+    trace.pending_server_enqueue_ms = tick;
+    if (trace.pending_request_ms == 0 || tick < trace.pending_request_ms) {
+        return;
+    }
+
+    const unsigned long long emit_wait = tick - trace.pending_request_ms;
+    if (emit_wait < kWatchedTcpServerWaitLogMs) {
+        return;
+    }
+
+    std::ostringstream flow_ss;
+    flow_ss << trace.client_ip << ":" << trace.client_port
+            << " -> " << trace.server_ip << ":" << trace.server_port;
+    PacketTunnelDebugLog("tcp service trace server_emit_wait flow=" + flow_ss.str() +
+                         " origin=" + ((origin != NULL) ? origin : "socket-recv") +
+                         " wait=" + std::to_string(emit_wait) + "ms" +
+                         " bytes=" + std::to_string(info.payload_len));
+}
+
+void PacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
+                                               size_t packet_len,
+                                               const char* path) {
+    WatchedTcpPacketInfo info;
+    if (!TryParseWatchedTcpPacket(packet, packet_len, virtual_ip_, &info)) {
+        return;
+    }
+
+    const unsigned long long tick = GetTickCount64();
+    std::lock_guard<std::mutex> lock(watched_tcp_mutex_);
+    PruneWatchedTcpFlows(tick);
+
+    WatchedTcpFlowTrace& trace = watched_tcp_flows_[info.flow_key];
+    if (trace.created_ms == 0 || (trace.close_logged && info.from_client && info.syn && !info.ack)) {
+        trace = WatchedTcpFlowTrace();
+        trace.client_ip = info.client_ip;
+        trace.server_ip = info.server_ip;
+        trace.client_port = info.client_port;
+        trace.server_port = info.server_port;
+        trace.created_ms = tick;
+    }
+    trace.last_seen_ms = tick;
+
+    const std::string origin = (path != NULL) ? path : "?";
+    std::ostringstream flow_ss;
+    flow_ss << trace.client_ip << ":" << trace.client_port
+            << " -> " << trace.server_ip << ":" << trace.server_port;
+    const std::string flow = flow_ss.str();
+
+    if (info.from_client && info.syn && !info.ack && trace.syn_ms == 0) {
+        trace.syn_ms = tick;
+        PacketTunnelDebugLog("tcp service trace syn flow=" + flow +
+                             " origin=" + origin +
+                             " port=" + std::to_string(trace.server_port));
+    }
+
+    if (!info.from_client && info.syn && info.ack && trace.synack_ms == 0) {
+        trace.synack_ms = tick;
+        PacketTunnelDebugLog("tcp service trace synack flow=" + flow +
+                             " origin=" + origin +
+                             " since_syn=" + FormatWatchedTcpElapsed(trace.syn_ms, tick) + "ms");
+    }
+
+    if (info.from_client &&
+        info.ack &&
+        !info.syn &&
+        !info.fin &&
+        !info.rst &&
+        !info.has_payload &&
+        trace.synack_ms != 0 &&
+        trace.established_ms == 0) {
+        trace.established_ms = tick;
+        PacketTunnelDebugLog("tcp service trace established flow=" + flow +
+                             " origin=" + origin +
+                             " since_syn=" + FormatWatchedTcpElapsed(trace.syn_ms, tick) + "ms" +
+                             " since_synack=" + FormatWatchedTcpElapsed(trace.synack_ms, tick) + "ms");
+    }
+
+    if (info.from_client &&
+        info.ack &&
+        !info.syn &&
+        !info.fin &&
+        !info.rst &&
+        !info.has_payload) {
+        if (trace.last_server_payload_ms != 0 &&
+            trace.last_client_ack_only_ms < trace.last_server_payload_ms &&
+            tick >= trace.last_server_payload_ms) {
+            const unsigned long long ack_delay = tick - trace.last_server_payload_ms;
+            if (ack_delay >= 80) {
+                PacketTunnelDebugLog("tcp service trace client_ack_delay flow=" + flow +
+                                     " origin=" + origin +
+                                     " delay=" + std::to_string(ack_delay) + "ms");
+            }
+        }
+        trace.last_client_ack_only_ms = tick;
+    }
+
+    if (info.has_payload) {
+        if (info.from_client) {
+            ++trace.client_payload_count;
+            trace.last_client_payload_ms = tick;
+            trace.pending_request_ms = tick;
+            if (trace.first_client_payload_ms == 0) {
+                trace.first_client_payload_ms = tick;
+                PacketTunnelDebugLog("tcp service trace first_client_payload flow=" + flow +
+                                     " origin=" + origin +
+                                     " bytes=" + std::to_string(info.payload_len) +
+                                     " since_syn=" + FormatWatchedTcpElapsed(trace.syn_ms, tick) + "ms" +
+                                     " since_established=" +
+                                     FormatWatchedTcpElapsed(trace.established_ms, tick) + "ms");
+            }
+        } else {
+            ++trace.server_payload_count;
+            if (trace.pending_server_enqueue_ms != 0 &&
+                tick >= trace.pending_server_enqueue_ms) {
+                const unsigned long long queue_lag = tick - trace.pending_server_enqueue_ms;
+                if (queue_lag >= 20) {
+                    PacketTunnelDebugLog("tcp service trace server_send_lag flow=" + flow +
+                                         " origin=" + origin +
+                                         " lag=" + std::to_string(queue_lag) + "ms" +
+                                         " bytes=" + std::to_string(info.payload_len));
+                }
+                trace.pending_server_enqueue_ms = 0;
+            }
+            if (trace.first_server_payload_ms == 0) {
+                trace.first_server_payload_ms = tick;
+                PacketTunnelDebugLog("tcp service trace first_server_payload flow=" + flow +
+                                     " origin=" + origin +
+                                     " bytes=" + std::to_string(info.payload_len) +
+                                     " since_syn=" + FormatWatchedTcpElapsed(trace.syn_ms, tick) + "ms" +
+                                     " since_client_payload=" +
+                                     FormatWatchedTcpElapsed(trace.first_client_payload_ms, tick) + "ms");
+            } else if (trace.pending_request_ms != 0 &&
+                       tick >= trace.pending_request_ms &&
+                       (tick - trace.pending_request_ms) >= kWatchedTcpServerWaitLogMs) {
+                PacketTunnelDebugLog("tcp service trace server_reply_wait flow=" + flow +
+                                     " origin=" + origin +
+                                     " wait=" + std::to_string(tick - trace.pending_request_ms) + "ms" +
+                                     " bytes=" + std::to_string(info.payload_len));
+            }
+            trace.last_server_payload_ms = tick;
+            trace.pending_request_ms = 0;
+        }
+    }
+
+    if ((info.fin || info.rst) && !trace.close_logged) {
+        trace.close_logged = true;
+        trace.closed_ms = tick;
+        std::ostringstream close_ss;
+        close_ss << "tcp service trace close flow=" << flow
+                 << " origin=" << origin
+                 << " flags=" << DescribeWatchedTcpFlags(info.flags)
+                 << " lifetime=" << FormatWatchedTcpElapsed(trace.created_ms, tick) << "ms"
+                 << " client_payloads=" << trace.client_payload_count
+                 << " server_payloads=" << trace.server_payload_count;
+        if (trace.pending_request_ms != 0 && tick >= trace.pending_request_ms) {
+            close_ss << " pending_wait=" << (tick - trace.pending_request_ms) << "ms";
+        }
+        PacketTunnelDebugLog(close_ss.str());
+    }
+}
+
 void PacketTunnelClient::WintunWriteLoop() {
     while (true) {
         QueuedWintunPacket queued_packet;
@@ -2537,6 +2868,12 @@ void PacketTunnelClient::WintunWriteLoop() {
             connected_ = false;
             stop_requested_ = true;
             break;
+        }
+        if (PacketTunnelDebugEnabled()) {
+            TraceWatchedTcpPacket(queued_packet.payload.data(),
+                                  queued_packet.payload.size(),
+                                  queued_packet.from_known_peer ? "peer->wintun"
+                                                                : "tunnel->wintun");
         }
     }
 }
@@ -2868,6 +3205,9 @@ void PacketTunnelClient::SocketReadLoop() {
                 MaybeLogUdpPayloadIpHints(from_known_peer ? "peer->wintun" : "tunnel->wintun",
                                           payload,
                                           payload_len);
+                MarkWatchedTcpEnqueue(payload,
+                                      payload_len,
+                                      from_known_peer ? "peer-recv" : "tunnel-recv");
             }
             if (!EnqueueWintunPacket(payload,
                                      payload_len,
@@ -3102,6 +3442,9 @@ void PacketTunnelClient::WintunReadLoop() {
                                                     " len=" + std::to_string(direct_packet_view->size()));
                             }
                             if (debug_enabled) {
+                                TraceWatchedTcpPacket(direct_packet_view->data(),
+                                                      direct_packet_view->size(),
+                                                      "wintun->peer");
                                 PT_DEBUG(inner_proto_name + " wintun->peer " + direct_route_desc);
                             }
                             continue;
@@ -3294,6 +3637,9 @@ void PacketTunnelClient::WintunReadLoop() {
                 PT_DEBUG("wintun read loop send failed");
             }
             break;
+        }
+        if (debug_enabled) {
+            TraceWatchedTcpPacket(packet.data(), packet.size(), "wintun->tunnel");
         }
         const unsigned long long frame_process_elapsed = GetTickCount64() - frame_process_start;
         if (frame_process_elapsed >= kSlowPacketProcessWarnMs) {
