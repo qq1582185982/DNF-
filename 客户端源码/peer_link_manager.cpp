@@ -154,10 +154,12 @@ bool PeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
     std::lock_guard<std::mutex> lock(mutex_);
     Entry& entry = peers_[peer_virtual_ip];
     const uint64_t now = peer_now_ms();
+    const uint64_t previous_version = entry.endpoint_version;
     uint8_t normalized_addr[16] = {};
     if (endpoint_addr != NULL) {
         memcpy(normalized_addr, endpoint_addr, sizeof(normalized_addr));
     }
+    const bool newer_version = (previous_version != 0 && endpoint_version > previous_version);
 
     const bool same_endpoint =
         entry.endpoint_family == endpoint_family &&
@@ -204,7 +206,8 @@ bool PeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
     memcpy(entry.endpoint_addr, normalized_addr, sizeof(entry.endpoint_addr));
 
     if (entry.state == PeerRouteState::Cooldown &&
-        entry.retry_after_ms != 0 && now < entry.retry_after_ms) {
+        entry.retry_after_ms != 0 && now < entry.retry_after_ms &&
+        !newer_version) {
         return false;
     }
 
@@ -409,7 +412,16 @@ void PeerLinkManager::MarkPeerProbing(const std::string& peer_virtual_ip, uint64
     entry.last_observed_ms = now;
 
     if (entry.state == PeerRouteState::Cooldown &&
-        entry.retry_after_ms != 0 && now < entry.retry_after_ms) {
+        entry.retry_after_ms != 0 && now < entry.retry_after_ms &&
+        endpoint_version <= previous_version) {
+        return;
+    }
+
+    if (entry.state == PeerRouteState::Cooldown &&
+        endpoint_version > previous_version) {
+        ResetDirectAssessment(&entry);
+        entry.retry_after_ms = 0;
+        EnterState(&entry, PeerRouteState::Probing, now);
         return;
     }
 
