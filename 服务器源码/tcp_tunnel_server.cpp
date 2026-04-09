@@ -1626,15 +1626,6 @@ private:
                         continue;
                     }
                     ++candidate_count;
-                    if (candidate_count == 1) {
-                        selected_session = candidate;
-                    } else {
-                        selected_session.reset();
-                    }
-                }
-
-                if (selected_session && candidate_count == 1) {
-                    resolution = "single_candidate";
                 }
             }
         }
@@ -1682,14 +1673,26 @@ private:
                                                  dst_port,
                                                  &target_session,
                                                  &resolution)) {
-            return false;
+            Logger::info("[IP Tunnel|" + sender_session->session_uuid +
+                         "] drop unresolved gateway UDP src=" +
+                         ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
+                         " dst=" + ipv4_be_to_string(original_dst_ip_be) + ":" +
+                         to_string(dst_port) + " resolver=" + resolution +
+                         " len=" + to_string(payload_len));
+            return true;
         }
 
         vector<uint8_t> rewritten_packet(payload, payload + payload_len);
         if (!rewrite_client_bound_udp_destination_ip(&rewritten_packet,
                                                      original_dst_ip_be,
                                                      target_session->virtual_ip_be)) {
-            return false;
+            Logger::warning("[IP Tunnel|" + sender_session->session_uuid +
+                            "] drop gateway UDP because destination rewrite failed src=" +
+                            ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
+                            " dst=" + ipv4_be_to_string(original_dst_ip_be) + ":" +
+                            to_string(dst_port) + " peer=" +
+                            describe_scoped_virtual_ip(target_session));
+            return true;
         }
 
         Logger::info("[IP Tunnel|" + sender_session->session_uuid + "] relay gateway UDP src=" +
@@ -1712,7 +1715,7 @@ private:
             if (!target_session->use_udp && target_session->client_fd >= 0) {
                 shutdown(target_session->client_fd, SHUT_RDWR);
             }
-            return false;
+            return true;
         }
 
         touch_packet_tunnel_session(target_session);

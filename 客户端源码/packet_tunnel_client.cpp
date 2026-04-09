@@ -4433,7 +4433,6 @@ bool PacketTunnelClient::TryResolveGatewayUdpPeerTarget(const std::string& dst_v
 
     std::string selected_peer_virtual_ip;
     std::string selected_resolution;
-    std::string single_candidate_peer_virtual_ip;
     size_t candidate_count = 0;
 
     for (size_t i = 0; i < peers.size(); ++i) {
@@ -4441,11 +4440,6 @@ bool PacketTunnelClient::TryResolveGatewayUdpPeerTarget(const std::string& dst_v
             continue;
         }
         ++candidate_count;
-        if (candidate_count == 1) {
-            single_candidate_peer_virtual_ip = peers[i].peer_virtual_ip;
-        } else {
-            single_candidate_peer_virtual_ip.clear();
-        }
     }
 
     std::map<uint16_t, PeerUdpPortOwner>::const_iterator owner_it =
@@ -4469,13 +4463,6 @@ bool PacketTunnelClient::TryResolveGatewayUdpPeerTarget(const std::string& dst_v
                 break;
             }
         }
-    }
-
-    if (selected_peer_virtual_ip.empty() &&
-        candidate_count == 1 &&
-        !single_candidate_peer_virtual_ip.empty()) {
-        selected_peer_virtual_ip = single_candidate_peer_virtual_ip;
-        selected_resolution = "single_candidate";
     }
 
     if (selected_peer_virtual_ip.empty()) {
