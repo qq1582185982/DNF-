@@ -55,6 +55,9 @@ const DWORD kSocketSendRetryDelayMs = 5;
 const DWORD kPhysicalDnsQueryTimeoutMs = 1500;
 const DWORD kWintunReadWaitMs = 500;
 const DWORD kGatewayUdpPortOwnerTtlMs = 60000;
+const DWORD kMirroredGatewayUdpSignatureTtlMs = 1000;
+const uint16_t kPeerToWintunPacedBusinessTcpPort = 10011;
+const unsigned int kPeerToWintunBusinessTcpPaceUs = 500;
 const int kSocketBufferBytes = 4 * 1024 * 1024;
 const unsigned long long kSlowSocketSendWarnMs = 10;
 const unsigned long long kSlowWintunWriteWarnMs = 10;
@@ -728,6 +731,99 @@ bool TryDescribeUdpPacket(const uint8_t* packet, size_t packet_len, std::string*
        << " len=" << packet_len;
     *out_desc = ss.str();
     return true;
+}
+
+bool IsMirrorEligibleUdpFlow(uint16_t src_port, uint16_t dst_port) {
+    return !IsKnownGameUdpPort(src_port) &&
+           !IsKnownGameUdpPort(dst_port) &&
+           !IsReservedPeerDirectPort(src_port) &&
+           !IsReservedPeerDirectPort(dst_port);
+}
+
+uint32_t HashBytesFnv1a32(const uint8_t* data, size_t length) {
+    const uint32_t kFnvOffset = 2166136261u;
+    const uint32_t kFnvPrime = 16777619u;
+    uint32_t hash = kFnvOffset;
+    for (size_t i = 0; i < length; ++i) {
+        hash ^= data[i];
+        hash *= kFnvPrime;
+    }
+    return hash;
+}
+
+std::string BuildMirroredGatewayUdpSignature(const uint8_t* packet, size_t packet_len) {
+    if (packet == NULL || packet_len < 28 || ((packet[0] >> 4) & 0x0F) != 4 || packet[9] != IPPROTO_UDP) {
+        return std::string();
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 || packet_len < ip_header_len + 8) {
+        return std::string();
+    }
+
+    const uint16_t src_port = ntohs(*(const uint16_t*)(packet + ip_header_len));
+    const uint16_t dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
+    const uint8_t* udp_payload = packet + ip_header_len + 8;
+    const size_t udp_payload_len = packet_len - ip_header_len - 8;
+
+    std::ostringstream ss;
+    ss << Ipv4ToString(packet + 12) << ":" << src_port
+       << ">" << dst_port
+       << "/len=" << udp_payload_len
+       << "/hash=" << HashBytesFnv1a32(udp_payload, udp_payload_len);
+    return ss.str();
+}
+
+void BusyWaitMicroseconds(unsigned int microseconds) {
+    if (microseconds == 0) {
+        return;
+    }
+
+    LARGE_INTEGER frequency = {};
+    LARGE_INTEGER start = {};
+    if (!QueryPerformanceFrequency(&frequency) ||
+        frequency.QuadPart <= 0 ||
+        !QueryPerformanceCounter(&start)) {
+        return;
+    }
+
+    const LONGLONG target_ticks =
+        static_cast<LONGLONG>((static_cast<unsigned long long>(frequency.QuadPart) *
+                               static_cast<unsigned long long>(microseconds)) / 1000000ull);
+    if (target_ticks <= 0) {
+        return;
+    }
+
+    while (true) {
+        LARGE_INTEGER now = {};
+        if (!QueryPerformanceCounter(&now)) {
+            return;
+        }
+        if ((now.QuadPart - start.QuadPart) >= target_ticks) {
+            return;
+        }
+        YieldProcessor();
+    }
+}
+
+void PruneMirroredGatewayUdpSignatureTicks(std::map<std::string, unsigned long long>* ticks,
+                                           unsigned long long now_tick) {
+    if (ticks == NULL) {
+        return;
+    }
+
+    for (std::map<std::string, unsigned long long>::iterator it = ticks->begin();
+         it != ticks->end();) {
+        const bool expired =
+            now_tick < it->second ||
+            (now_tick - it->second) > kMirroredGatewayUdpSignatureTtlMs;
+        if (!expired) {
+            ++it;
+            continue;
+        }
+        std::map<std::string, unsigned long long>::iterator erase_it = it++;
+        ticks->erase(erase_it);
+    }
 }
 
 struct TcpPayloadVirtualIpHit {
@@ -2205,6 +2301,7 @@ bool PacketTunnelClient::Start(std::wstring* error_msg) {
     wintun_target_debug_log_tick_.clear();
     payload_ip_debug_log_tick_.clear();
     peer_probe_send_tick_.clear();
+    mirrored_gateway_udp_signature_tick_.clear();
     peer_udp_port_owners_.clear();
     {
         std::lock_guard<std::mutex> lock(wintun_write_mutex_);
@@ -2293,6 +2390,7 @@ void PacketTunnelClient::Stop() {
         heartbeat_thread_.join();
     }
     peer_probe_send_tick_.clear();
+    mirrored_gateway_udp_signature_tick_.clear();
     peer_udp_port_owners_.clear();
 
     PacketTunnelDebugLog("packet tunnel stopped");
@@ -2906,6 +3004,15 @@ void PacketTunnelClient::WintunWriteLoop() {
                                   queued_packet.from_known_peer ? "peer->wintun"
                                                                 : "tunnel->wintun");
         }
+        const bool should_pace_business_tcp =
+            queued_packet.from_known_peer &&
+            queued_packet.business_priority &&
+            pending_business_packets != 0 &&
+            (queued_packet.inner_src_port == kPeerToWintunPacedBusinessTcpPort ||
+             queued_packet.inner_dst_port == kPeerToWintunPacedBusinessTcpPort);
+        if (should_pace_business_tcp) {
+            BusyWaitMicroseconds(kPeerToWintunBusinessTcpPaceUs);
+        }
     }
 }
 
@@ -3397,6 +3504,35 @@ void PacketTunnelClient::WintunReadLoop() {
                                             dst_port,
                                             packet.data() + ip_header_len + 8,
                                             packet.size() - ip_header_len - 8);
+                }
+            }
+        }
+        if (is_udp &&
+            IsMirrorEligibleUdpFlow(src_port, dst_port) &&
+            peer_link_manager_ != NULL &&
+            !dst_virtual_ip.empty()) {
+            const std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
+            const std::string udp_signature =
+                BuildMirroredGatewayUdpSignature(packet.data(), packet.size());
+            if (!udp_signature.empty()) {
+                PruneMirroredGatewayUdpSignatureTicks(&mirrored_gateway_udp_signature_tick_,
+                                                     frame_process_start);
+                if (IsGatewayPeerResolveCandidate(virtual_ip_, dst_virtual_ip, peers)) {
+                    mirrored_gateway_udp_signature_tick_[udp_signature] = frame_process_start;
+                } else if (IsKnownPeerVirtualIp(peers, dst_virtual_ip)) {
+                    std::map<std::string, unsigned long long>::iterator mirror_it =
+                        mirrored_gateway_udp_signature_tick_.find(udp_signature);
+                    if (mirror_it != mirrored_gateway_udp_signature_tick_.end() &&
+                        frame_process_start >= mirror_it->second &&
+                        (frame_process_start - mirror_it->second) <=
+                            kMirroredGatewayUdpSignatureTtlMs) {
+                        if (debug_enabled) {
+                            PT_DEBUG("drop mirrored gateway UDP peer copy " + route_desc +
+                                     " matched_ms=" +
+                                     std::to_string(frame_process_start - mirror_it->second));
+                        }
+                        continue;
+                    }
                 }
             }
         }
