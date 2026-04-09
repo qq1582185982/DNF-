@@ -1221,6 +1221,8 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
 bool LinuxPacketTunnelClient::Start(std::string* error) {
     Stop();
     stop_requested_ = false;
+    last_receive_ms_ = 0;
+    last_network_activity_ms_ = 0;
     if (peer_link_manager_ != NULL) {
         peer_link_manager_->SetLocalVirtualIp(virtual_ip_);
     }
@@ -1262,6 +1264,11 @@ void LinuxPacketTunnelClient::Stop() {
     if (peer_link_manager_ != NULL) {
         peer_link_manager_->ResetAll();
     }
+    peer_route_debug_log_tick_.clear();
+    peer_probe_send_tick_.clear();
+    watched_tcp_flows_.clear();
+    last_receive_ms_ = 0;
+    last_network_activity_ms_ = 0;
 
     if (sock_ >= 0) {
         close(sock_);
@@ -2406,8 +2413,12 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
             }
         }
 
-        const unsigned long long last_ms = last_network_activity_ms_.load();
-        if (last_ms != 0 && current_ms > last_ms && (current_ms - last_ms) > kHeartbeatTimeoutMs) {
+        const unsigned long long last_receive_ms = last_receive_ms_.load();
+        if (last_receive_ms != 0 &&
+            current_ms > last_receive_ms &&
+            (current_ms - last_receive_ms) > kHeartbeatTimeoutMs) {
+            LogWarn("packet tunnel receive timeout, reconnect required: idle=" +
+                    std::to_string(current_ms - last_receive_ms) + "ms");
             break;
         }
     }
