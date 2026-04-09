@@ -125,7 +125,9 @@ private:
     uint32_t ParseVirtualIp(std::string* error) const;
     void MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip, const std::string& reason);
     void MarkNetworkActivity();
-    void MarkWatchedTcpTunRead(const uint8_t* packet, size_t packet_len);
+    void MarkWatchedTcpTunRead(const uint8_t* packet,
+                               size_t packet_len,
+                               unsigned long long read_wait_ms);
     void TraceWatchedTcpPacket(const uint8_t* packet, size_t packet_len, const char* path);
     void PruneWatchedTcpFlows(unsigned long long now_tick);
 

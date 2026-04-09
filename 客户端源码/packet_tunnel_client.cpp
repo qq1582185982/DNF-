@@ -66,6 +66,7 @@ const unsigned long long kWatchedTcpServerWaitLogMs = 200;
 const size_t kPacketTunnelBatchMaxDatagramBytes = 1200;
 const size_t kPacketTunnelBatchMaxFrames = 8;
 const size_t kPacketTunnelBatchMaxTcpPayloadBytes = 320;
+const bool kPacketTunnelEnableWinRelayTcpMicroBatch = false;
 const uint16_t kPeerDirectProbeSrcPort = 65401;
 const uint16_t kPeerDirectProbeDstPort = 65402;
 const uint8_t kPeerDirectProbeMagic[4] = {'P', 'T', 'D', 'P'};
@@ -3576,7 +3577,8 @@ void PacketTunnelClient::WintunReadLoop() {
 
         bool relay_send_ok = true;
         size_t relay_batch_frames = 1;
-        if (IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size())) {
+        if (kPacketTunnelEnableWinRelayTcpMicroBatch &&
+            IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size())) {
             std::vector<uint8_t> relay_datagram;
             AppendPacketTunnelFrame(&relay_datagram,
                                     packet_tunnel::kFrameIpv4Packet,

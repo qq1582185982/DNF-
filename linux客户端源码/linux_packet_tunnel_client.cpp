@@ -1028,7 +1028,8 @@ void LinuxPacketTunnelClient::PruneWatchedTcpFlows(unsigned long long now_tick) 
 }
 
 void LinuxPacketTunnelClient::MarkWatchedTcpTunRead(const uint8_t* packet,
-                                                    size_t packet_len) {
+                                                    size_t packet_len,
+                                                    unsigned long long read_wait_ms) {
     LinuxWatchedTcpPacketInfo info = {};
     if (!TryParseLinuxWatchedTcpPacket(packet, packet_len, virtual_ip_, &info) ||
         info.from_client ||
@@ -1046,6 +1047,14 @@ void LinuxPacketTunnelClient::MarkWatchedTcpTunRead(const uint8_t* packet,
     }
 
     WatchedTcpFlowTrace& trace = it->second;
+    if (read_wait_ms >= kWatchedTcpServerWaitLogMs) {
+        std::ostringstream flow_ss;
+        flow_ss << trace.client_ip << ":" << trace.client_port
+                << " -> " << trace.server_ip << ":" << trace.server_port;
+        LogInfo("tcp service trace tun_read_block flow=" + flow_ss.str() +
+                " block=" + std::to_string(read_wait_ms) + "ms" +
+                " bytes=" + std::to_string(info.payload_len));
+    }
     trace.pending_server_tun_read_ms = tick;
 
     if (trace.pending_request_ms == 0 || tick < trace.pending_request_ms) {
@@ -2059,11 +2068,19 @@ void LinuxPacketTunnelClient::TunReadLoop() {
     while (!stop_requested_) {
         std::vector<uint8_t> packet;
         std::string error;
+        unsigned long long read_wait_ms = 0;
         if (!deferred_packets.empty()) {
             packet = std::move(deferred_packets.front());
             deferred_packets.pop_front();
-        } else if (!tun_manager_ || !tun_manager_->ReadPacket(&packet, kTunReadWaitMs, &error)) {
-            continue;
+        } else {
+            const unsigned long long read_start_ms = now_ms();
+            if (!tun_manager_ || !tun_manager_->ReadPacket(&packet, kTunReadWaitMs, &error)) {
+                continue;
+            }
+            const unsigned long long read_end_ms = now_ms();
+            if (read_end_ms >= read_start_ms) {
+                read_wait_ms = read_end_ms - read_start_ms;
+            }
         }
         if (packet.empty()) {
             continue;
@@ -2091,7 +2108,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
         const std::string inner_proto_name = is_udp ? "udp" : (is_tcp ? "tcp" : "ip");
         const std::string dst_virtual_ip =
             packet.size() >= 20 ? LinuxIpv4ToString(packet.data() + 16) : "";
-        MarkWatchedTcpTunRead(packet.data(), packet.size());
+        MarkWatchedTcpTunRead(packet.data(), packet.size(), read_wait_ms);
         const std::string route_desc =
             (has_desc && is_udp)
                 ? desc
