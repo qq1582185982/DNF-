@@ -2208,6 +2208,7 @@ bool PacketTunnelClient::Start(std::wstring* error_msg) {
     peer_udp_port_owners_.clear();
     {
         std::lock_guard<std::mutex> lock(wintun_write_mutex_);
+        wintun_write_priority_queue_.clear();
         wintun_write_queue_.clear();
     }
     if (peer_link_manager_ != NULL) {
@@ -2272,6 +2273,7 @@ void PacketTunnelClient::Stop() {
     }
     {
         std::lock_guard<std::mutex> lock(wintun_write_mutex_);
+        wintun_write_priority_queue_.clear();
         wintun_write_queue_.clear();
     }
     wintun_write_cv_.notify_all();
@@ -2814,19 +2816,30 @@ void PacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
 void PacketTunnelClient::WintunWriteLoop() {
     while (true) {
         QueuedWintunPacket queued_packet;
+        size_t pending_priority_packets = 0;
+        size_t pending_normal_packets = 0;
         {
             std::unique_lock<std::mutex> lock(wintun_write_mutex_);
             wintun_write_cv_.wait(lock, [this]() {
-                return stop_requested_ || !wintun_write_queue_.empty();
+                return stop_requested_ ||
+                       !wintun_write_priority_queue_.empty() ||
+                       !wintun_write_queue_.empty();
             });
-            if (wintun_write_queue_.empty()) {
+            if (wintun_write_priority_queue_.empty() && wintun_write_queue_.empty()) {
                 if (stop_requested_) {
                     break;
                 }
                 continue;
             }
-            queued_packet = std::move(wintun_write_queue_.front());
-            wintun_write_queue_.pop_front();
+            if (!wintun_write_priority_queue_.empty()) {
+                queued_packet = std::move(wintun_write_priority_queue_.front());
+                wintun_write_priority_queue_.pop_front();
+            } else {
+                queued_packet = std::move(wintun_write_queue_.front());
+                wintun_write_queue_.pop_front();
+            }
+            pending_priority_packets = wintun_write_priority_queue_.size();
+            pending_normal_packets = wintun_write_queue_.size();
         }
 
         if (!wintun_manager_ || queued_packet.payload.empty()) {
@@ -2856,8 +2869,11 @@ void PacketTunnelClient::WintunWriteLoop() {
                                 std::to_string(queue_wait_elapsed) +
                                 " write_ms=" + std::to_string(wintun_write_elapsed) +
                                 " total_ms=" + std::to_string(total_elapsed) +
+                                " prio_pending=" + std::to_string(pending_priority_packets) +
+                                " normal_pending=" + std::to_string(pending_normal_packets) +
                                 " dir=" +
                                 (queued_packet.from_known_peer ? "peer->wintun" : "tunnel->wintun") +
+                                " priority=" + std::string(queued_packet.high_priority ? "tcp" : "normal") +
                                 " src=" + queued_packet.inner_src_virtual_ip + ":" +
                                 std::to_string(queued_packet.inner_src_port) +
                                 " dst=" + queued_packet.inner_dst_virtual_ip + ":" +
@@ -2898,13 +2914,21 @@ bool PacketTunnelClient::EnqueueWintunPacket(const uint8_t* payload,
     queued_packet.inner_dst_virtual_ip = inner_dst_virtual_ip;
     queued_packet.inner_dst_port = inner_dst_port;
     queued_packet.enqueue_tick_ms = GetTickCount64();
+    queued_packet.high_priority =
+        payload_len >= 20 &&
+        ((payload[0] >> 4) & 0x0F) == 4 &&
+        payload[9] == IPPROTO_TCP;
 
     {
         std::lock_guard<std::mutex> lock(wintun_write_mutex_);
         if (stop_requested_) {
             return false;
         }
-        wintun_write_queue_.push_back(std::move(queued_packet));
+        if (queued_packet.high_priority) {
+            wintun_write_priority_queue_.push_back(std::move(queued_packet));
+        } else {
+            wintun_write_queue_.push_back(std::move(queued_packet));
+        }
     }
     wintun_write_cv_.notify_one();
     return true;

@@ -58,6 +58,7 @@ private:
     struct QueuedWintunPacket {
         std::vector<uint8_t> payload;
         bool from_known_peer;
+        bool high_priority;
         std::string inner_src_virtual_ip;
         std::string inner_dst_virtual_ip;
         uint16_t inner_src_port;
@@ -66,6 +67,7 @@ private:
 
         QueuedWintunPacket()
             : from_known_peer(false),
+              high_priority(false),
               inner_src_port(0),
               inner_dst_port(0),
               enqueue_tick_ms(0) {
@@ -215,6 +217,7 @@ private:
     CRITICAL_SECTION send_lock_;
     std::mutex wintun_write_mutex_;
     std::condition_variable wintun_write_cv_;
+    std::deque<QueuedWintunPacket> wintun_write_priority_queue_;
     std::deque<QueuedWintunPacket> wintun_write_queue_;
     std::mutex watched_tcp_mutex_;
     PeerLinkManager* peer_link_manager_;
