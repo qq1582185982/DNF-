@@ -1781,6 +1781,7 @@ private:
     const uint64_t kSlowPacketTunnelUdpProcessWarnMs = 20;
     const size_t kPacketTunnelBatchMaxDatagramBytes = 1200;
     const size_t kPacketTunnelBatchMaxFrames = 8;
+    const bool kPacketTunnelEnableServerTcpMicroBatch = false;
 
     const char* peer_endpoint_state_name(PeerEndpointState state) {
         switch (state) {
@@ -2620,7 +2621,8 @@ private:
             }
 
             bool send_ok = false;
-            if (session->use_udp &&
+            if (kPacketTunnelEnableServerTcpMicroBatch &&
+                session->use_udp &&
                 protocol == IPPROTO_TCP &&
                 is_packet_tunnel_micro_batch_eligible_tcp_packet(packet.data(), packet.size())) {
                 vector<uint8_t> datagram;

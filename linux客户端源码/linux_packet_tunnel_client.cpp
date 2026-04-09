@@ -41,6 +41,7 @@ const unsigned long long kWatchedTcpServerWaitLogMs = 200;
 const size_t kPacketTunnelBatchMaxDatagramBytes = 1200;
 const size_t kPacketTunnelBatchMaxFrames = 8;
 const size_t kPacketTunnelBatchMaxTcpPayloadBytes = 320;
+const bool kPacketTunnelEnableLinuxRelayTcpMicroBatch = false;
 const uint16_t kPeerDirectProbeSrcPort = 65401;
 const uint16_t kPeerDirectProbeDstPort = 65402;
 const uint8_t kPeerDirectProbeMagic[4] = {'P', 'T', 'D', 'P'};
@@ -2201,7 +2202,8 @@ void LinuxPacketTunnelClient::TunReadLoop() {
 
         bool relay_send_ok = true;
         size_t relay_batch_frames = 1;
-        if (IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size())) {
+        if (kPacketTunnelEnableLinuxRelayTcpMicroBatch &&
+            IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size())) {
             std::vector<uint8_t> relay_datagram;
             AppendPacketTunnelFrame(&relay_datagram,
                                     packet_tunnel::kFrameIpv4Packet,
@@ -2348,7 +2350,10 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                             current_ms < probe_it->second ||
                             (current_ms - probe_it->second) >=
                                 static_cast<unsigned long long>(kPeerDirectProbeIntervalMs);
-                        if (should_send_probe && (!direct_path_fresh || !active_direct)) {
+                        // Keep the direct route warm even during short idle gaps so
+                        // the next TCP business flow does not fall back to relay
+                        // before freshness is refreshed again.
+                        if (should_send_probe) {
                             uint32_t target_peer_ip_be = 0;
                             std::vector<uint8_t> probe_packet;
                             if (ParseLinuxIpv4StringToBe(peers[i].peer_virtual_ip, &target_peer_ip_be) &&
