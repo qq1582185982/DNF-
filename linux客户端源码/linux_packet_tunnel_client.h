@@ -52,7 +52,9 @@ private:
         unsigned long long first_server_payload_ms;
         unsigned long long last_client_payload_ms;
         unsigned long long last_server_payload_ms;
+        unsigned long long last_client_ack_only_ms;
         unsigned long long pending_request_ms;
+        unsigned long long pending_server_tun_read_ms;
         unsigned int client_payload_count;
         unsigned int server_payload_count;
         bool close_logged;
@@ -70,7 +72,9 @@ private:
               first_server_payload_ms(0),
               last_client_payload_ms(0),
               last_server_payload_ms(0),
+              last_client_ack_only_ms(0),
               pending_request_ms(0),
+              pending_server_tun_read_ms(0),
               client_payload_count(0),
               server_payload_count(0),
               close_logged(false),
@@ -121,6 +125,7 @@ private:
     uint32_t ParseVirtualIp(std::string* error) const;
     void MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip, const std::string& reason);
     void MarkNetworkActivity();
+    void MarkWatchedTcpTunRead(const uint8_t* packet, size_t packet_len);
     void TraceWatchedTcpPacket(const uint8_t* packet, size_t packet_len, const char* path);
     void PruneWatchedTcpFlows(unsigned long long now_tick);
 

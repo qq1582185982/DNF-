@@ -1027,6 +1027,45 @@ void LinuxPacketTunnelClient::PruneWatchedTcpFlows(unsigned long long now_tick) 
     }
 }
 
+void LinuxPacketTunnelClient::MarkWatchedTcpTunRead(const uint8_t* packet,
+                                                    size_t packet_len) {
+    LinuxWatchedTcpPacketInfo info = {};
+    if (!TryParseLinuxWatchedTcpPacket(packet, packet_len, virtual_ip_, &info) ||
+        info.from_client ||
+        !info.has_payload) {
+        return;
+    }
+
+    const unsigned long long tick = now_ms();
+    std::lock_guard<std::mutex> lock(watched_tcp_mutex_);
+    PruneWatchedTcpFlows(tick);
+
+    std::map<std::string, WatchedTcpFlowTrace>::iterator it = watched_tcp_flows_.find(info.flow_key);
+    if (it == watched_tcp_flows_.end()) {
+        return;
+    }
+
+    WatchedTcpFlowTrace& trace = it->second;
+    trace.pending_server_tun_read_ms = tick;
+
+    if (trace.pending_request_ms == 0 || tick < trace.pending_request_ms) {
+        return;
+    }
+
+    const unsigned long long emit_wait = tick - trace.pending_request_ms;
+    if (emit_wait < kWatchedTcpServerWaitLogMs) {
+        return;
+    }
+
+    std::ostringstream flow_ss;
+    flow_ss << trace.client_ip << ":" << trace.client_port
+            << " -> " << trace.server_ip << ":" << trace.server_port;
+    LogInfo("tcp service trace server_emit_wait flow=" + flow_ss.str() +
+            " origin=tun-read" +
+            " wait=" + std::to_string(emit_wait) + "ms" +
+            " bytes=" + std::to_string(info.payload_len));
+}
+
 void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
                                                     size_t packet_len,
                                                     const char* path) {
@@ -1085,6 +1124,25 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
                 " since_synack=" + LinuxFormatElapsedMs(trace.synack_ms, tick) + "ms");
     }
 
+    if (info.from_client &&
+        info.ack &&
+        !info.syn &&
+        !info.fin &&
+        !info.rst &&
+        !info.has_payload) {
+        if (trace.last_server_payload_ms != 0 &&
+            trace.last_client_ack_only_ms < trace.last_server_payload_ms &&
+            tick >= trace.last_server_payload_ms) {
+            const unsigned long long ack_delay = tick - trace.last_server_payload_ms;
+            if (ack_delay >= 80) {
+                LogInfo("tcp service trace client_ack_delay flow=" + flow +
+                        " origin=" + origin +
+                        " delay=" + std::to_string(ack_delay) + "ms");
+            }
+        }
+        trace.last_client_ack_only_ms = tick;
+    }
+
     if (info.has_payload) {
         if (info.from_client) {
             ++trace.client_payload_count;
@@ -1101,6 +1159,17 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
             }
         } else {
             ++trace.server_payload_count;
+            if (trace.pending_server_tun_read_ms != 0 &&
+                tick >= trace.pending_server_tun_read_ms) {
+                const unsigned long long send_lag = tick - trace.pending_server_tun_read_ms;
+                if (send_lag >= 20) {
+                    LogInfo("tcp service trace server_send_lag flow=" + flow +
+                            " origin=" + origin +
+                            " lag=" + std::to_string(send_lag) + "ms" +
+                            " bytes=" + std::to_string(info.payload_len));
+                }
+                trace.pending_server_tun_read_ms = 0;
+            }
             if (trace.first_server_payload_ms == 0) {
                 trace.first_server_payload_ms = tick;
                 LogInfo("tcp service trace first_server_payload flow=" + flow +
@@ -2022,6 +2091,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
         const std::string inner_proto_name = is_udp ? "udp" : (is_tcp ? "tcp" : "ip");
         const std::string dst_virtual_ip =
             packet.size() >= 20 ? LinuxIpv4ToString(packet.data() + 16) : "";
+        MarkWatchedTcpTunRead(packet.data(), packet.size());
         const std::string route_desc =
             (has_desc && is_udp)
                 ? desc
