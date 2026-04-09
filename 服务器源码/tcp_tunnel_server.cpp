@@ -1648,6 +1648,10 @@ private:
                                    uint32_t original_dst_ip_be,
                                    const uint8_t* payload,
                                    size_t payload_len) {
+        static const bool kEnableGatewayUdpPeerHeuristics = false;
+        if (!kEnableGatewayUdpPeerHeuristics) {
+            return false;
+        }
         if (!sender_session || !payload || payload_len < 20 || payload[9] != IPPROTO_UDP) {
             return false;
         }

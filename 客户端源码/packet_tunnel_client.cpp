@@ -48,6 +48,7 @@ const DWORD kPeerDirectDataTimeoutMs = 5000;
 const DWORD kPeerSnapshotLogIntervalMs = 15000;
 const DWORD kPeerRouteDebugLogIntervalMs = 2000;
 const DWORD kPeerDirectProbeIntervalMs = 500;
+const bool kEnableGatewayUdpPeerHeuristics = false;
 const DWORD kSocketReadTimeoutMs = 1000;
 const DWORD kSocketSendTimeoutMs = 50;
 const int kSocketSendRetryCount = 2;
@@ -734,7 +735,8 @@ bool TryDescribeUdpPacket(const uint8_t* packet, size_t packet_len, std::string*
 }
 
 bool IsMirrorEligibleUdpFlow(uint16_t src_port, uint16_t dst_port) {
-    return !IsKnownGameUdpPort(src_port) &&
+    return kEnableGatewayUdpPeerHeuristics &&
+           !IsKnownGameUdpPort(src_port) &&
            !IsKnownGameUdpPort(dst_port) &&
            !IsReservedPeerDirectPort(src_port) &&
            !IsReservedPeerDirectPort(dst_port);
@@ -4545,6 +4547,12 @@ bool PacketTunnelClient::TryResolveGatewayUdpPeerTarget(const std::string& dst_v
         resolution->clear();
     }
     if (dst_port == 0 || peer_link_manager_ == NULL || dst_virtual_ip.empty()) {
+        return false;
+    }
+    if (!kEnableGatewayUdpPeerHeuristics) {
+        if (resolution != NULL) {
+            *resolution = "route_only";
+        }
         return false;
     }
 
