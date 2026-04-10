@@ -3053,7 +3053,11 @@ void LinuxPacketTunnelClient::TcpDirectAcceptLoop() {
                               reinterpret_cast<sockaddr*>(&peer_addr),
                               &peer_addr_len);
         if (accepted < 0) {
-            if (!stop_requested_ && errno != EBADF && errno != EINTR) {
+            if (!stop_requested_ &&
+                errno != EBADF &&
+                errno != EINTR &&
+                errno != EAGAIN &&
+                errno != EWOULDBLOCK) {
                 LogWarn("packet tunnel tcp direct accept failed: " +
                         std::string(strerror(errno)));
             }

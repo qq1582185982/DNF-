@@ -4901,7 +4901,10 @@ void PacketTunnelClient::TcpDirectAcceptLoop() {
         if (accepted == INVALID_SOCKET) {
             if (!stop_requested_) {
                 int err = WSAGetLastError();
-                if (err != WSAENOTSOCK && err != WSAEINTR) {
+                if (err != WSAENOTSOCK &&
+                    err != WSAEINTR &&
+                    err != WSAEWOULDBLOCK &&
+                    err != WSAETIMEDOUT) {
                     PacketTunnelWarnLog("tcp direct accept failed: " +
                                         WideToUtf8(BuildSocketError(L"accept", err)));
                 }
