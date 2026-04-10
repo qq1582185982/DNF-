@@ -222,6 +222,7 @@
 #include <pthread.h>
 #include "tcp_config_server.h"
 #include "packet_tunnel_direct_candidates.h"
+#include "packet_tunnel_session_registry.h"
 #include "packet_tunnel_protocol.h"
 #include "peer_coord.h"
 #include "tun_manager.h"
@@ -1412,62 +1413,6 @@ int replace_ip_in_payload(uint8_t* payload, size_t payload_len,
 // ==================== 隧道服务器 ====================
 class TunnelServer : public enable_shared_from_this<TunnelServer> {
 private:
-    struct PacketTunnelSession {
-        int client_fd;
-        string client_str;
-        string session_uuid;
-        string server_key;
-        uint32_t virtual_ip_be;
-        uint16_t mtu;
-        bool use_udp;
-        sockaddr_storage udp_addr;
-        socklen_t udp_addr_len;
-        string udp_endpoint_key;
-        atomic<bool> active;
-        uint64_t established_ms;
-        uint64_t last_peer_offer_announce_ms;
-        atomic<uint64_t> last_activity_ms;
-        uint8_t handshake_flags;
-        bool allow_peer_direct;
-        bool is_remote_linux_node;
-        uint16_t tcp_direct_listen_port;
-        vector<TcpDirectCandidate> udp_direct_candidates;
-        vector<TcpDirectCandidate> tcp_direct_candidates;
-        mutex send_mutex;
-
-        PacketTunnelSession(int fd,
-                            const string& client,
-                            const string& session,
-                            const string& scoped_server_key,
-                            uint32_t virtual_ip,
-                            uint16_t session_mtu)
-            : client_fd(fd),
-              client_str(client),
-              session_uuid(session),
-              server_key(scoped_server_key),
-              virtual_ip_be(virtual_ip),
-              mtu(session_mtu),
-              use_udp(false),
-              udp_addr_len(0),
-              active(true),
-              established_ms(monotonic_millis()),
-              last_peer_offer_announce_ms(0),
-              last_activity_ms(established_ms),
-              handshake_flags(packet_tunnel::kHandshakeFlagNone),
-              allow_peer_direct(true),
-              is_remote_linux_node(false),
-              tcp_direct_listen_port(0) {}
-    };
-
-    struct PacketTunnelSessionRemoval {
-        shared_ptr<PacketTunnelSession> session;
-        string reason;
-
-        PacketTunnelSessionRemoval(const shared_ptr<PacketTunnelSession>& s,
-                                   const string& why)
-            : session(s), reason(why) {}
-    };
-
     struct GatewayUdpPortOwner {
         uint32_t virtual_ip_be;
         uint64_t last_seen_ms;
@@ -1490,6 +1435,7 @@ private:
     map<string, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions;
     map<string, shared_ptr<PacketTunnelSession>> packet_tunnel_tcp_sessions;
     map<string, shared_ptr<PacketTunnelSession>> packet_tunnel_sessions_by_endpoint;
+    PacketTunnelSessionRegistry packet_tunnel_registry_;
     map<string, GatewayUdpPortOwner> gateway_udp_port_owners_;
     map<uint32_t, string> local_node_server_keys_by_ip_be;
     set<string> local_node_scope_keys_;
@@ -1509,25 +1455,7 @@ private:
 
 
     static string build_endpoint_key(const sockaddr_storage& addr, socklen_t addr_len) {
-        (void)addr_len;
-        char client_ip[INET6_ADDRSTRLEN] = {0};
-        int client_port = 0;
-
-        if (addr.ss_family == AF_INET) {
-            const sockaddr_in* addr_in = (const sockaddr_in*)&addr;
-            inet_ntop(AF_INET, &addr_in->sin_addr, client_ip, sizeof(client_ip));
-            client_port = ntohs(addr_in->sin_port);
-            return string(client_ip) + ":" + to_string(client_port);
-        }
-
-        if (addr.ss_family == AF_INET6) {
-            const sockaddr_in6* addr_in6 = (const sockaddr_in6*)&addr;
-            inet_ntop(AF_INET6, &addr_in6->sin6_addr, client_ip, sizeof(client_ip));
-            client_port = ntohs(addr_in6->sin6_port);
-            return "[" + string(client_ip) + "]:" + to_string(client_port);
-        }
-
-        return "unknown";
+        return PacketTunnelSessionRegistry::BuildEndpointKey(addr, addr_len);
     }
 
     static PacketTunnelCandidateOwnerView build_candidate_owner_view(
@@ -1558,82 +1486,70 @@ private:
     }
 
     static string build_scoped_virtual_ip_key(const string& server_key, const string& virtual_ip) {
-        if (server_key.empty()) {
-            return virtual_ip;
-        }
-        return server_key + "|" + virtual_ip;
+        return PacketTunnelSessionRegistry::BuildScopedVirtualIpKey(server_key, virtual_ip);
     }
 
     static string build_scoped_virtual_ip_key(const string& server_key, uint32_t virtual_ip_be) {
-        return build_scoped_virtual_ip_key(server_key, ipv4_be_to_string(virtual_ip_be));
+        return PacketTunnelSessionRegistry::BuildScopedVirtualIpKey(server_key, virtual_ip_be);
     }
 
     static string build_scoped_udp_port_key(const string& server_key, uint16_t port) {
-        if (server_key.empty()) {
-            return "udp|" + to_string(port);
-        }
-        return server_key + "|udp|" + to_string(port);
+        return PacketTunnelSessionRegistry::BuildScopedUdpPortKey(server_key, port);
     }
 
     static string describe_scoped_virtual_ip(const string& server_key, uint32_t virtual_ip_be) {
-        const string virtual_ip = ipv4_be_to_string(virtual_ip_be);
-        if (server_key.empty()) {
-            return virtual_ip;
-        }
-        return server_key + "/" + virtual_ip;
+        return PacketTunnelSessionRegistry::DescribeScopedVirtualIp(server_key, virtual_ip_be);
     }
 
     static string describe_scoped_virtual_ip(const shared_ptr<PacketTunnelSession>& session) {
-        if (!session) {
-            return "unknown";
-        }
-        return describe_scoped_virtual_ip(session->server_key, session->virtual_ip_be);
+        return PacketTunnelSessionRegistry::DescribeScopedVirtualIp(session);
     }
 
     static bool packet_tunnel_payload_is_tcp(const uint8_t* payload, size_t payload_len) {
-        return payload != nullptr &&
-               payload_len >= 20 &&
-               (((payload[0] >> 4) & 0x0F) == 4) &&
-               payload[9] == IPPROTO_TCP;
+        return PacketTunnelSessionRegistry::PacketTunnelPayloadIsTcp(payload, payload_len);
     }
 
     shared_ptr<PacketTunnelSession> find_packet_tunnel_tcp_session_locked(const string& server_key,
                                                                           uint32_t virtual_ip_be) const {
-        map<string, shared_ptr<PacketTunnelSession>>::const_iterator it =
-            packet_tunnel_tcp_sessions.find(build_scoped_virtual_ip_key(server_key, virtual_ip_be));
-        if (it == packet_tunnel_tcp_sessions.end()) {
-            return shared_ptr<PacketTunnelSession>();
-        }
-        return it->second;
+        return packet_tunnel_registry_.FindTcpLocked(server_key, virtual_ip_be);
     }
 
     shared_ptr<PacketTunnelSession> select_packet_tunnel_delivery_session_locked(const string& server_key,
                                                                                  uint32_t virtual_ip_be,
                                                                                  const uint8_t* payload,
                                                                                  size_t payload_len) const {
-        if (packet_tunnel_payload_is_tcp(payload, payload_len)) {
-            shared_ptr<PacketTunnelSession> tcp_session =
-                find_packet_tunnel_tcp_session_locked(server_key, virtual_ip_be);
-            if (tcp_session && tcp_session->active) {
-                return tcp_session;
-            }
-        }
+        return packet_tunnel_registry_.SelectDeliveryLocked(server_key,
+                                                            virtual_ip_be,
+                                                            payload,
+                                                            payload_len);
+    }
 
-        map<string, shared_ptr<PacketTunnelSession>>::const_iterator it =
-            packet_tunnel_sessions.find(build_scoped_virtual_ip_key(server_key, virtual_ip_be));
-        if (it != packet_tunnel_sessions.end() && it->second && it->second->active) {
-            return it->second;
-        }
+    vector<shared_ptr<PacketTunnelSession>> collect_udp_offer_peers_locked(
+        const shared_ptr<PacketTunnelSession>& session) const {
+        return packet_tunnel_registry_.CollectUdpPeersLocked(
+            session,
+            [this, &session](const shared_ptr<PacketTunnelSession>& peer) -> bool {
+                return peer &&
+                       peer->active &&
+                       peer->use_udp &&
+                       session &&
+                       peer->server_key == session->server_key &&
+                       !is_peer_direct_excluded_session(peer);
+            });
+    }
 
-        if (packet_tunnel_payload_is_tcp(payload, payload_len)) {
-            shared_ptr<PacketTunnelSession> tcp_session =
-                find_packet_tunnel_tcp_session_locked(server_key, virtual_ip_be);
-            if (tcp_session && tcp_session->active) {
-                return tcp_session;
-            }
-        }
-
-        return shared_ptr<PacketTunnelSession>();
+    vector<shared_ptr<PacketTunnelSession>> collect_tcp_offer_peers_locked(
+        const shared_ptr<PacketTunnelSession>& session) const {
+        return packet_tunnel_registry_.CollectTcpPeersLocked(
+            session,
+            [session](const shared_ptr<PacketTunnelSession>& peer) -> bool {
+                return peer &&
+                       peer->active &&
+                       !peer->use_udp &&
+                       session &&
+                       peer->server_key == session->server_key &&
+                       peer->tcp_direct_listen_port != 0;
+            });
     }
 
     bool is_local_or_server_side_session(const shared_ptr<PacketTunnelSession>& session) const {
@@ -1732,15 +1648,14 @@ private:
                 if (owner_stale) {
                     gateway_udp_port_owners_.erase(owner_it);
                 } else if (owner_it->second.virtual_ip_be != sender_session->virtual_ip_be) {
-                    map<string, shared_ptr<PacketTunnelSession>>::const_iterator session_it =
-                        packet_tunnel_sessions.find(build_scoped_virtual_ip_key(sender_session->server_key,
-                                                                                owner_it->second.virtual_ip_be));
-                    if (session_it != packet_tunnel_sessions.end() &&
-                        session_it->second &&
-                        session_it->second->active &&
-                        session_it->second != sender_session &&
-                        !is_local_or_server_side_session(session_it->second)) {
-                        selected_session = session_it->second;
+                    shared_ptr<PacketTunnelSession> owner_session =
+                        packet_tunnel_registry_.FindUdpLocked(sender_session->server_key,
+                                                              owner_it->second.virtual_ip_be);
+                    if (owner_session &&
+                        owner_session->active &&
+                        owner_session != sender_session &&
+                        !is_local_or_server_side_session(owner_session)) {
+                        selected_session = owner_session;
                         resolution = "port_owner";
                     }
                 }
@@ -2141,12 +2056,8 @@ private:
         shared_ptr<PacketTunnelSession> target_session;
         {
             lock_guard<mutex> lock(packet_tunnel_mutex);
-            map<string, shared_ptr<PacketTunnelSession>>::const_iterator it =
-                packet_tunnel_sessions.find(build_scoped_virtual_ip_key(sender_session->server_key,
-                                                                        dst_ip_be));
-            if (it != packet_tunnel_sessions.end()) {
-                peer_session = it->second;
-            }
+            peer_session = packet_tunnel_registry_.FindUdpLocked(sender_session->server_key,
+                                                                 dst_ip_be);
             if (is_tcp_payload) {
                 target_session =
                     select_packet_tunnel_delivery_session_locked(sender_session->server_key,
@@ -2231,42 +2142,11 @@ private:
     }
 
     void erase_packet_tunnel_session_locked(const shared_ptr<PacketTunnelSession>& session) {
-        if (!session) {
-            return;
-        }
-
-        session->active = false;
-
-        map<string, shared_ptr<PacketTunnelSession>>::iterator by_virtual_it =
-            packet_tunnel_sessions.find(build_scoped_virtual_ip_key(session->server_key,
-                                                                    session->virtual_ip_be));
-        if (by_virtual_it != packet_tunnel_sessions.end() && by_virtual_it->second == session) {
-            packet_tunnel_sessions.erase(by_virtual_it);
-        }
-
-        if (!session->udp_endpoint_key.empty()) {
-            map<string, shared_ptr<PacketTunnelSession>>::iterator by_endpoint_it =
-                packet_tunnel_sessions_by_endpoint.find(session->udp_endpoint_key);
-            if (by_endpoint_it != packet_tunnel_sessions_by_endpoint.end() &&
-                by_endpoint_it->second == session) {
-                packet_tunnel_sessions_by_endpoint.erase(by_endpoint_it);
-            }
-        }
+        packet_tunnel_registry_.EraseUdpLocked(session);
     }
 
     void erase_packet_tunnel_tcp_session_locked(const shared_ptr<PacketTunnelSession>& session) {
-        if (!session) {
-            return;
-        }
-
-        session->active = false;
-
-        map<string, shared_ptr<PacketTunnelSession>>::iterator by_virtual_it =
-            packet_tunnel_tcp_sessions.find(build_scoped_virtual_ip_key(session->server_key,
-                                                                        session->virtual_ip_be));
-        if (by_virtual_it != packet_tunnel_tcp_sessions.end() && by_virtual_it->second == session) {
-            packet_tunnel_tcp_sessions.erase(by_virtual_it);
-        }
+        packet_tunnel_registry_.EraseTcpLocked(session);
     }
 
     vector<PacketTunnelSessionRemoval> cleanup_idle_packet_tunnel_sessions(uint64_t now_ms) {
@@ -2413,16 +2293,7 @@ private:
         vector<shared_ptr<PacketTunnelSession>> peers;
         {
             lock_guard<mutex> lock(packet_tunnel_mutex);
-            for (map<string, shared_ptr<PacketTunnelSession>>::const_iterator it = packet_tunnel_sessions.begin();
-                 it != packet_tunnel_sessions.end(); ++it) {
-                const shared_ptr<PacketTunnelSession>& peer = it->second;
-                if (!peer || peer == session || !peer->active || !peer->use_udp ||
-                    peer->server_key != session->server_key ||
-                    is_peer_direct_excluded_session(peer)) {
-                    continue;
-                }
-                peers.push_back(peer);
-            }
+            peers = collect_udp_offer_peers_locked(session);
         }
 
         const vector<TcpDirectCandidate> local_candidates =
@@ -2565,16 +2436,7 @@ private:
         vector<shared_ptr<PacketTunnelSession>> peers;
         {
             lock_guard<mutex> lock(packet_tunnel_mutex);
-            for (map<string, shared_ptr<PacketTunnelSession>>::const_iterator it = packet_tunnel_tcp_sessions.begin();
-                 it != packet_tunnel_tcp_sessions.end(); ++it) {
-                const shared_ptr<PacketTunnelSession>& peer = it->second;
-                if (!peer || peer == session || !peer->active || peer->use_udp ||
-                    peer->server_key != session->server_key ||
-                    peer->tcp_direct_listen_port == 0) {
-                    continue;
-                }
-                peers.push_back(peer);
-            }
+            peers = collect_tcp_offer_peers_locked(session);
         }
 
         for (size_t i = 0; i < peers.size(); ++i) {
@@ -2650,12 +2512,9 @@ private:
         shared_ptr<PacketTunnelSession> target_session;
         {
             lock_guard<mutex> lock(packet_tunnel_mutex);
-            map<string, shared_ptr<PacketTunnelSession>>::const_iterator it =
-                packet_tunnel_sessions.find(build_scoped_virtual_ip_key(sender_session->server_key,
-                                                                        signal.peer_virtual_ip_be));
-            if (it != packet_tunnel_sessions.end()) {
-                target_session = it->second;
-            }
+            target_session =
+                packet_tunnel_registry_.FindUdpLocked(sender_session->server_key,
+                                                      signal.peer_virtual_ip_be);
         }
 
         if (!target_session || !target_session->active || !target_session->use_udp) {
@@ -2760,12 +2619,9 @@ private:
         shared_ptr<PacketTunnelSession> target_session;
         {
             lock_guard<mutex> lock(packet_tunnel_mutex);
-            map<string, shared_ptr<PacketTunnelSession>>::const_iterator it =
-                packet_tunnel_sessions.find(build_scoped_virtual_ip_key(sender_session->server_key,
-                                                                        disable.peer_virtual_ip_be));
-            if (it != packet_tunnel_sessions.end()) {
-                target_session = it->second;
-            }
+            target_session =
+                packet_tunnel_registry_.FindUdpLocked(sender_session->server_key,
+                                                      disable.peer_virtual_ip_be);
         }
 
         if (!target_session || !target_session->active || !target_session->use_udp) {
@@ -3040,6 +2896,9 @@ public:
           running(false),
           tun_read_thread(nullptr),
           udp_read_thread(nullptr),
+          packet_tunnel_registry_(&packet_tunnel_sessions,
+                                  &packet_tunnel_tcp_sessions,
+                                  &packet_tunnel_sessions_by_endpoint),
           udp_fd(-1),
           game_server_ip_be(0),
           has_game_server_ip_be(parse_ipv4_be(cfg.game_server_ip, &game_server_ip_be)),
@@ -3219,9 +3078,7 @@ public:
                 it->second->active = false;
                 packet_fds.push_back(it->second->client_fd);
             }
-            packet_tunnel_sessions.clear();
-            packet_tunnel_tcp_sessions.clear();
-            packet_tunnel_sessions_by_endpoint.clear();
+            packet_tunnel_registry_.ClearLocked();
         }
 
         for (size_t i = 0; i < packet_fds.size(); ++i) {
@@ -3412,7 +3269,8 @@ private:
                                                          session_uuid,
                                                          resolved_server_key,
                                                          virtual_ip_be,
-                                                         mtu);
+                                                         mtu,
+                                                         monotonic_millis());
                     session->use_udp = true;
                     session->udp_addr = client_addr;
                     session->udp_addr_len = client_addr_len;
@@ -3429,24 +3287,9 @@ private:
                     shared_ptr<PacketTunnelSession> replaced_by_endpoint;
                     {
                         lock_guard<mutex> lock(packet_tunnel_mutex);
-                        auto it = packet_tunnel_sessions.find(build_scoped_virtual_ip_key(resolved_server_key,
-                                                                                           virtual_ip_be));
-                        if (it != packet_tunnel_sessions.end()) {
-                            replaced_by_virtual_ip = it->second;
-                        }
-                        map<string, shared_ptr<PacketTunnelSession>>::iterator endpoint_it =
-                            packet_tunnel_sessions_by_endpoint.find(client_str);
-                        if (endpoint_it != packet_tunnel_sessions_by_endpoint.end()) {
-                            replaced_by_endpoint = endpoint_it->second;
-                        }
-
-                        erase_packet_tunnel_session_locked(replaced_by_virtual_ip);
-                        if (replaced_by_endpoint != replaced_by_virtual_ip) {
-                            erase_packet_tunnel_session_locked(replaced_by_endpoint);
-                        }
-                        packet_tunnel_sessions[build_scoped_virtual_ip_key(resolved_server_key,
-                                                                           virtual_ip_be)] = session;
-                        packet_tunnel_sessions_by_endpoint[client_str] = session;
+                        packet_tunnel_registry_.UpsertUdpLocked(session,
+                                                                &replaced_by_virtual_ip,
+                                                                &replaced_by_endpoint);
                     }
                     peer_coord_.ObservePeerFrame(build_scoped_virtual_ip_key(resolved_server_key, virtual_ip),
                                                  0,
@@ -3486,10 +3329,7 @@ private:
             shared_ptr<PacketTunnelSession> session;
             {
                 lock_guard<mutex> lock(packet_tunnel_mutex);
-                auto it = packet_tunnel_sessions_by_endpoint.find(client_str);
-                if (it != packet_tunnel_sessions_by_endpoint.end()) {
-                    session = it->second;
-                }
+                session = packet_tunnel_registry_.FindByEndpointLocked(client_str);
             }
 
             if (!session || !session->active) {
@@ -3922,7 +3762,8 @@ private:
                                                        session_uuid,
                                                        resolved_server_key,
                                                        virtual_ip_be,
-                                                       mtu);
+                                                       mtu,
+                                                       monotonic_millis());
             session->handshake_flags = flags;
             session->is_remote_linux_node =
                 is_remote_linux_node_session(resolved_server_key, virtual_ip_be);
@@ -3934,14 +3775,7 @@ private:
             shared_ptr<PacketTunnelSession> replaced_session;
             {
                 lock_guard<mutex> lock(packet_tunnel_mutex);
-                auto it = packet_tunnel_tcp_sessions.find(build_scoped_virtual_ip_key(resolved_server_key,
-                                                                                       virtual_ip_be));
-                if (it != packet_tunnel_tcp_sessions.end()) {
-                    replaced_session = it->second;
-                }
-                erase_packet_tunnel_tcp_session_locked(replaced_session);
-                packet_tunnel_tcp_sessions[build_scoped_virtual_ip_key(resolved_server_key,
-                                                                       virtual_ip_be)] = session;
+                packet_tunnel_registry_.UpsertTcpLocked(session, &replaced_session);
             }
 
             if (replaced_session && replaced_session->client_fd != client_fd) {
