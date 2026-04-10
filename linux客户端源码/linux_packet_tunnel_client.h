@@ -87,10 +87,20 @@ private:
         uint8_t endpoint_family;
         uint16_t endpoint_port;
         uint8_t endpoint_addr[16];
+        uint32_t success_count;
+        uint32_t failure_count;
+        unsigned long long last_success_ms;
+        unsigned long long last_failure_ms;
+        unsigned long long last_connect_ms;
 
         TcpDirectCandidate()
             : endpoint_family(0),
-              endpoint_port(0) {
+              endpoint_port(0),
+              success_count(0),
+              failure_count(0),
+              last_success_ms(0),
+              last_failure_ms(0),
+              last_connect_ms(0) {
             memset(endpoint_addr, 0, sizeof(endpoint_addr));
         }
     };
@@ -121,6 +131,7 @@ private:
     struct TcpDirectConnection {
         int sock;
         std::string peer_virtual_ip;
+        TcpDirectCandidate candidate;
         std::atomic<bool> active;
         std::atomic<unsigned long long> last_rx_ms;
         std::atomic<unsigned long long> last_tx_ms;
@@ -215,6 +226,13 @@ private:
                                    int sock,
                                    bool enter_cooldown);
     void MaintainTcpDirectConnections(unsigned long long tick);
+    void RecordTcpDirectCandidateResult(const std::string& peer_virtual_ip,
+                                        const TcpDirectCandidate& candidate,
+                                        bool success,
+                                        unsigned long long connect_ms);
+    std::vector<TcpDirectCandidate> BuildOrderedTcpDirectCandidates(
+        const TcpDirectOffer& offer,
+        unsigned long long tick) const;
     bool SendDatagram(const uint8_t* data, size_t length, std::string* error);
     int RecvDatagram(uint8_t* data, size_t length, std::string* error);
     uint32_t ParseVirtualIp(std::string* error) const;

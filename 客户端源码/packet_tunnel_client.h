@@ -125,10 +125,20 @@ private:
         uint8_t endpoint_family;
         uint16_t endpoint_port;
         uint8_t endpoint_addr[16];
+        uint32_t success_count;
+        uint32_t failure_count;
+        unsigned long long last_success_tick_ms;
+        unsigned long long last_failure_tick_ms;
+        unsigned long long last_connect_ms;
 
         TcpDirectCandidate()
             : endpoint_family(0),
-              endpoint_port(0) {
+              endpoint_port(0),
+              success_count(0),
+              failure_count(0),
+              last_success_tick_ms(0),
+              last_failure_tick_ms(0),
+              last_connect_ms(0) {
             ZeroMemory(endpoint_addr, sizeof(endpoint_addr));
         }
     };
@@ -159,6 +169,7 @@ private:
     struct TcpDirectConnection {
         SOCKET sock;
         std::string peer_virtual_ip;
+        TcpDirectCandidate candidate;
         std::atomic<bool> active;
         std::atomic<unsigned long long> last_rx_tick_ms;
         std::atomic<unsigned long long> last_tx_tick_ms;
@@ -273,6 +284,13 @@ private:
                                    SOCKET sock,
                                    bool enter_cooldown);
     void MaintainTcpDirectConnections(unsigned long long now_tick);
+    void RecordTcpDirectCandidateResult(const std::string& peer_virtual_ip,
+                                        const TcpDirectCandidate& candidate,
+                                        bool success,
+                                        unsigned long long connect_ms);
+    std::vector<TcpDirectCandidate> BuildOrderedTcpDirectCandidates(
+        const TcpDirectOffer& offer,
+        unsigned long long now_tick) const;
     bool SendDatagram(const uint8_t* data, size_t length, std::wstring* error_msg);
     int RecvDatagram(uint8_t* data, size_t length, std::wstring* error_msg);
     uint32_t ParseVirtualIp(std::wstring* error_msg) const;

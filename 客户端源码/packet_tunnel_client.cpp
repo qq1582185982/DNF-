@@ -5029,6 +5029,98 @@ void PacketTunnelClient::MaintainTcpDirectConnections(unsigned long long now_tic
     }
 }
 
+void PacketTunnelClient::RecordTcpDirectCandidateResult(
+    const std::string& peer_virtual_ip,
+    const TcpDirectCandidate& candidate,
+    bool success,
+    unsigned long long connect_ms) {
+    if (peer_virtual_ip.empty()) {
+        return;
+    }
+
+    const unsigned long long now_tick = GetTickCount64();
+    std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
+    std::map<std::string, TcpDirectOffer>::iterator offer_it =
+        tcp_direct_offers_.find(peer_virtual_ip);
+    if (offer_it == tcp_direct_offers_.end()) {
+        return;
+    }
+
+    std::vector<TcpDirectCandidate>& candidates = offer_it->second.candidates;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        TcpDirectCandidate& existing = candidates[i];
+        const size_t addr_len =
+            existing.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4 ? 4 : 16;
+        if (existing.endpoint_family != candidate.endpoint_family ||
+            existing.endpoint_port != candidate.endpoint_port ||
+            memcmp(existing.endpoint_addr, candidate.endpoint_addr, addr_len) != 0) {
+            continue;
+        }
+        if (success) {
+            ++existing.success_count;
+            existing.last_success_tick_ms = now_tick;
+            existing.last_connect_ms = connect_ms;
+            offer_it->second.next_candidate_index = i;
+        } else {
+            ++existing.failure_count;
+            existing.last_failure_tick_ms = now_tick;
+        }
+        return;
+    }
+}
+
+std::vector<PacketTunnelClient::TcpDirectCandidate>
+PacketTunnelClient::BuildOrderedTcpDirectCandidates(const TcpDirectOffer& offer,
+                                                    unsigned long long now_tick) const {
+    std::vector<TcpDirectCandidate> ordered = offer.candidates;
+    if (ordered.empty() && offer.endpoint_port != 0) {
+        TcpDirectCandidate fallback_candidate;
+        fallback_candidate.endpoint_family = offer.endpoint_family;
+        fallback_candidate.endpoint_port = offer.endpoint_port;
+        memcpy(fallback_candidate.endpoint_addr,
+               offer.endpoint_addr,
+               sizeof(fallback_candidate.endpoint_addr));
+        ordered.push_back(fallback_candidate);
+    }
+    if (ordered.size() <= 1) {
+        return ordered;
+    }
+
+    std::stable_sort(ordered.begin(),
+                     ordered.end(),
+                     [now_tick](const TcpDirectCandidate& left,
+                                const TcpDirectCandidate& right) {
+                         const bool left_recent_fail =
+                             left.last_failure_tick_ms != 0 &&
+                             now_tick >= left.last_failure_tick_ms &&
+                             (now_tick - left.last_failure_tick_ms) <
+                                 kTcpDirectRetryCooldownMs;
+                         const bool right_recent_fail =
+                             right.last_failure_tick_ms != 0 &&
+                             now_tick >= right.last_failure_tick_ms &&
+                             (now_tick - right.last_failure_tick_ms) <
+                                 kTcpDirectRetryCooldownMs;
+                         if (left_recent_fail != right_recent_fail) {
+                             return !left_recent_fail;
+                         }
+                         if ((left.success_count > 0) != (right.success_count > 0)) {
+                             return left.success_count > 0;
+                         }
+                         if (left.success_count != right.success_count) {
+                             return left.success_count > right.success_count;
+                         }
+                         const unsigned long long left_connect =
+                             left.last_connect_ms != 0 ? left.last_connect_ms : 0xffffffffull;
+                         const unsigned long long right_connect =
+                             right.last_connect_ms != 0 ? right.last_connect_ms : 0xffffffffull;
+                         if (left_connect != right_connect) {
+                             return left_connect < right_connect;
+                         }
+                         return left.failure_count < right.failure_count;
+                     });
+    return ordered;
+}
+
 bool PacketTunnelClient::TrySendTcpDirectPacket(const std::string& peer_virtual_ip,
                                                 const uint8_t* data,
                                                 size_t length) {
@@ -5065,6 +5157,7 @@ bool PacketTunnelClient::TrySendTcpDirectPacket(const std::string& peer_virtual_
     }
 
     PacketTunnelWarnLog("tcp direct send failed, fallback to relay peer=" + peer_virtual_ip);
+    RecordTcpDirectCandidateResult(peer_virtual_ip, connection->candidate, false, 0);
     RemoveTcpDirectConnection(peer_virtual_ip, connection->sock, true);
     MaybeStartTcpDirectConnect(peer_virtual_ip);
     return false;
@@ -5127,16 +5220,8 @@ void PacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_virtual_
         }
     };
 
-    std::vector<TcpDirectCandidate> candidates = offer.candidates;
-    if (candidates.empty() && offer.endpoint_port != 0) {
-        TcpDirectCandidate fallback_candidate;
-        fallback_candidate.endpoint_family = offer.endpoint_family;
-        fallback_candidate.endpoint_port = offer.endpoint_port;
-        memcpy(fallback_candidate.endpoint_addr,
-               offer.endpoint_addr,
-               sizeof(fallback_candidate.endpoint_addr));
-        candidates.push_back(fallback_candidate);
-    }
+    std::vector<TcpDirectCandidate> candidates =
+        BuildOrderedTcpDirectCandidates(offer, GetTickCount64());
     if (candidates.empty()) {
         finish_connect_attempt(true);
         return;
@@ -5151,10 +5236,8 @@ void PacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_virtual_
     }
 
     const size_t candidate_count = candidates.size();
-    const size_t start_index =
-        candidate_count == 0 ? 0 : (offer.next_candidate_index % candidate_count);
     for (size_t attempt = 0; attempt < candidate_count && !stop_requested_; ++attempt) {
-        const size_t candidate_index = (start_index + attempt) % candidate_count;
+        const size_t candidate_index = attempt;
         const TcpDirectCandidate& candidate = candidates[candidate_index];
 
         sockaddr_storage peer_addr = {};
@@ -5174,6 +5257,7 @@ void PacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_virtual_
         ConfigureTcpStreamSocket(direct_sock);
 
         int connect_error = 0;
+        const unsigned long long connect_start_tick = GetTickCount64();
         if (!ConnectSocketWithTimeout(direct_sock,
                                       peer_addr,
                                       peer_addr_len,
@@ -5185,13 +5269,20 @@ void PacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_virtual_
                                      " err=" + std::to_string(connect_error));
             }
             closesocket(direct_sock);
+            RecordTcpDirectCandidateResult(peer_virtual_ip, candidate, false, 0);
             continue;
         }
+        const unsigned long long connect_end_tick = GetTickCount64();
+        const unsigned long long connect_elapsed =
+            connect_end_tick >= connect_start_tick
+                ? (connect_end_tick - connect_start_tick)
+                : 0;
 
         std::shared_ptr<TcpDirectConnection> connection =
             std::make_shared<TcpDirectConnection>();
         connection->sock = direct_sock;
         connection->peer_virtual_ip = peer_virtual_ip;
+        connection->candidate = candidate;
         connection->active = true;
 
         std::vector<uint8_t> open_payload(packet_tunnel::kTcpDirectOpenPayloadSize, 0);
@@ -5204,6 +5295,7 @@ void PacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_virtual_
                                  open_payload.size(),
                                  NULL)) {
             CloseSocketQuiet(&connection->sock);
+            RecordTcpDirectCandidateResult(peer_virtual_ip, candidate, false, 0);
             continue;
         }
         if (stop_requested_) {
@@ -5212,14 +5304,7 @@ void PacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_virtual_
             return;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
-            std::map<std::string, TcpDirectOffer>::iterator it =
-                tcp_direct_offers_.find(peer_virtual_ip);
-            if (it != tcp_direct_offers_.end() && !it->second.candidates.empty()) {
-                it->second.next_candidate_index = candidate_index;
-            }
-        }
+        RecordTcpDirectCandidateResult(peer_virtual_ip, candidate, true, connect_elapsed);
         RegisterTcpDirectConnection(peer_virtual_ip, connection, false);
         connection->read_thread =
             std::thread(&PacketTunnelClient::TcpDirectReadLoop, this, connection, false);
@@ -5643,7 +5728,9 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                                      std::to_string(offer.endpoint_version));
                 return true;
             }
+            std::vector<TcpDirectCandidate> previous_candidates;
             if (stored.endpoint_version != offer.endpoint_version) {
+                previous_candidates = stored.candidates;
                 stored.candidates.clear();
                 stored.next_candidate_index = 0;
                 changed = true;
@@ -5654,6 +5741,23 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             memcpy(candidate.endpoint_addr,
                    offer.endpoint_addr,
                    sizeof(candidate.endpoint_addr));
+            for (size_t i = 0; i < previous_candidates.size(); ++i) {
+                const TcpDirectCandidate& previous = previous_candidates[i];
+                const size_t addr_len =
+                    previous.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4 ? 4 : 16;
+                if (previous.endpoint_family == candidate.endpoint_family &&
+                    previous.endpoint_port == candidate.endpoint_port &&
+                    memcmp(previous.endpoint_addr,
+                           candidate.endpoint_addr,
+                           addr_len) == 0) {
+                    candidate.success_count = previous.success_count;
+                    candidate.failure_count = previous.failure_count;
+                    candidate.last_success_tick_ms = previous.last_success_tick_ms;
+                    candidate.last_failure_tick_ms = previous.last_failure_tick_ms;
+                    candidate.last_connect_ms = previous.last_connect_ms;
+                    break;
+                }
+            }
             bool candidate_found = false;
             for (size_t i = 0; i < stored.candidates.size(); ++i) {
                 const TcpDirectCandidate& existing = stored.candidates[i];
