@@ -221,6 +221,7 @@
 #include <net/if.h>
 #include <pthread.h>
 #include "tcp_config_server.h"
+#include "packet_tunnel_direct_candidates.h"
 #include "packet_tunnel_protocol.h"
 #include "peer_coord.h"
 #include "tun_manager.h"
@@ -1112,18 +1113,6 @@ struct ParsedTcpDirectAdvertiseFrame {
     uint16_t listen_port;
 };
 
-struct TcpDirectCandidate {
-    uint8_t endpoint_family;
-    uint16_t endpoint_port;
-    uint8_t endpoint_addr[16];
-
-    TcpDirectCandidate()
-        : endpoint_family(packet_tunnel::kPeerEndpointFamilyUnknown),
-          endpoint_port(0) {
-        memset(endpoint_addr, 0, sizeof(endpoint_addr));
-    }
-};
-
 static string packet_tunnel_frame_name(uint8_t frame_type) {
     switch (frame_type) {
     case packet_tunnel::kFrameHeartbeat:
@@ -1252,20 +1241,6 @@ static bool parse_udp_direct_candidate_advertise_frame(const uint8_t* payload,
     return parse_tcp_direct_candidate_advertise_frame(payload,
                                                      packet_tunnel::kTcpDirectCandidateAdvertisePayloadSize,
                                                      out_candidate);
-}
-
-static string tcp_direct_candidate_to_string(const TcpDirectCandidate& candidate) {
-    char buffer[INET6_ADDRSTRLEN] = {};
-    if (candidate.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4) {
-        if (inet_ntop(AF_INET, candidate.endpoint_addr, buffer, sizeof(buffer)) != nullptr) {
-            return string(buffer) + ":" + to_string(candidate.endpoint_port);
-        }
-    } else if (candidate.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv6) {
-        if (inet_ntop(AF_INET6, candidate.endpoint_addr, buffer, sizeof(buffer)) != nullptr) {
-            return "[" + string(buffer) + "]:" + to_string(candidate.endpoint_port);
-        }
-    }
-    return "unknown";
 }
 
 static bool encode_tcp_candidate_peer_offer_payload(uint32_t peer_virtual_ip_be,
@@ -1555,156 +1530,31 @@ private:
         return "unknown";
     }
 
-    static bool parse_client_endpoint_string(const string& client_str,
-                                             sockaddr_storage* out_addr,
-                                             socklen_t* out_addr_len) {
-        if (out_addr == nullptr || out_addr_len == nullptr || client_str.empty()) {
-            return false;
+    static PacketTunnelCandidateOwnerView build_candidate_owner_view(
+        const shared_ptr<PacketTunnelSession>& session) {
+        PacketTunnelCandidateOwnerView owner;
+        if (!session) {
+            return owner;
         }
 
-        memset(out_addr, 0, sizeof(*out_addr));
-        *out_addr_len = 0;
-
-        if (client_str[0] == '[') {
-            size_t closing = client_str.find(']');
-            size_t colon = client_str.rfind(':');
-            if (closing == string::npos || colon == string::npos || colon <= closing + 1) {
-                return false;
-            }
-            string host = client_str.substr(1, closing - 1);
-            string port_str = client_str.substr(colon + 1);
-            int port = atoi(port_str.c_str());
-            if (port <= 0 || port > 65535) {
-                return false;
-            }
-
-            sockaddr_in6* addr6 = reinterpret_cast<sockaddr_in6*>(out_addr);
-            addr6->sin6_family = AF_INET6;
-            addr6->sin6_port = htons(static_cast<uint16_t>(port));
-            if (inet_pton(AF_INET6, host.c_str(), &addr6->sin6_addr) != 1) {
-                return false;
-            }
-            *out_addr_len = sizeof(sockaddr_in6);
-            return true;
-        }
-
-        size_t colon = client_str.rfind(':');
-        if (colon == string::npos) {
-            return false;
-        }
-        string host = client_str.substr(0, colon);
-        string port_str = client_str.substr(colon + 1);
-        int port = atoi(port_str.c_str());
-        if (port <= 0 || port > 65535) {
-            return false;
-        }
-
-        sockaddr_in* addr4 = reinterpret_cast<sockaddr_in*>(out_addr);
-        addr4->sin_family = AF_INET;
-        addr4->sin_port = htons(static_cast<uint16_t>(port));
-        if (inet_pton(AF_INET, host.c_str(), &addr4->sin_addr) != 1) {
-            return false;
-        }
-        *out_addr_len = sizeof(sockaddr_in);
-        return true;
-    }
-
-    static bool build_tcp_direct_candidate_from_sockaddr(const sockaddr_storage& addr,
-                                                         uint16_t port_override,
-                                                         TcpDirectCandidate* out_candidate) {
-        if (out_candidate == nullptr || port_override == 0) {
-            return false;
-        }
-        TcpDirectCandidate candidate;
-        if (addr.ss_family == AF_INET) {
-            const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(&addr);
-            candidate.endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
-            candidate.endpoint_port = port_override;
-            memcpy(candidate.endpoint_addr, &addr4->sin_addr, 4);
-        } else if (addr.ss_family == AF_INET6) {
-            const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(&addr);
-            candidate.endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv6;
-            candidate.endpoint_port = port_override;
-            memcpy(candidate.endpoint_addr, &addr6->sin6_addr, 16);
-        } else {
-            return false;
-        }
-        *out_candidate = candidate;
-        return true;
-    }
-
-    static bool tcp_direct_candidate_equals(const TcpDirectCandidate& left,
-                                            const TcpDirectCandidate& right) {
-        if (left.endpoint_family != right.endpoint_family ||
-            left.endpoint_port != right.endpoint_port) {
-            return false;
-        }
-        const size_t addr_len =
-            left.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4 ? 4 : 16;
-        return memcmp(left.endpoint_addr, right.endpoint_addr, addr_len) == 0;
-    }
-
-    static void append_unique_tcp_direct_candidate(vector<TcpDirectCandidate>* candidates,
-                                                   const TcpDirectCandidate& candidate) {
-        if (candidates == nullptr || candidate.endpoint_port == 0) {
-            return;
-        }
-        for (size_t i = 0; i < candidates->size(); ++i) {
-            if (tcp_direct_candidate_equals((*candidates)[i], candidate)) {
-                return;
-            }
-        }
-        candidates->push_back(candidate);
+        owner.client_endpoint = session->client_str;
+        owner.use_udp = session->use_udp;
+        owner.udp_addr = session->udp_addr;
+        owner.udp_addr_len = session->udp_addr_len;
+        owner.tcp_direct_listen_port = session->tcp_direct_listen_port;
+        owner.udp_direct_candidates = session->udp_direct_candidates;
+        owner.tcp_direct_candidates = session->tcp_direct_candidates;
+        return owner;
     }
 
     static vector<TcpDirectCandidate> build_tcp_direct_candidates_for_session(
         const shared_ptr<PacketTunnelSession>& session) {
-        vector<TcpDirectCandidate> candidates;
-        if (!session || session->tcp_direct_listen_port == 0) {
-            return candidates;
-        }
-
-        sockaddr_storage observed_addr = {};
-        socklen_t observed_addr_len = 0;
-        if (parse_client_endpoint_string(session->client_str, &observed_addr, &observed_addr_len)) {
-            TcpDirectCandidate observed;
-            if (build_tcp_direct_candidate_from_sockaddr(observed_addr,
-                                                         session->tcp_direct_listen_port,
-                                                         &observed)) {
-                append_unique_tcp_direct_candidate(&candidates, observed);
-            }
-        }
-
-        for (size_t i = 0; i < session->tcp_direct_candidates.size(); ++i) {
-            append_unique_tcp_direct_candidate(&candidates, session->tcp_direct_candidates[i]);
-        }
-        return candidates;
+        return BuildTcpDirectCandidatesForOwner(build_candidate_owner_view(session));
     }
 
     static vector<TcpDirectCandidate> build_udp_direct_candidates_for_session(
         const shared_ptr<PacketTunnelSession>& session) {
-        vector<TcpDirectCandidate> candidates;
-        if (!session || !session->use_udp) {
-            return candidates;
-        }
-
-        TcpDirectCandidate observed;
-        const uint16_t observed_port =
-            session->udp_addr.ss_family == AF_INET
-                ? ntohs(reinterpret_cast<const sockaddr_in*>(&session->udp_addr)->sin_port)
-                : (session->udp_addr.ss_family == AF_INET6
-                       ? ntohs(reinterpret_cast<const sockaddr_in6*>(&session->udp_addr)->sin6_port)
-                       : 0);
-        if (build_tcp_direct_candidate_from_sockaddr(session->udp_addr,
-                                                     observed_port,
-                                                     &observed)) {
-            append_unique_tcp_direct_candidate(&candidates, observed);
-        }
-
-        for (size_t i = 0; i < session->udp_direct_candidates.size(); ++i) {
-            append_unique_tcp_direct_candidate(&candidates, session->udp_direct_candidates[i]);
-        }
-        return candidates;
+        return BuildUdpDirectCandidatesForOwner(build_candidate_owner_view(session));
     }
 
     static string build_scoped_virtual_ip_key(const string& server_key, const string& virtual_ip) {
@@ -3684,10 +3534,10 @@ private:
                                     " payload_len=" + to_string(payload_len));
                     continue;
                 }
-                append_unique_tcp_direct_candidate(&session->udp_direct_candidates, candidate);
+                AppendUniquePacketTunnelDirectCandidate(&session->udp_direct_candidates, candidate);
                 Logger::info("[IP Tunnel|" + session->session_uuid + "] udp direct candidate advertise: virtual_ip=" +
                              describe_scoped_virtual_ip(session->server_key, session->virtual_ip_be) +
-                             " endpoint=" + tcp_direct_candidate_to_string(candidate) +
+                             " endpoint=" + PacketTunnelDirectCandidateToString(candidate) +
                              " candidates=" + to_string(session->udp_direct_candidates.size()));
                 announce_peer_offers_for_session(session, true);
                 continue;
@@ -4173,10 +4023,10 @@ private:
                                         " payload_len=" + to_string(payload_len));
                         continue;
                     }
-                    append_unique_tcp_direct_candidate(&session->tcp_direct_candidates, candidate);
+                    AppendUniquePacketTunnelDirectCandidate(&session->tcp_direct_candidates, candidate);
                     Logger::info("[IP Tunnel|" + session_uuid + "] tcp direct candidate advertise: virtual_ip=" +
                                  describe_scoped_virtual_ip(session->server_key, session->virtual_ip_be) +
-                                 " endpoint=" + tcp_direct_candidate_to_string(candidate) +
+                                 " endpoint=" + PacketTunnelDirectCandidateToString(candidate) +
                                  " candidates=" + to_string(session->tcp_direct_candidates.size()));
                     if (session->tcp_direct_listen_port != 0) {
                         announce_tcp_peer_offers_for_session(session, true);
