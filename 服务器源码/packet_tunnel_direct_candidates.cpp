@@ -64,6 +64,16 @@ bool ParsePacketTunnelClientEndpointString(const std::string& client_str,
         return false;
     }
 
+    if (host.find(':') != std::string::npos) {
+        sockaddr_in6* addr6 = reinterpret_cast<sockaddr_in6*>(out_addr);
+        addr6->sin6_family = AF_INET6;
+        addr6->sin6_port = htons(static_cast<uint16_t>(port));
+        if (inet_pton(AF_INET6, host.c_str(), &addr6->sin6_addr) == 1) {
+            *out_addr_len = sizeof(sockaddr_in6);
+            return true;
+        }
+    }
+
     sockaddr_in* addr4 = reinterpret_cast<sockaddr_in*>(out_addr);
     addr4->sin_family = AF_INET;
     addr4->sin_port = htons(static_cast<uint16_t>(port));
