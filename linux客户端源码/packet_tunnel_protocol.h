@@ -9,6 +9,11 @@ static const uint32_t kHandshakeConnId = 0xFFFFFFFEu;
 static const uint16_t kHandshakePortMarker = 0;
 static const uint8_t kProtocolVersion = 1;
 
+enum HandshakeFlags : uint8_t {
+    kHandshakeFlagNone = 0,
+    kHandshakeFlagRelayOnly = 1 << 0
+};
+
 enum StatusCode : uint8_t {
     kStatusOk = 0,
     kStatusInvalidRequest = 1,

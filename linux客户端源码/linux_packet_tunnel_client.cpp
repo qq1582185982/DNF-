@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -990,9 +991,11 @@ LinuxPacketTunnelClient::LinuxPacketTunnelClient(const std::string& tunnel_host,
       mtu_(mtu),
       tun_manager_(tun_manager),
       sock_(-1),
+      tcp_sock_(-1),
       socket_family_(AF_UNSPEC),
       connected_(false),
       stop_requested_(false),
+      tcp_connected_(false),
       last_receive_ms_(0),
       last_network_activity_ms_(0),
       peer_link_manager_(new LinuxPeerLinkManager()),
@@ -1238,6 +1241,21 @@ bool LinuxPacketTunnelClient::Start(std::string* error) {
         Stop();
         return false;
     }
+    std::string tcp_error;
+    if (!ConnectTcpSocket(&tcp_error) ||
+        !SendTcpHandshake(&tcp_error) ||
+        !ReceiveTcpHandshakeAck(&tcp_error)) {
+        if (tcp_sock_ >= 0) {
+            close(tcp_sock_);
+            tcp_sock_ = -1;
+        }
+        tcp_connected_ = false;
+        if (!tcp_error.empty()) {
+            LogWarn("packet tunnel tcp relay unavailable, fallback to udp relay: " + tcp_error);
+        } else {
+            LogWarn("packet tunnel tcp relay unavailable, fallback to udp relay");
+        }
+    }
     if (!StartThreads(error)) {
         Stop();
         return false;
@@ -1250,6 +1268,7 @@ bool LinuxPacketTunnelClient::Start(std::string* error) {
 void LinuxPacketTunnelClient::Stop() {
     stop_requested_ = true;
     connected_ = false;
+    tcp_connected_ = false;
     if (sock_ >= 0 && peer_link_manager_ != NULL) {
         std::vector<LinuxPeerRouteStatus> peers = peer_link_manager_->Snapshot();
         for (size_t i = 0; i < peers.size(); ++i) {
@@ -1274,9 +1293,16 @@ void LinuxPacketTunnelClient::Stop() {
         close(sock_);
         sock_ = -1;
     }
+    if (tcp_sock_ >= 0) {
+        close(tcp_sock_);
+        tcp_sock_ = -1;
+    }
 
     if (socket_thread_.joinable()) {
         socket_thread_.join();
+    }
+    if (tcp_thread_.joinable()) {
+        tcp_thread_.join();
     }
     if (tun_thread_.joinable()) {
         tun_thread_.join();
@@ -1413,7 +1439,73 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
     return true;
 }
 
-bool LinuxPacketTunnelClient::SendHandshake(std::string* error) {
+bool LinuxPacketTunnelClient::ConnectTcpSocket(std::string* error) {
+    tcp_connected_ = false;
+    if (tcp_sock_ >= 0) {
+        close(tcp_sock_);
+        tcp_sock_ = -1;
+    }
+    if (!server_endpoint_.valid) {
+        if (error != NULL) {
+            *error = "packet tunnel tcp relay endpoint is invalid";
+        }
+        return false;
+    }
+
+    const int family =
+        server_endpoint_.addr.ss_family != AF_UNSPEC ? server_endpoint_.addr.ss_family : socket_family_;
+    int sock = socket(family, SOCK_STREAM, IPPROTO_TCP);
+    if (sock < 0) {
+        if (error != NULL) {
+            *error = std::string("packet tunnel tcp socket create failed: ") + strerror(errno);
+        }
+        return false;
+    }
+
+    int buffer_bytes = kSocketBufferBytes;
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &buffer_bytes, sizeof(buffer_bytes));
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &buffer_bytes, sizeof(buffer_bytes));
+    timeval send_timeout = {};
+    send_timeout.tv_sec = kSocketSendTimeoutMs / 1000;
+    send_timeout.tv_usec = (kSocketSendTimeoutMs % 1000) * 1000;
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
+    timeval recv_timeout = {};
+    recv_timeout.tv_sec = kSocketReadTimeoutMs / 1000;
+    recv_timeout.tv_usec = (kSocketReadTimeoutMs % 1000) * 1000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
+    int keepalive = 1;
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+    int tcp_nodelay = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &tcp_nodelay, sizeof(tcp_nodelay));
+
+    if (connect(sock,
+                reinterpret_cast<const sockaddr*>(&server_endpoint_.addr),
+                server_endpoint_.addr_len) != 0) {
+        const std::string connect_error = std::string(strerror(errno));
+        close(sock);
+        if (error != NULL) {
+            *error = "packet tunnel tcp connect failed: " + connect_error;
+        }
+        return false;
+    }
+
+    tcp_sock_ = sock;
+    tcp_connected_ = true;
+    LogInfo("packet tunnel tcp relay connected to " +
+            LinuxSockaddrToString(server_endpoint_.addr, server_endpoint_.addr_len));
+    return true;
+}
+
+bool LinuxPacketTunnelClient::BuildHandshakePayload(bool relay_only,
+                                                    std::vector<uint8_t>* handshake,
+                                                    std::string* error) const {
+    if (handshake == NULL) {
+        if (error != NULL) {
+            *error = "packet tunnel handshake buffer is null";
+        }
+        return false;
+    }
+
     const uint8_t session_uuid_len = static_cast<uint8_t>(session_uuid_.size());
     if (client_id_.empty()) {
         if (error != NULL) {
@@ -1429,19 +1521,19 @@ bool LinuxPacketTunnelClient::SendHandshake(std::string* error) {
     }
 
     const uint8_t client_id_len = static_cast<uint8_t>(client_id_.size());
-    std::vector<uint8_t> handshake(7 + session_uuid_len + 1 + client_id_len + packet_tunnel::kHandshakeTailSize, 0);
+    handshake->assign(7 + session_uuid_len + 1 + client_id_len + packet_tunnel::kHandshakeTailSize, 0);
 
     uint32_t conn_id_be = htonl(packet_tunnel::kHandshakeConnId);
     uint16_t port_be = htons(packet_tunnel::kHandshakePortMarker);
-    memcpy(&handshake[0], &conn_id_be, sizeof(conn_id_be));
-    memcpy(&handshake[4], &port_be, sizeof(port_be));
-    handshake[6] = session_uuid_len;
+    memcpy(&(*handshake)[0], &conn_id_be, sizeof(conn_id_be));
+    memcpy(&(*handshake)[4], &port_be, sizeof(port_be));
+    (*handshake)[6] = session_uuid_len;
     if (session_uuid_len > 0) {
-        memcpy(&handshake[7], session_uuid_.data(), session_uuid_len);
+        memcpy(&(*handshake)[7], session_uuid_.data(), session_uuid_len);
     }
     const size_t client_id_offset = 7 + session_uuid_len;
-    handshake[client_id_offset] = client_id_len;
-    memcpy(&handshake[client_id_offset + 1], client_id_.data(), client_id_len);
+    (*handshake)[client_id_offset] = client_id_len;
+    memcpy(&(*handshake)[client_id_offset + 1], client_id_.data(), client_id_len);
 
     uint32_t virtual_ip_be = ParseVirtualIp(error);
     if (virtual_ip_be == 0) {
@@ -1449,13 +1541,56 @@ bool LinuxPacketTunnelClient::SendHandshake(std::string* error) {
     }
 
     const size_t tail = client_id_offset + 1 + client_id_len;
-    handshake[tail + 0] = packet_tunnel::kProtocolVersion;
-    handshake[tail + 1] = 0;
+    (*handshake)[tail + 0] = packet_tunnel::kProtocolVersion;
+    (*handshake)[tail + 1] =
+        relay_only ? packet_tunnel::kHandshakeFlagRelayOnly : packet_tunnel::kHandshakeFlagNone;
     uint16_t mtu_be = htons(mtu_);
-    memcpy(&handshake[tail + 2], &mtu_be, sizeof(mtu_be));
-    memcpy(&handshake[tail + 4], &virtual_ip_be, sizeof(virtual_ip_be));
+    memcpy(&(*handshake)[tail + 2], &mtu_be, sizeof(mtu_be));
+    memcpy(&(*handshake)[tail + 4], &virtual_ip_be, sizeof(virtual_ip_be));
+    return true;
+}
+
+bool LinuxPacketTunnelClient::SendHandshake(std::string* error) {
+    std::vector<uint8_t> handshake;
+    if (!BuildHandshakePayload(false, &handshake, error)) {
+        return false;
+    }
 
     return SendDatagramToEndpoint(server_endpoint_, handshake.data(), handshake.size(), error);
+}
+
+bool LinuxPacketTunnelClient::SendTcpHandshake(std::string* error) {
+    if (!tcp_connected_ || tcp_sock_ < 0) {
+        if (error != NULL) {
+            *error = "packet tunnel tcp relay is not connected";
+        }
+        return false;
+    }
+
+    std::vector<uint8_t> handshake;
+    if (!BuildHandshakePayload(true, &handshake, error)) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(tcp_send_mutex_);
+    size_t sent = 0;
+    while (sent < handshake.size()) {
+        ssize_t n = send(tcp_sock_,
+                         handshake.data() + sent,
+                         handshake.size() - sent,
+                         MSG_NOSIGNAL);
+        if (n > 0) {
+            sent += static_cast<size_t>(n);
+            continue;
+        }
+        if (error != NULL) {
+            *error = std::string("packet tunnel tcp handshake send failed: ") + strerror(errno);
+        }
+        return false;
+    }
+
+    LogInfo("packet tunnel tcp relay handshake sent");
+    return true;
 }
 
 bool LinuxPacketTunnelClient::ReceiveHandshakeAck(std::string* error) {
@@ -1503,6 +1638,29 @@ bool LinuxPacketTunnelClient::ReceiveHandshakeAck(std::string* error) {
     return false;
 }
 
+bool LinuxPacketTunnelClient::ReceiveTcpHandshakeAck(std::string* error) {
+    uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
+    if (!RecvTcpExact(ack, sizeof(ack), error)) {
+        return false;
+    }
+
+    if (ack[0] != packet_tunnel::kProtocolVersion) {
+        if (error != NULL) {
+            *error = "packet tunnel tcp ack version mismatch";
+        }
+        return false;
+    }
+    if (ack[1] != packet_tunnel::kStatusOk) {
+        if (error != NULL) {
+            *error = "packet tunnel tcp ack rejected";
+        }
+        return false;
+    }
+
+    LogInfo("packet tunnel tcp relay handshake acknowledged");
+    return true;
+}
+
 bool LinuxPacketTunnelClient::StartThreads(std::string* error) {
     if (tun_manager_ == NULL) {
         if (error != NULL) {
@@ -1512,6 +1670,9 @@ bool LinuxPacketTunnelClient::StartThreads(std::string* error) {
     }
 
     socket_thread_ = std::thread(&LinuxPacketTunnelClient::SocketReadLoop, this);
+    if (tcp_connected_ && tcp_sock_ >= 0) {
+        tcp_thread_ = std::thread(&LinuxPacketTunnelClient::TcpSocketReadLoop, this);
+    }
     tun_thread_ = std::thread(&LinuxPacketTunnelClient::TunReadLoop, this);
     heartbeat_thread_ = std::thread(&LinuxPacketTunnelClient::HeartbeatLoop, this);
     return true;
@@ -2069,6 +2230,61 @@ int LinuxPacketTunnelClient::RecvDatagramFrom(uint8_t* data,
     return static_cast<int>(n);
 }
 
+void LinuxPacketTunnelClient::TcpSocketReadLoop() {
+    while (!stop_requested_ && tcp_connected_) {
+        uint8_t header[packet_tunnel::kFrameHeaderSize] = {};
+        std::string error;
+        if (!RecvTcpExact(header, sizeof(header), &error)) {
+            if (!stop_requested_ && tcp_connected_ && !error.empty()) {
+                LogWarn("packet tunnel tcp relay read stopped: " + error);
+            }
+            break;
+        }
+
+        const uint8_t frame_type = header[0];
+        const uint16_t payload_len = ntohs(*(const uint16_t*)(&header[1]));
+        std::vector<uint8_t> payload(payload_len);
+        if (payload_len > 0 &&
+            !RecvTcpExact(payload.data(), payload_len, &error)) {
+            if (!stop_requested_ && tcp_connected_ && !error.empty()) {
+                LogWarn("packet tunnel tcp relay payload read stopped: " + error);
+            }
+            break;
+        }
+
+        if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
+            continue;
+        }
+        if (HandlePeerControlFrame(frame_type, payload.data(), payload.size())) {
+            continue;
+        }
+        if (frame_type != packet_tunnel::kFrameIpv4Packet || tun_manager_ == NULL) {
+            LogInfo("ignore packet tunnel tcp relay frame type=" + std::to_string(frame_type) +
+                    " len=" + std::to_string(payload.size()));
+            continue;
+        }
+
+        std::string tun_error;
+        if (!tun_manager_->WritePacket(payload.data(), payload.size(), &tun_error)) {
+            if (!stop_requested_) {
+                LogWarn("packet tunnel tcp relay write to tun failed: " + tun_error);
+            }
+            continue;
+        }
+
+        TraceWatchedTcpPacket(payload.data(), payload.size(), "tunnel->tun/tcp");
+    }
+
+    const int stale_sock = tcp_sock_;
+    tcp_connected_ = false;
+    if (stale_sock >= 0) {
+        close(stale_sock);
+        if (tcp_sock_ == stale_sock) {
+            tcp_sock_ = -1;
+        }
+    }
+}
+
 void LinuxPacketTunnelClient::TunReadLoop() {
     uint32_t local_virtual_ip_be = 0;
     std::deque<std::vector<uint8_t>> deferred_packets;
@@ -2123,7 +2339,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                 : ("dst=" + dst_virtual_ip +
                    " proto=" + inner_proto_name +
                    " len=" + std::to_string(packet.size()));
-        if (!dst_virtual_ip.empty()) {
+        if (is_udp && !dst_virtual_ip.empty()) {
             UdpEndpoint peer_endpoint;
             bool direct_path_fresh = false;
             bool active_direct = false;
@@ -2209,58 +2425,78 @@ void LinuxPacketTunnelClient::TunReadLoop() {
 
         bool relay_send_ok = true;
         size_t relay_batch_frames = 1;
-        if (kPacketTunnelEnableLinuxRelayTcpMicroBatch &&
-            IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size())) {
-            std::vector<uint8_t> relay_datagram;
-            AppendPacketTunnelFrame(&relay_datagram,
-                                    packet_tunnel::kFrameIpv4Packet,
-                                    packet.data(),
-                                    packet.size());
-
-            while (relay_batch_frames < kPacketTunnelBatchMaxFrames &&
-                   relay_datagram.size() < kPacketTunnelBatchMaxDatagramBytes) {
-                std::vector<uint8_t> next_packet;
-                std::string next_error;
-                if (!tun_manager_ ||
-                    !tun_manager_->ReadPacket(&next_packet, 0, &next_error) ||
-                    next_packet.empty()) {
-                    break;
+        bool attempted_tcp_relay = false;
+        if (is_tcp && tcp_connected_ && tcp_sock_ >= 0) {
+            attempted_tcp_relay = true;
+            relay_send_ok = SendFrameOverTcp(packet_tunnel::kFrameIpv4Packet,
+                                             packet.data(),
+                                             packet.size(),
+                                             NULL);
+            if (!relay_send_ok) {
+                LogWarn("packet tunnel tcp relay send failed, fallback to udp relay");
+                tcp_connected_ = false;
+                const int stale_tcp_sock = tcp_sock_;
+                tcp_sock_ = -1;
+                if (stale_tcp_sock >= 0) {
+                    close(stale_tcp_sock);
                 }
-
-                if (!IsPacketTunnelRelayBatchEligibleTunPacket(next_packet, virtual_ip_)) {
-                    deferred_packets.push_front(std::move(next_packet));
-                    break;
-                }
-
-                const size_t next_frame_size =
-                    packet_tunnel::kFrameHeaderSize + next_packet.size();
-                if (relay_datagram.size() + next_frame_size > kPacketTunnelBatchMaxDatagramBytes) {
-                    deferred_packets.push_front(std::move(next_packet));
-                    break;
-                }
-
+            }
+        }
+        if (!attempted_tcp_relay || !relay_send_ok) {
+            relay_batch_frames = 1;
+            if (kPacketTunnelEnableLinuxRelayTcpMicroBatch &&
+                IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size())) {
+                std::vector<uint8_t> relay_datagram;
                 AppendPacketTunnelFrame(&relay_datagram,
                                         packet_tunnel::kFrameIpv4Packet,
-                                        next_packet.data(),
-                                        next_packet.size());
-                ++relay_batch_frames;
-            }
+                                        packet.data(),
+                                        packet.size());
 
-            std::lock_guard<std::mutex> lock(send_mutex_);
-            relay_send_ok = SendDatagramToEndpoint(server_endpoint_,
-                                                   relay_datagram.data(),
-                                                   relay_datagram.size(),
-                                                   NULL);
-            if (relay_batch_frames > 1) {
-                LogInfo("tcp tun->tunnel batched frames=" +
-                        std::to_string(relay_batch_frames) +
-                        " bytes=" + std::to_string(relay_datagram.size()));
+                while (relay_batch_frames < kPacketTunnelBatchMaxFrames &&
+                       relay_datagram.size() < kPacketTunnelBatchMaxDatagramBytes) {
+                    std::vector<uint8_t> next_packet;
+                    std::string next_error;
+                    if (!tun_manager_ ||
+                        !tun_manager_->ReadPacket(&next_packet, 0, &next_error) ||
+                        next_packet.empty()) {
+                        break;
+                    }
+
+                    if (!IsPacketTunnelRelayBatchEligibleTunPacket(next_packet, virtual_ip_)) {
+                        deferred_packets.push_front(std::move(next_packet));
+                        break;
+                    }
+
+                    const size_t next_frame_size =
+                        packet_tunnel::kFrameHeaderSize + next_packet.size();
+                    if (relay_datagram.size() + next_frame_size > kPacketTunnelBatchMaxDatagramBytes) {
+                        deferred_packets.push_front(std::move(next_packet));
+                        break;
+                    }
+
+                    AppendPacketTunnelFrame(&relay_datagram,
+                                            packet_tunnel::kFrameIpv4Packet,
+                                            next_packet.data(),
+                                            next_packet.size());
+                    ++relay_batch_frames;
+                }
+
+                std::lock_guard<std::mutex> lock(send_mutex_);
+                relay_send_ok = SendDatagramToEndpoint(server_endpoint_,
+                                                       relay_datagram.data(),
+                                                       relay_datagram.size(),
+                                                       NULL);
+                if (relay_batch_frames > 1) {
+                    LogInfo("tcp tun->tunnel batched frames=" +
+                            std::to_string(relay_batch_frames) +
+                            " bytes=" + std::to_string(relay_datagram.size()));
+                }
+            } else {
+                relay_send_ok = SendFrame(packet_tunnel::kFrameIpv4Packet,
+                                          packet.data(),
+                                          packet.size(),
+                                          NULL);
             }
-        } else {
-            relay_send_ok = SendFrame(packet_tunnel::kFrameIpv4Packet,
-                                      packet.data(),
-                                      packet.size(),
-                                      NULL);
         }
 
         if (!relay_send_ok) {
@@ -2427,11 +2663,106 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
     stop_requested_ = true;
 }
 
+bool LinuxPacketTunnelClient::RecvTcpExact(uint8_t* data,
+                                           size_t length,
+                                           std::string* error) {
+    size_t received = 0;
+    while (received < length && !stop_requested_ && tcp_connected_) {
+        if (tcp_sock_ < 0) {
+            break;
+        }
+
+        ssize_t n = recv(tcp_sock_, data + received, length - received, 0);
+        if (n > 0) {
+            received += static_cast<size_t>(n);
+            continue;
+        }
+        if (n == 0) {
+            if (error != NULL) {
+                *error = "packet tunnel tcp relay closed";
+            }
+            return false;
+        }
+
+        if ((errno == EAGAIN || errno == EWOULDBLOCK) &&
+            !stop_requested_ &&
+            tcp_connected_) {
+            continue;
+        }
+        if (error != NULL) {
+            *error = std::string("packet tunnel tcp recv failed: ") + strerror(errno);
+        }
+        return false;
+    }
+
+    if (received == length) {
+        return true;
+    }
+    if (error != NULL && error->empty() && !stop_requested_) {
+        *error = "packet tunnel tcp recv interrupted";
+    }
+    return false;
+}
+
 bool LinuxPacketTunnelClient::SendFrame(uint8_t frame_type,
                                         const uint8_t* data,
                                         size_t length,
                                         std::string* error) {
     return SendFrameToEndpoint(server_endpoint_, frame_type, data, length, error);
+}
+
+bool LinuxPacketTunnelClient::SendFrameOverTcp(uint8_t frame_type,
+                                               const uint8_t* data,
+                                               size_t length,
+                                               std::string* error) {
+    if (!tcp_connected_ || tcp_sock_ < 0) {
+        if (error != NULL) {
+            *error = "packet tunnel tcp relay is not connected";
+        }
+        return false;
+    }
+
+    std::vector<uint8_t> frame(packet_tunnel::kFrameHeaderSize + length, 0);
+    frame[0] = frame_type;
+    *(uint16_t*)(&frame[1]) = htons(static_cast<uint16_t>(length));
+    if (length > 0 && data != NULL) {
+        memcpy(&frame[packet_tunnel::kFrameHeaderSize], data, length);
+    }
+
+    std::lock_guard<std::mutex> lock(tcp_send_mutex_);
+    size_t sent = 0;
+    int transient_retries = 0;
+    while (sent < frame.size() && tcp_connected_ && tcp_sock_ >= 0) {
+        ssize_t n = send(tcp_sock_,
+                         frame.data() + sent,
+                         frame.size() - sent,
+                         MSG_NOSIGNAL);
+        if (n > 0) {
+            sent += static_cast<size_t>(n);
+            transient_retries = 0;
+            continue;
+        }
+
+        const int send_errno = errno;
+        if (IsLinuxTransientSendError(send_errno) &&
+            transient_retries + 1 < kSocketSendRetryCount) {
+            ++transient_retries;
+            usleep(kSocketSendRetryDelayMs * 1000);
+            continue;
+        }
+        if (error != NULL) {
+            *error = std::string("packet tunnel tcp send failed: ") + strerror(send_errno);
+        }
+        return false;
+    }
+
+    if (sent == frame.size()) {
+        return true;
+    }
+    if (error != NULL && error->empty()) {
+        *error = "packet tunnel tcp send interrupted";
+    }
+    return false;
 }
 
 bool LinuxPacketTunnelClient::SendDatagram(const uint8_t* data, size_t length, std::string* error) {

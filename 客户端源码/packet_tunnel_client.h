@@ -121,10 +121,17 @@ private:
     };
 
     bool ConnectSocket(std::wstring* error_msg);
+    bool ConnectTcpSocket(std::wstring* error_msg);
+    bool BuildHandshakePayload(bool relay_only,
+                               std::vector<uint8_t>* handshake,
+                               std::wstring* error_msg) const;
     bool SendHandshake(std::wstring* error_msg);
+    bool SendTcpHandshake(std::wstring* error_msg);
     bool ReceiveHandshakeAck(std::wstring* error_msg);
+    bool ReceiveTcpHandshakeAck(std::wstring* error_msg);
     bool StartThreads(std::wstring* error_msg);
     void SocketReadLoop();
+    void TcpSocketReadLoop();
     void WintunWriteLoop();
     void WintunReadLoop();
     void HeartbeatLoop();
@@ -172,7 +179,12 @@ private:
                          sockaddr_storage* source_addr,
                          int* source_addr_len,
                          std::wstring* error_msg);
+    bool RecvTcpExact(uint8_t* data, size_t length, std::wstring* error_msg);
     bool SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg);
+    bool SendFrameOverTcp(uint8_t frame_type,
+                          const uint8_t* data,
+                          size_t length,
+                          std::wstring* error_msg);
     bool SendDatagram(const uint8_t* data, size_t length, std::wstring* error_msg);
     int RecvDatagram(uint8_t* data, size_t length, std::wstring* error_msg);
     uint32_t ParseVirtualIp(std::wstring* error_msg) const;
@@ -206,17 +218,21 @@ private:
     uint16_t mtu_;
     WintunManager* wintun_manager_;
     SOCKET sock_;
+    SOCKET tcp_sock_;
     int socket_family_;
     UdpEndpoint server_endpoint_;
     std::atomic<bool> connected_;
     std::atomic<bool> stop_requested_;
+    std::atomic<bool> tcp_connected_;
     std::atomic<unsigned long long> last_receive_tick_;
     std::atomic<unsigned long long> last_network_activity_tick_;
     std::thread socket_read_thread_;
+    std::thread tcp_socket_read_thread_;
     std::thread wintun_write_thread_;
     std::thread wintun_read_thread_;
     std::thread heartbeat_thread_;
     CRITICAL_SECTION send_lock_;
+    CRITICAL_SECTION tcp_send_lock_;
     std::mutex wintun_write_mutex_;
     std::condition_variable wintun_write_cv_;
     std::deque<QueuedWintunPacket> wintun_write_business_queue_;
