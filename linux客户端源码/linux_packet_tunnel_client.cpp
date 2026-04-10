@@ -2,6 +2,7 @@
 
 #include "linux_client_common.h"
 #include "linux_peer_link_manager.h"
+#include "packet_flow_router.h"
 #include "packet_tunnel_protocol.h"
 
 #include <arpa/inet.h>
@@ -3671,7 +3672,19 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                      &peer_endpoint,
                                      &direct_path_fresh,
                                      &active_direct)) {
-                if (direct_path_fresh) {
+                PacketFlowRouterInput udp_flow_input;
+                udp_flow_input.is_udp = true;
+                udp_flow_input.has_udp_peer_endpoint = true;
+                udp_flow_input.direct_path_fresh = direct_path_fresh;
+                udp_flow_input.active_direct = active_direct;
+                udp_flow_input.direct_payload_ready = true;
+                udp_flow_input.route_desc_seed = route_desc;
+                udp_flow_input.target_peer_virtual_ip = dst_virtual_ip;
+                udp_flow_input.original_dst_virtual_ip = dst_virtual_ip;
+                const PacketFlowRouterDecision udp_flow_decision =
+                    PacketFlowRouter::Decide(udp_flow_input);
+
+                if (udp_flow_decision.primary_route == PacketFlowRoute::UdpDirect) {
                     if (SendFrameToEndpoint(peer_endpoint,
                                             packet_tunnel::kFrameIpv4Packet,
                                             packet.data(),
@@ -3747,7 +3760,16 @@ void LinuxPacketTunnelClient::TunReadLoop() {
             }
         }
 
-        if (is_tcp && !dst_virtual_ip.empty() &&
+        PacketFlowRouterInput flow_input;
+        flow_input.is_tcp = is_tcp;
+        flow_input.has_tcp_direct_target = !dst_virtual_ip.empty();
+        flow_input.tcp_relay_available = tcp_connected_ && tcp_sock_ >= 0;
+        flow_input.udp_relay_batch_eligible =
+            kPacketTunnelEnableLinuxRelayTcpMicroBatch &&
+            IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size());
+        const PacketFlowRouterDecision flow_decision = PacketFlowRouter::Decide(flow_input);
+
+        if (flow_decision.try_tcp_direct_now &&
             TrySendTcpDirectPacket(dst_virtual_ip, packet.data(), packet.size())) {
             LogInfo("tcp tun->tcp-peer dst=" + dst_virtual_ip + ":" +
                     std::to_string(dst_port) +
@@ -3759,7 +3781,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
         bool relay_send_ok = true;
         size_t relay_batch_frames = 1;
         bool attempted_tcp_relay = false;
-        if (is_tcp && tcp_connected_ && tcp_sock_ >= 0) {
+        if (flow_decision.try_tcp_relay_now) {
             attempted_tcp_relay = true;
             relay_send_ok = SendFrameOverTcp(packet_tunnel::kFrameIpv4Packet,
                                              packet.data(),
@@ -3777,8 +3799,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
         }
         if (!attempted_tcp_relay || !relay_send_ok) {
             relay_batch_frames = 1;
-            if (kPacketTunnelEnableLinuxRelayTcpMicroBatch &&
-                IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size())) {
+            if (flow_decision.allow_udp_relay_batch) {
                 std::vector<uint8_t> relay_datagram;
                 AppendPacketTunnelFrame(&relay_datagram,
                                         packet_tunnel::kFrameIpv4Packet,

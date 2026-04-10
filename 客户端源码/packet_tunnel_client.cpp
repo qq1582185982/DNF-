@@ -1,5 +1,6 @@
 #include "packet_tunnel_client.h"
 
+#include "packet_flow_router.h"
 #include "packet_tunnel_protocol.h"
 #include "peer_link_manager.h"
 #include "wintun_manager.h"
@@ -4380,18 +4381,29 @@ void PacketTunnelClient::WintunReadLoop() {
                 }
             }
 
-            std::string direct_route_desc = route_desc;
-            if (target_peer_virtual_ip != original_dst_virtual_ip) {
-                direct_route_desc += " resolved_peer=" + target_peer_virtual_ip +
-                                     " resolver=" + target_resolution;
-            }
+            PacketFlowRouterInput udp_flow_input;
+            udp_flow_input.is_udp = true;
+            udp_flow_input.has_udp_peer_endpoint = have_peer_endpoint;
+            udp_flow_input.direct_path_fresh = direct_path_fresh;
+            udp_flow_input.active_direct = active_direct;
+            udp_flow_input.resolved_gateway_target = resolved_gateway_target;
+            udp_flow_input.direct_payload_ready = direct_payload_ready;
+            udp_flow_input.route_desc_seed = route_desc;
+            udp_flow_input.target_peer_virtual_ip = target_peer_virtual_ip;
+            udp_flow_input.original_dst_virtual_ip = original_dst_virtual_ip;
+            udp_flow_input.target_resolution = target_resolution;
+            udp_flow_input.can_shadow_payload =
+                direct_payload_ready &&
+                !resolved_gateway_target &&
+                target_peer_virtual_ip == original_dst_virtual_ip &&
+                (src_port == 5063 || dst_port == 5063);
+            const PacketFlowRouterDecision udp_flow_decision =
+                PacketFlowRouter::Decide(udp_flow_input);
+            const std::string direct_route_desc = udp_flow_decision.route_desc;
 
             if (have_peer_endpoint) {
-                const bool prefer_direct_send =
-                    direct_path_fresh ||
-                    (active_direct && resolved_gateway_target && is_udp);
-                if (prefer_direct_send) {
-                    if (direct_payload_ready) {
+                if (udp_flow_decision.primary_route == PacketFlowRoute::UdpDirect) {
+                    if (udp_flow_decision.try_udp_direct_now) {
                         if (!direct_path_fresh && active_direct && resolved_gateway_target) {
                             if (debug_enabled) {
                                 PT_DEBUG("udp stale active direct send " + direct_route_desc);
@@ -4451,10 +4463,7 @@ void PacketTunnelClient::WintunReadLoop() {
                     bool sent_shadow_payload = false;
                     const bool can_shadow_send_payload =
                         should_send_probe &&
-                        direct_payload_ready &&
-                        !resolved_gateway_target &&
-                        target_peer_virtual_ip == original_dst_virtual_ip &&
-                        (src_port == 5063 || dst_port == 5063);
+                        udp_flow_decision.try_udp_shadow_payload;
                     if (can_shadow_send_payload &&
                         SendFrameToEndpoint(peer_endpoint,
                                             packet_tunnel::kFrameIpv4Packet,
@@ -4544,7 +4553,16 @@ void PacketTunnelClient::WintunReadLoop() {
             }
         }
 
-        if (is_tcp && !dst_virtual_ip.empty() &&
+        PacketFlowRouterInput flow_input;
+        flow_input.is_tcp = is_tcp;
+        flow_input.has_tcp_direct_target = !dst_virtual_ip.empty();
+        flow_input.tcp_relay_available = tcp_connected_ && tcp_sock_ != INVALID_SOCKET;
+        flow_input.udp_relay_batch_eligible =
+            kPacketTunnelEnableWinRelayTcpMicroBatch &&
+            IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size());
+        const PacketFlowRouterDecision flow_decision = PacketFlowRouter::Decide(flow_input);
+
+        if (flow_decision.try_tcp_direct_now &&
             TrySendTcpDirectPacket(dst_virtual_ip, packet.data(), packet.size())) {
             const unsigned long long frame_process_elapsed =
                 GetTickCount64() - frame_process_start;
@@ -4567,7 +4585,7 @@ void PacketTunnelClient::WintunReadLoop() {
         bool relay_send_ok = true;
         size_t relay_batch_frames = 1;
         bool attempted_tcp_relay = false;
-        if (is_tcp && tcp_connected_ && tcp_sock_ != INVALID_SOCKET) {
+        if (flow_decision.try_tcp_relay_now) {
             attempted_tcp_relay = true;
             relay_send_ok = SendFrameOverTcp(packet_tunnel::kFrameIpv4Packet,
                                              packet.data(),
@@ -4585,8 +4603,7 @@ void PacketTunnelClient::WintunReadLoop() {
         }
         if (!attempted_tcp_relay || !relay_send_ok) {
             relay_batch_frames = 1;
-            if (kPacketTunnelEnableWinRelayTcpMicroBatch &&
-                IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size())) {
+            if (flow_decision.allow_udp_relay_batch) {
                 std::vector<uint8_t> relay_datagram;
                 AppendPacketTunnelFrame(&relay_datagram,
                                         packet_tunnel::kFrameIpv4Packet,
