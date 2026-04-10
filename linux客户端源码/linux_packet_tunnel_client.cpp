@@ -371,6 +371,8 @@ std::string LinuxFrameName(uint8_t frame_type) {
         return "tcp_direct_open";
     case packet_tunnel::kFrameTcpDirectCandidateAdvertise:
         return "tcp_direct_candidate_advertise";
+    case packet_tunnel::kFrameUdpDirectCandidateAdvertise:
+        return "udp_direct_candidate_advertise";
     default:
         return "unknown";
     }
@@ -1414,6 +1416,11 @@ bool LinuxPacketTunnelClient::Start(std::string* error) {
         Stop();
         return false;
     }
+    std::string udp_candidate_error;
+    if (!SendUdpDirectCandidateAdvertises(&udp_candidate_error) &&
+        !udp_candidate_error.empty()) {
+        LogWarn("packet tunnel udp direct candidate advertise failed: " + udp_candidate_error);
+    }
     std::string tcp_direct_listener_error;
     if (!StartTcpDirectListener(&tcp_direct_listener_error)) {
         if (!tcp_direct_listener_error.empty()) {
@@ -1779,6 +1786,115 @@ bool LinuxPacketTunnelClient::SendTcpHandshake(std::string* error) {
 
     LogInfo("packet tunnel tcp relay handshake sent");
     return true;
+}
+
+bool LinuxPacketTunnelClient::SendUdpDirectCandidateAdvertises(std::string* error) {
+    if (sock_ < 0) {
+        if (error != NULL) {
+            *error = "packet tunnel udp socket is not connected";
+        }
+        return false;
+    }
+
+    sockaddr_storage local_addr = {};
+    socklen_t local_addr_len = sizeof(local_addr);
+    if (getsockname(sock_, reinterpret_cast<sockaddr*>(&local_addr), &local_addr_len) != 0) {
+        if (error != NULL) {
+            *error = std::string("packet tunnel udp getsockname failed: ") + strerror(errno);
+        }
+        return false;
+    }
+
+    uint16_t local_port = 0;
+    if (local_addr.ss_family == AF_INET) {
+        local_port = ntohs(reinterpret_cast<sockaddr_in*>(&local_addr)->sin_port);
+    } else if (local_addr.ss_family == AF_INET6) {
+        local_port = ntohs(reinterpret_cast<sockaddr_in6*>(&local_addr)->sin6_port);
+    }
+    if (local_port == 0) {
+        if (error != NULL) {
+            *error = "packet tunnel udp local port is unavailable";
+        }
+        return false;
+    }
+
+    size_t candidate_count = 0;
+    ifaddrs* interfaces = NULL;
+    if (getifaddrs(&interfaces) != 0) {
+        if (error != NULL) {
+            *error = std::string("packet tunnel udp interface enumeration failed: ") +
+                     strerror(errno);
+        }
+        return false;
+    }
+
+    for (ifaddrs* ifa = interfaces; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL ||
+            (ifa->ifa_flags & IFF_UP) == 0 ||
+            (ifa->ifa_flags & IFF_LOOPBACK) != 0) {
+            continue;
+        }
+
+        TcpDirectCandidate candidate;
+        candidate.endpoint_port = local_port;
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(ifa->ifa_addr);
+            const uint32_t ip = ntohl(addr4->sin_addr.s_addr);
+            if (ip == 0 ||
+                (ip & 0xff000000u) == 0x7f000000u ||
+                (ip & 0xffff0000u) == 0xa9fe0000u ||
+                (ip & 0xf0000000u) == 0xe0000000u) {
+                continue;
+            }
+            candidate.endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
+            memcpy(candidate.endpoint_addr, &addr4->sin_addr, 4);
+        } else if (ifa->ifa_addr->sa_family == AF_INET6) {
+            const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(ifa->ifa_addr);
+            if (IN6_IS_ADDR_UNSPECIFIED(&addr6->sin6_addr) ||
+                IN6_IS_ADDR_LOOPBACK(&addr6->sin6_addr) ||
+                IN6_IS_ADDR_LINKLOCAL(&addr6->sin6_addr) ||
+                IN6_IS_ADDR_MULTICAST(&addr6->sin6_addr)) {
+                continue;
+            }
+            candidate.endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv6;
+            memcpy(candidate.endpoint_addr, &addr6->sin6_addr, 16);
+        } else {
+            continue;
+        }
+
+        if (SendUdpDirectCandidateAdvertise(candidate, NULL)) {
+            ++candidate_count;
+        }
+    }
+    freeifaddrs(interfaces);
+
+    LogInfo("packet tunnel udp direct local candidates advertised count=" +
+            std::to_string(candidate_count));
+    return true;
+}
+
+bool LinuxPacketTunnelClient::SendUdpDirectCandidateAdvertise(
+    const TcpDirectCandidate& candidate,
+    std::string* error) {
+    if (candidate.endpoint_port == 0 ||
+        (candidate.endpoint_family != packet_tunnel::kPeerEndpointFamilyIpv4 &&
+         candidate.endpoint_family != packet_tunnel::kPeerEndpointFamilyIpv6)) {
+        if (error != NULL) {
+            *error = "packet tunnel udp direct candidate is invalid";
+        }
+        return false;
+    }
+
+    std::vector<uint8_t> payload(packet_tunnel::kUdpDirectCandidateAdvertisePayloadSize, 0);
+    payload[0] = candidate.endpoint_family;
+    packet_tunnel::write_u16_be(payload.data() + 2, candidate.endpoint_port);
+    memcpy(payload.data() + 4,
+           candidate.endpoint_addr,
+           candidate.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4 ? 4 : 16);
+    return SendFrame(packet_tunnel::kFrameUdpDirectCandidateAdvertise,
+                     payload.data(),
+                     payload.size(),
+                     error);
 }
 
 bool LinuxPacketTunnelClient::ReceiveHandshakeAck(std::string* error) {

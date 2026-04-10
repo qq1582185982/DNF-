@@ -153,6 +153,9 @@ private:
                                std::string* error) const;
     bool SendHandshake(std::string* error);
     bool SendTcpHandshake(std::string* error);
+    bool SendUdpDirectCandidateAdvertises(std::string* error);
+    bool SendUdpDirectCandidateAdvertise(const TcpDirectCandidate& candidate,
+                                         std::string* error);
     bool SendTcpDirectAdvertise(std::string* error);
     bool SendTcpDirectCandidateAdvertise(const TcpDirectCandidate& candidate,
                                          std::string* error);

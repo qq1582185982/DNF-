@@ -197,6 +197,9 @@ private:
                                std::wstring* error_msg) const;
     bool SendHandshake(std::wstring* error_msg);
     bool SendTcpHandshake(std::wstring* error_msg);
+    bool SendUdpDirectCandidateAdvertises(std::wstring* error_msg);
+    bool SendUdpDirectCandidateAdvertise(const TcpDirectCandidate& candidate,
+                                         std::wstring* error_msg);
     bool SendTcpDirectAdvertise(std::wstring* error_msg);
     bool SendTcpDirectCandidateAdvertise(const TcpDirectCandidate& candidate,
                                          std::wstring* error_msg);

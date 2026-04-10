@@ -1150,6 +1150,8 @@ static string packet_tunnel_frame_name(uint8_t frame_type) {
         return "tcp_direct_open";
     case packet_tunnel::kFrameTcpDirectCandidateAdvertise:
         return "tcp_direct_candidate_advertise";
+    case packet_tunnel::kFrameUdpDirectCandidateAdvertise:
+        return "udp_direct_candidate_advertise";
     default:
         return "unknown";
     }
@@ -1241,6 +1243,17 @@ static bool parse_tcp_direct_candidate_advertise_frame(const uint8_t* payload,
     return true;
 }
 
+static bool parse_udp_direct_candidate_advertise_frame(const uint8_t* payload,
+                                                       size_t payload_len,
+                                                       TcpDirectCandidate* out_candidate) {
+    if (payload_len != packet_tunnel::kUdpDirectCandidateAdvertisePayloadSize) {
+        return false;
+    }
+    return parse_tcp_direct_candidate_advertise_frame(payload,
+                                                     packet_tunnel::kTcpDirectCandidateAdvertisePayloadSize,
+                                                     out_candidate);
+}
+
 static string tcp_direct_candidate_to_string(const TcpDirectCandidate& candidate) {
     char buffer[INET6_ADDRSTRLEN] = {};
     if (candidate.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4) {
@@ -1253,41 +1266,6 @@ static string tcp_direct_candidate_to_string(const TcpDirectCandidate& candidate
         }
     }
     return "unknown";
-}
-
-static bool encode_peer_offer_payload(uint32_t peer_virtual_ip_be,
-                                      uint64_t endpoint_version,
-                                      const sockaddr_storage& endpoint_addr,
-                                      socklen_t endpoint_addr_len,
-                                      uint16_t port_override,
-                                      vector<uint8_t>* out_payload) {
-    (void)endpoint_addr_len;
-    if (out_payload == nullptr) {
-        return false;
-    }
-
-    vector<uint8_t> payload(packet_tunnel::kPeerOfferPayloadSize, 0);
-    packet_tunnel::write_u32_be(payload.data(), ntohl(peer_virtual_ip_be));
-    packet_tunnel::write_u64_be(payload.data() + 4, endpoint_version);
-
-    if (endpoint_addr.ss_family == AF_INET) {
-        const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(&endpoint_addr);
-        payload[12] = packet_tunnel::kPeerEndpointFamilyIpv4;
-        packet_tunnel::write_u16_be(payload.data() + 14,
-                                    port_override != 0 ? port_override : ntohs(addr4->sin_port));
-        memcpy(payload.data() + 16, &addr4->sin_addr, 4);
-    } else if (endpoint_addr.ss_family == AF_INET6) {
-        const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(&endpoint_addr);
-        payload[12] = packet_tunnel::kPeerEndpointFamilyIpv6;
-        packet_tunnel::write_u16_be(payload.data() + 14,
-                                    port_override != 0 ? port_override : ntohs(addr6->sin6_port));
-        memcpy(payload.data() + 16, &addr6->sin6_addr, 16);
-    } else {
-        return false;
-    }
-
-    *out_payload = payload;
-    return true;
 }
 
 static bool encode_tcp_candidate_peer_offer_payload(uint32_t peer_virtual_ip_be,
@@ -1478,6 +1456,7 @@ private:
         bool allow_peer_direct;
         bool is_remote_linux_node;
         uint16_t tcp_direct_listen_port;
+        vector<TcpDirectCandidate> udp_direct_candidates;
         vector<TcpDirectCandidate> tcp_direct_candidates;
         mutex send_mutex;
 
@@ -1698,6 +1677,32 @@ private:
 
         for (size_t i = 0; i < session->tcp_direct_candidates.size(); ++i) {
             append_unique_tcp_direct_candidate(&candidates, session->tcp_direct_candidates[i]);
+        }
+        return candidates;
+    }
+
+    static vector<TcpDirectCandidate> build_udp_direct_candidates_for_session(
+        const shared_ptr<PacketTunnelSession>& session) {
+        vector<TcpDirectCandidate> candidates;
+        if (!session || !session->use_udp) {
+            return candidates;
+        }
+
+        TcpDirectCandidate observed;
+        const uint16_t observed_port =
+            session->udp_addr.ss_family == AF_INET
+                ? ntohs(reinterpret_cast<const sockaddr_in*>(&session->udp_addr)->sin_port)
+                : (session->udp_addr.ss_family == AF_INET6
+                       ? ntohs(reinterpret_cast<const sockaddr_in6*>(&session->udp_addr)->sin6_port)
+                       : 0);
+        if (build_tcp_direct_candidate_from_sockaddr(session->udp_addr,
+                                                     observed_port,
+                                                     &observed)) {
+            append_unique_tcp_direct_candidate(&candidates, observed);
+        }
+
+        for (size_t i = 0; i < session->udp_direct_candidates.size(); ++i) {
+            append_unique_tcp_direct_candidate(&candidates, session->udp_direct_candidates[i]);
         }
         return candidates;
     }
@@ -2570,13 +2575,9 @@ private:
             }
         }
 
-        vector<uint8_t> local_offer_payload;
-        if (!encode_peer_offer_payload(session->virtual_ip_be,
-                                       local_version,
-                                       session->udp_addr,
-                                       session->udp_addr_len,
-                                       0,
-                                       &local_offer_payload)) {
+        const vector<TcpDirectCandidate> local_candidates =
+            build_udp_direct_candidates_for_session(session);
+        if (local_candidates.empty()) {
             Logger::warning("[" + server_name + "|IP Tunnel] failed to encode peer offer for " +
                             local_scope_label);
             return;
@@ -2615,41 +2616,47 @@ private:
                 continue;
             }
 
-            vector<uint8_t> peer_offer_payload;
-            if (!encode_peer_offer_payload(peer->virtual_ip_be,
-                                           peer_version,
-                                           peer->udp_addr,
-                                           peer->udp_addr_len,
-                                           0,
-                                           &peer_offer_payload)) {
+            const vector<TcpDirectCandidate> peer_candidates =
+                build_udp_direct_candidates_for_session(peer);
+            if (peer_candidates.empty()) {
                 Logger::warning("[" + server_name + "|IP Tunnel] failed to encode peer offer for " +
                                 peer_scope_label);
                 continue;
             }
 
-            if (send_packet_tunnel_frame(peer,
-                                         packet_tunnel::kFramePeerOffer,
-                                         local_offer_payload.data(),
-                                         local_offer_payload.size())) {
-                Logger::debug("[" + server_name + "|IP Tunnel] announce peer offer " +
-                              local_scope_label + " -> " + peer_scope_label +
-                              " version=" + to_string(local_version));
-            } else {
-                Logger::warning("[" + server_name + "|IP Tunnel] failed to send peer offer " +
-                                local_scope_label + " -> " + peer_scope_label);
+            size_t sent_local_candidates = 0;
+            for (size_t c = 0; c < local_candidates.size(); ++c) {
+                vector<uint8_t> local_offer_payload;
+                if (encode_tcp_candidate_peer_offer_payload(session->virtual_ip_be,
+                                                            local_version,
+                                                            local_candidates[c],
+                                                            &local_offer_payload) &&
+                    send_packet_tunnel_frame(peer,
+                                             packet_tunnel::kFramePeerOffer,
+                                             local_offer_payload.data(),
+                                             local_offer_payload.size())) {
+                    ++sent_local_candidates;
+                }
             }
 
-            if (send_packet_tunnel_frame(session,
-                                         packet_tunnel::kFramePeerOffer,
-                                         peer_offer_payload.data(),
-                                         peer_offer_payload.size())) {
-                Logger::debug("[" + server_name + "|IP Tunnel] announce peer offer " +
-                              peer_scope_label + " -> " + local_scope_label +
-                              " version=" + to_string(peer_version));
-            } else {
-                Logger::warning("[" + server_name + "|IP Tunnel] failed to send peer offer " +
-                                peer_scope_label + " -> " + local_scope_label);
+            size_t sent_peer_candidates = 0;
+            for (size_t c = 0; c < peer_candidates.size(); ++c) {
+                vector<uint8_t> peer_offer_payload;
+                if (encode_tcp_candidate_peer_offer_payload(peer->virtual_ip_be,
+                                                            peer_version,
+                                                            peer_candidates[c],
+                                                            &peer_offer_payload) &&
+                    send_packet_tunnel_frame(session,
+                                             packet_tunnel::kFramePeerOffer,
+                                             peer_offer_payload.data(),
+                                             peer_offer_payload.size())) {
+                    ++sent_peer_candidates;
+                }
             }
+            Logger::debug("[" + server_name + "|IP Tunnel] announce udp peer offers " +
+                          local_scope_label + " <-> " + peer_scope_label +
+                          " local_candidates=" + to_string(sent_local_candidates) +
+                          " peer_candidates=" + to_string(sent_peer_candidates));
         }
 
         ostringstream ss;
@@ -3664,6 +3671,25 @@ private:
                     session->active = false;
                 }
                 announce_peer_offers_if_due(session);
+                continue;
+            }
+
+            if (frame_type == packet_tunnel::kFrameUdpDirectCandidateAdvertise) {
+                TcpDirectCandidate candidate;
+                if (!parse_udp_direct_candidate_advertise_frame(payload,
+                                                                payload_len,
+                                                                &candidate)) {
+                    Logger::warning("[IP Tunnel|" + session->session_uuid + "] invalid " +
+                                    packet_tunnel_frame_name(frame_type) +
+                                    " payload_len=" + to_string(payload_len));
+                    continue;
+                }
+                append_unique_tcp_direct_candidate(&session->udp_direct_candidates, candidate);
+                Logger::info("[IP Tunnel|" + session->session_uuid + "] udp direct candidate advertise: virtual_ip=" +
+                             describe_scoped_virtual_ip(session->server_key, session->virtual_ip_be) +
+                             " endpoint=" + tcp_direct_candidate_to_string(candidate) +
+                             " candidates=" + to_string(session->udp_direct_candidates.size()));
+                announce_peer_offers_for_session(session, true);
                 continue;
             }
 

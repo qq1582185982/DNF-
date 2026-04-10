@@ -92,6 +92,20 @@ public:
     std::vector<PeerRouteStatus> Snapshot() const;
 
 private:
+    struct Candidate {
+        uint8_t endpoint_family;
+        uint16_t endpoint_port;
+        uint8_t endpoint_addr[16];
+        uint32_t failure_count;
+
+        Candidate()
+            : endpoint_family(0),
+              endpoint_port(0),
+              failure_count(0) {
+            memset(endpoint_addr, 0, sizeof(endpoint_addr));
+        }
+    };
+
     struct Entry {
         Entry()
             : state(PeerRouteState::RelayOnly),
@@ -112,6 +126,7 @@ private:
               direct_ready(false),
               direct_eligible(false),
               active_direct(false),
+              selected_candidate_index(0),
               pending_hello_version(0),
               pending_hello_nonce(0) {
             memset(endpoint_addr, 0, sizeof(endpoint_addr));
@@ -136,6 +151,8 @@ private:
         bool direct_ready;
         bool direct_eligible;
         bool active_direct;
+        std::vector<Candidate> candidates;
+        size_t selected_candidate_index;
         uint64_t pending_hello_version;
         uint32_t pending_hello_nonce;
     };
@@ -150,6 +167,17 @@ private:
     static void ResetDirectAssessment(Entry* entry);
     static void EnterState(Entry* entry, PeerRouteState next_state, uint64_t now_ms);
     static void EnterCooldown(Entry* entry, uint64_t now_ms);
+    static bool SameCandidate(const Candidate& candidate,
+                              uint8_t endpoint_family,
+                              const uint8_t* endpoint_addr,
+                              uint16_t endpoint_port);
+    static bool AddCandidate(Entry* entry,
+                             uint8_t endpoint_family,
+                             const uint8_t* endpoint_addr,
+                             uint16_t endpoint_port,
+                             size_t* out_index = NULL);
+    static bool SelectCandidate(Entry* entry, size_t index);
+    static bool SelectNextCandidate(Entry* entry);
     static void FillStatus(const std::string& peer_virtual_ip,
                            const Entry& entry,
                            PeerRouteStatus* out_status);

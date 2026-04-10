@@ -27,6 +27,86 @@ bool PeerLinkManager::HasEndpoint(const Entry& entry) {
     return entry.endpoint_family != 0 && entry.endpoint_port != 0;
 }
 
+bool PeerLinkManager::SameCandidate(const Candidate& candidate,
+                                    uint8_t endpoint_family,
+                                    const uint8_t* endpoint_addr,
+                                    uint16_t endpoint_port) {
+    if (endpoint_addr == NULL ||
+        candidate.endpoint_family != endpoint_family ||
+        candidate.endpoint_port != endpoint_port) {
+        return false;
+    }
+    return memcmp(candidate.endpoint_addr, endpoint_addr, sizeof(candidate.endpoint_addr)) == 0;
+}
+
+bool PeerLinkManager::AddCandidate(Entry* entry,
+                                   uint8_t endpoint_family,
+                                   const uint8_t* endpoint_addr,
+                                   uint16_t endpoint_port,
+                                   size_t* out_index) {
+    if (out_index != NULL) {
+        *out_index = 0;
+    }
+    if (entry == NULL || endpoint_addr == NULL ||
+        endpoint_family == 0 || endpoint_port == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < entry->candidates.size(); ++i) {
+        if (SameCandidate(entry->candidates[i],
+                          endpoint_family,
+                          endpoint_addr,
+                          endpoint_port)) {
+            if (out_index != NULL) {
+                *out_index = i;
+            }
+            return false;
+        }
+    }
+
+    Candidate candidate;
+    candidate.endpoint_family = endpoint_family;
+    candidate.endpoint_port = endpoint_port;
+    memcpy(candidate.endpoint_addr, endpoint_addr, sizeof(candidate.endpoint_addr));
+    entry->candidates.push_back(candidate);
+    if (out_index != NULL) {
+        *out_index = entry->candidates.size() - 1;
+    }
+    return true;
+}
+
+bool PeerLinkManager::SelectCandidate(Entry* entry, size_t index) {
+    if (entry == NULL || index >= entry->candidates.size()) {
+        return false;
+    }
+    const Candidate& candidate = entry->candidates[index];
+    entry->endpoint_family = candidate.endpoint_family;
+    entry->endpoint_port = candidate.endpoint_port;
+    memcpy(entry->endpoint_addr, candidate.endpoint_addr, sizeof(entry->endpoint_addr));
+    entry->selected_candidate_index = index;
+    return true;
+}
+
+bool PeerLinkManager::SelectNextCandidate(Entry* entry) {
+    if (entry == NULL || entry->candidates.size() <= 1) {
+        return false;
+    }
+    size_t next_index = entry->selected_candidate_index;
+    uint32_t best_failures = 0xFFFFFFFFu;
+    bool found = false;
+    for (size_t offset = 1; offset <= entry->candidates.size(); ++offset) {
+        const size_t index = (entry->selected_candidate_index + offset) % entry->candidates.size();
+        if (index == entry->selected_candidate_index) {
+            continue;
+        }
+        if (!found || entry->candidates[index].failure_count < best_failures) {
+            found = true;
+            next_index = index;
+            best_failures = entry->candidates[index].failure_count;
+        }
+    }
+    return found && SelectCandidate(entry, next_index);
+}
+
 bool PeerLinkManager::CanActivateDirect(const Entry& entry, uint64_t now_ms) {
     if (!entry.direct_ready || !HasEndpoint(entry)) {
         return false;
@@ -161,6 +241,17 @@ bool PeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
     }
     const bool newer_version = (previous_version != 0 && endpoint_version > previous_version);
 
+    if (previous_version == 0 || endpoint_version > previous_version) {
+        entry.candidates.clear();
+        entry.selected_candidate_index = 0;
+    }
+    size_t candidate_index = 0;
+    AddCandidate(&entry,
+                 endpoint_family,
+                 normalized_addr,
+                 endpoint_port,
+                 &candidate_index);
+
     const bool same_endpoint =
         entry.endpoint_family == endpoint_family &&
         entry.endpoint_port == endpoint_port &&
@@ -201,9 +292,9 @@ bool PeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
     if (endpoint_version > entry.endpoint_version) {
         entry.endpoint_version = endpoint_version;
     }
-    entry.endpoint_family = endpoint_family;
-    entry.endpoint_port = endpoint_port;
-    memcpy(entry.endpoint_addr, normalized_addr, sizeof(entry.endpoint_addr));
+    if (!HasEndpoint(entry) || newer_version || previous_version == 0) {
+        SelectCandidate(&entry, candidate_index);
+    }
 
     if (entry.state == PeerRouteState::Cooldown &&
         entry.retry_after_ms != 0 && now < entry.retry_after_ms &&
@@ -248,10 +339,14 @@ bool PeerLinkManager::ObserveDirectEndpoint(const std::string& peer_virtual_ip,
         memcmp(entry.endpoint_addr, endpoint_addr, sizeof(entry.endpoint_addr)) != 0;
 
     entry.last_observed_ms = now;
+    size_t candidate_index = 0;
+    AddCandidate(&entry,
+                 endpoint_family,
+                 endpoint_addr,
+                 endpoint_port,
+                 &candidate_index);
     if (changed) {
-        entry.endpoint_family = endpoint_family;
-        entry.endpoint_port = endpoint_port;
-        memcpy(entry.endpoint_addr, endpoint_addr, sizeof(entry.endpoint_addr));
+        SelectCandidate(&entry, candidate_index);
         if (entry.direct_ready &&
             entry.state != PeerRouteState::DirectActive &&
             entry.state != PeerRouteState::Cooldown) {
@@ -463,13 +558,18 @@ bool PeerLinkManager::RecordDirectSendFailure(const std::string& peer_virtual_ip
         entry.endpoint_version = endpoint_version;
     }
     entry.last_direct_failure_ms = now;
+    if (entry.selected_candidate_index < entry.candidates.size() &&
+        entry.candidates[entry.selected_candidate_index].failure_count != 0xFFFFFFFFu) {
+        entry.candidates[entry.selected_candidate_index].failure_count++;
+    }
 
     const PeerRouteState previous_state = entry.state;
+    const bool rotated_candidate = SelectNextCandidate(&entry);
     if (active_path && entry.active_direct) {
         if (entry.active_failures != 0xFFFFFFFFu) {
             entry.active_failures++;
         }
-        if (entry.active_failures >= kPeerDirectActiveFailureThreshold) {
+        if (!rotated_candidate && entry.active_failures >= kPeerDirectActiveFailureThreshold) {
             EnterCooldown(&entry, now);
         } else {
             entry.direct_eligible = false;
@@ -488,7 +588,7 @@ bool PeerLinkManager::RecordDirectSendFailure(const std::string& peer_virtual_ip
         if (entry.probe_failures != 0xFFFFFFFFu) {
             entry.probe_failures++;
         }
-        if (entry.probe_failures >= kPeerDirectProbeFailureThreshold) {
+        if (!rotated_candidate && entry.probe_failures >= kPeerDirectProbeFailureThreshold) {
             EnterCooldown(&entry, now);
         } else if (entry.state != PeerRouteState::Cooldown) {
             EnterState(&entry, PeerRouteState::Probing, now);
@@ -524,7 +624,20 @@ std::vector<PeerRouteStatus> PeerLinkManager::ExpireStalePeers(uint64_t now_ms,
         if ((entry.state == PeerRouteState::OfferReceived || entry.state == PeerRouteState::Probing) &&
             entry.last_observed_ms != 0 && now_ms > entry.last_observed_ms &&
             (now_ms - entry.last_observed_ms) >= offer_timeout_ms) {
-            EnterCooldown(&entry, now_ms);
+            if (entry.state == PeerRouteState::Probing &&
+                entry.direct_ready &&
+                SelectNextCandidate(&entry)) {
+                entry.last_observed_ms = now_ms;
+                entry.last_direct_data_ms = 0;
+                entry.first_direct_data_ms = 0;
+                entry.last_direct_failure_ms = now_ms;
+                entry.direct_sample_count = 0;
+                entry.probe_failures = 0;
+                entry.active_failures = 0;
+                EnterState(&entry, PeerRouteState::Probing, now_ms);
+            } else {
+                EnterCooldown(&entry, now_ms);
+            }
         } else if (entry.state == PeerRouteState::DirectActive &&
                    entry.last_observed_ms != 0 && now_ms > entry.last_observed_ms &&
                    (now_ms - entry.last_observed_ms) >= direct_ready_timeout_ms) {
@@ -590,15 +703,25 @@ bool PeerLinkManager::TryResolveByEndpoint(uint8_t endpoint_family,
     std::lock_guard<std::mutex> lock(mutex_);
     for (std::map<std::string, Entry>::const_iterator it = peers_.begin(); it != peers_.end(); ++it) {
         if (it->second.state == PeerRouteState::Cooldown ||
-            !HasEndpoint(it->second) ||
-            it->second.endpoint_family != endpoint_family ||
-            it->second.endpoint_port != endpoint_port ||
-            memcmp(it->second.endpoint_addr, endpoint_addr, sizeof(it->second.endpoint_addr)) != 0) {
+            !HasEndpoint(it->second)) {
             continue;
         }
 
-        FillStatus(it->first, it->second, out_status);
-        return true;
+        if (it->second.endpoint_family == endpoint_family &&
+            it->second.endpoint_port == endpoint_port &&
+            memcmp(it->second.endpoint_addr, endpoint_addr, sizeof(it->second.endpoint_addr)) == 0) {
+            FillStatus(it->first, it->second, out_status);
+            return true;
+        }
+        for (size_t i = 0; i < it->second.candidates.size(); ++i) {
+            if (SameCandidate(it->second.candidates[i],
+                              endpoint_family,
+                              endpoint_addr,
+                              endpoint_port)) {
+                FillStatus(it->first, it->second, out_status);
+                return true;
+            }
+        }
     }
 
     return false;
