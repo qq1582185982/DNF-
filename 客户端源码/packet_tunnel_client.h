@@ -121,11 +121,25 @@ private:
         }
     };
 
+    struct TcpDirectCandidate {
+        uint8_t endpoint_family;
+        uint16_t endpoint_port;
+        uint8_t endpoint_addr[16];
+
+        TcpDirectCandidate()
+            : endpoint_family(0),
+              endpoint_port(0) {
+            ZeroMemory(endpoint_addr, sizeof(endpoint_addr));
+        }
+    };
+
     struct TcpDirectOffer {
         uint64_t endpoint_version;
         uint8_t endpoint_family;
         uint16_t endpoint_port;
         uint8_t endpoint_addr[16];
+        std::vector<TcpDirectCandidate> candidates;
+        size_t next_candidate_index;
         unsigned long long last_offer_tick_ms;
         unsigned long long cooldown_until_tick_ms;
         bool connecting;
@@ -134,6 +148,7 @@ private:
             : endpoint_version(0),
               endpoint_family(0),
               endpoint_port(0),
+              next_candidate_index(0),
               last_offer_tick_ms(0),
               cooldown_until_tick_ms(0),
               connecting(false) {
@@ -145,12 +160,16 @@ private:
         SOCKET sock;
         std::string peer_virtual_ip;
         std::atomic<bool> active;
+        std::atomic<unsigned long long> last_rx_tick_ms;
+        std::atomic<unsigned long long> last_tx_tick_ms;
         CRITICAL_SECTION send_lock;
         std::thread read_thread;
 
         TcpDirectConnection()
             : sock(INVALID_SOCKET),
-              active(false) {
+              active(false),
+              last_rx_tick_ms(0),
+              last_tx_tick_ms(0) {
             InitializeCriticalSection(&send_lock);
         }
 
@@ -168,6 +187,8 @@ private:
     bool SendHandshake(std::wstring* error_msg);
     bool SendTcpHandshake(std::wstring* error_msg);
     bool SendTcpDirectAdvertise(std::wstring* error_msg);
+    bool SendTcpDirectCandidateAdvertise(const TcpDirectCandidate& candidate,
+                                         std::wstring* error_msg);
     bool ReceiveHandshakeAck(std::wstring* error_msg);
     bool ReceiveTcpHandshakeAck(std::wstring* error_msg);
     bool StartThreads(std::wstring* error_msg);
@@ -251,6 +272,7 @@ private:
     void RemoveTcpDirectConnection(const std::string& peer_virtual_ip,
                                    SOCKET sock,
                                    bool enter_cooldown);
+    void MaintainTcpDirectConnections(unsigned long long now_tick);
     bool SendDatagram(const uint8_t* data, size_t length, std::wstring* error_msg);
     int RecvDatagram(uint8_t* data, size_t length, std::wstring* error_msg);
     uint32_t ParseVirtualIp(std::wstring* error_msg) const;

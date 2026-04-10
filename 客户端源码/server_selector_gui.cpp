@@ -40,7 +40,7 @@ bool IsDebugGuiLogEnabled() {
     char level[16] = {};
     DWORD len = GetEnvironmentVariableA("DNF_PROXY_LOG_LEVEL", level, static_cast<DWORD>(sizeof(level)));
     if (len == 0 || len >= sizeof(level)) {
-        return false;
+        return true;
     }
     level[len] = '\0';
     return _stricmp(level, "DEBUG") == 0;
