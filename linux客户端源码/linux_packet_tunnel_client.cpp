@@ -6,8 +6,10 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/tcp.h>
+#include <sys/select.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -34,6 +36,9 @@ const int kSocketReadTimeoutMs = 1000;
 const int kSocketSendTimeoutMs = 50;
 const int kSocketSendRetryCount = 2;
 const int kSocketSendRetryDelayMs = 5;
+const int kTcpDirectConnectTimeoutMs = 1200;
+const int kTcpDirectRetryCooldownMs = 5000;
+const int kTcpDirectListenBacklog = 32;
 const int kTunReadWaitMs = 500;
 const int kSocketBufferBytes = 4 * 1024 * 1024;
 const unsigned long long kWatchedTcpFlowIdleCleanupMs = 180000;
@@ -210,6 +215,39 @@ bool IsPacketTunnelMicroBatchEligibleTcpPacket(const uint8_t* packet, size_t pac
     return tcp_header_len >= 20 && total_len >= tcp_header_offset + tcp_header_len;
 }
 
+bool TryParseLinuxTcpPorts(const uint8_t* packet,
+                           size_t packet_len,
+                           uint16_t* src_port,
+                           uint16_t* dst_port) {
+    if (src_port != NULL) {
+        *src_port = 0;
+    }
+    if (dst_port != NULL) {
+        *dst_port = 0;
+    }
+    if (packet == NULL || packet_len < 20 || ((packet[0] >> 4) & 0x0F) != 4) {
+        return false;
+    }
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (ip_header_len < 20 ||
+        packet_len < ip_header_len + 20 ||
+        packet[9] != IPPROTO_TCP) {
+        return false;
+    }
+    const size_t tcp_header_len =
+        static_cast<size_t>((packet[ip_header_len + 12] >> 4) & 0x0F) * 4;
+    if (tcp_header_len < 20 || packet_len < ip_header_len + tcp_header_len) {
+        return false;
+    }
+    if (src_port != NULL) {
+        *src_port = ntohs(*(const uint16_t*)(packet + ip_header_len));
+    }
+    if (dst_port != NULL) {
+        *dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
+    }
+    return true;
+}
+
 bool IsPacketTunnelRelayBatchEligibleTunPacket(const std::vector<uint8_t>& packet,
                                                const std::string& virtual_ip) {
     (void)virtual_ip;
@@ -321,6 +359,12 @@ std::string LinuxFrameName(uint8_t frame_type) {
         return "peer_keepalive";
     case packet_tunnel::kFramePeerDisable:
         return "peer_disable";
+    case packet_tunnel::kFrameTcpPeerOffer:
+        return "tcp_peer_offer";
+    case packet_tunnel::kFrameTcpDirectAdvertise:
+        return "tcp_direct_advertise";
+    case packet_tunnel::kFrameTcpDirectOpen:
+        return "tcp_direct_open";
     default:
         return "unknown";
     }
@@ -613,6 +657,127 @@ bool ParseLinuxIpv4StringToBe(const std::string& value, uint32_t* out_ip_be) {
 
     *out_ip_be = addr.s_addr;
     return true;
+}
+
+void CloseFdQuiet(int* fd) {
+    if (fd == NULL || *fd < 0) {
+        return;
+    }
+    const int stale = *fd;
+    *fd = -1;
+    shutdown(stale, SHUT_RDWR);
+    close(stale);
+}
+
+void ConfigureLinuxTcpStreamSocket(int sock) {
+    int buffer_bytes = kSocketBufferBytes;
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &buffer_bytes, sizeof(buffer_bytes));
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &buffer_bytes, sizeof(buffer_bytes));
+
+    timeval send_timeout = {};
+    send_timeout.tv_sec = kSocketSendTimeoutMs / 1000;
+    send_timeout.tv_usec = (kSocketSendTimeoutMs % 1000) * 1000;
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
+
+    timeval recv_timeout = {};
+    recv_timeout.tv_sec = kSocketReadTimeoutMs / 1000;
+    recv_timeout.tv_usec = (kSocketReadTimeoutMs % 1000) * 1000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
+
+    int keepalive = 1;
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+    int nodelay = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+}
+
+bool BuildLinuxTcpDirectSockaddr(uint8_t endpoint_family,
+                                 const uint8_t* endpoint_addr,
+                                 uint16_t endpoint_port,
+                                 sockaddr_storage* out_addr,
+                                 socklen_t* out_addr_len) {
+    if (endpoint_addr == NULL || out_addr == NULL || out_addr_len == NULL ||
+        endpoint_port == 0) {
+        return false;
+    }
+    memset(out_addr, 0, sizeof(*out_addr));
+    *out_addr_len = 0;
+    if (endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4) {
+        sockaddr_in* addr4 = reinterpret_cast<sockaddr_in*>(out_addr);
+        addr4->sin_family = AF_INET;
+        addr4->sin_port = htons(endpoint_port);
+        memcpy(&addr4->sin_addr, endpoint_addr, 4);
+        *out_addr_len = sizeof(sockaddr_in);
+        return true;
+    }
+    if (endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv6) {
+        sockaddr_in6* addr6 = reinterpret_cast<sockaddr_in6*>(out_addr);
+        addr6->sin6_family = AF_INET6;
+        addr6->sin6_port = htons(endpoint_port);
+        memcpy(&addr6->sin6_addr, endpoint_addr, 16);
+        *out_addr_len = sizeof(sockaddr_in6);
+        return true;
+    }
+    return false;
+}
+
+bool ConnectLinuxSocketWithTimeout(int sock,
+                                   const sockaddr_storage& addr,
+                                   socklen_t addr_len,
+                                   int timeout_ms,
+                                   int* out_error) {
+    if (out_error != NULL) {
+        *out_error = 0;
+    }
+
+    const int old_flags = fcntl(sock, F_GETFL, 0);
+    if (old_flags < 0 || fcntl(sock, F_SETFL, old_flags | O_NONBLOCK) != 0) {
+        if (out_error != NULL) {
+            *out_error = errno;
+        }
+        return false;
+    }
+
+    bool connected = false;
+    int last_error = 0;
+    if (connect(sock,
+                reinterpret_cast<const sockaddr*>(&addr),
+                addr_len) == 0) {
+        connected = true;
+    } else {
+        last_error = errno;
+        if (last_error == EINPROGRESS || last_error == EWOULDBLOCK || last_error == EAGAIN) {
+            fd_set write_set;
+            fd_set error_set;
+            FD_ZERO(&write_set);
+            FD_ZERO(&error_set);
+            FD_SET(sock, &write_set);
+            FD_SET(sock, &error_set);
+            timeval tv = {};
+            tv.tv_sec = timeout_ms / 1000;
+            tv.tv_usec = (timeout_ms % 1000) * 1000;
+            const int selected = select(sock + 1, NULL, &write_set, &error_set, &tv);
+            if (selected > 0 && FD_ISSET(sock, &write_set)) {
+                int so_error = 0;
+                socklen_t so_error_len = sizeof(so_error);
+                if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &so_error_len) == 0 &&
+                    so_error == 0) {
+                    connected = true;
+                } else {
+                    last_error = so_error != 0 ? so_error : errno;
+                }
+            } else if (selected == 0) {
+                last_error = ETIMEDOUT;
+            } else {
+                last_error = errno;
+            }
+        }
+    }
+
+    fcntl(sock, F_SETFL, old_flags);
+    if (!connected && out_error != NULL) {
+        *out_error = last_error;
+    }
+    return connected;
 }
 
 bool TryExtractLinuxPeerEndpointFromSockaddr(const sockaddr_storage& source_addr,
@@ -992,7 +1157,9 @@ LinuxPacketTunnelClient::LinuxPacketTunnelClient(const std::string& tunnel_host,
       tun_manager_(tun_manager),
       sock_(-1),
       tcp_sock_(-1),
+      tcp_direct_listen_sock_(-1),
       socket_family_(AF_UNSPEC),
+      tcp_direct_listen_port_(0),
       connected_(false),
       stop_requested_(false),
       tcp_connected_(false),
@@ -1241,6 +1408,15 @@ bool LinuxPacketTunnelClient::Start(std::string* error) {
         Stop();
         return false;
     }
+    std::string tcp_direct_listener_error;
+    if (!StartTcpDirectListener(&tcp_direct_listener_error)) {
+        if (!tcp_direct_listener_error.empty()) {
+            LogWarn("packet tunnel tcp direct listener unavailable, keep relay paths: " +
+                    tcp_direct_listener_error);
+        } else {
+            LogWarn("packet tunnel tcp direct listener unavailable, keep relay paths");
+        }
+    }
     std::string tcp_error;
     if (!ConnectTcpSocket(&tcp_error) ||
         !SendTcpHandshake(&tcp_error) ||
@@ -1254,6 +1430,11 @@ bool LinuxPacketTunnelClient::Start(std::string* error) {
             LogWarn("packet tunnel tcp relay unavailable, fallback to udp relay: " + tcp_error);
         } else {
             LogWarn("packet tunnel tcp relay unavailable, fallback to udp relay");
+        }
+    } else {
+        std::string advertise_error;
+        if (!SendTcpDirectAdvertise(&advertise_error) && !advertise_error.empty()) {
+            LogWarn("packet tunnel tcp direct advertise failed: " + advertise_error);
         }
     }
     if (!StartThreads(error)) {
@@ -1297,6 +1478,7 @@ void LinuxPacketTunnelClient::Stop() {
         close(tcp_sock_);
         tcp_sock_ = -1;
     }
+    StopTcpDirectSockets();
 
     if (socket_thread_.joinable()) {
         socket_thread_.join();
@@ -1661,6 +1843,117 @@ bool LinuxPacketTunnelClient::ReceiveTcpHandshakeAck(std::string* error) {
     return true;
 }
 
+bool LinuxPacketTunnelClient::StartTcpDirectListener(std::string* error) {
+    StopTcpDirectSockets();
+
+    auto try_listen_family = [&](int family, int* out_sock, uint16_t* out_port) -> bool {
+        int listen_sock = socket(family, SOCK_STREAM, IPPROTO_TCP);
+        if (listen_sock < 0) {
+            return false;
+        }
+
+        if (family == AF_INET6) {
+            int dual_stack = 0;
+            setsockopt(listen_sock, IPPROTO_IPV6, IPV6_V6ONLY, &dual_stack, sizeof(dual_stack));
+        }
+        ConfigureLinuxTcpStreamSocket(listen_sock);
+
+        sockaddr_storage bind_addr = {};
+        socklen_t bind_addr_len = 0;
+        if (family == AF_INET6) {
+            sockaddr_in6* addr6 = reinterpret_cast<sockaddr_in6*>(&bind_addr);
+            addr6->sin6_family = AF_INET6;
+            addr6->sin6_port = htons(0);
+            addr6->sin6_addr = in6addr_any;
+            bind_addr_len = sizeof(sockaddr_in6);
+        } else {
+            sockaddr_in* addr4 = reinterpret_cast<sockaddr_in*>(&bind_addr);
+            addr4->sin_family = AF_INET;
+            addr4->sin_port = htons(0);
+            addr4->sin_addr.s_addr = htonl(INADDR_ANY);
+            bind_addr_len = sizeof(sockaddr_in);
+        }
+
+        if (bind(listen_sock,
+                 reinterpret_cast<const sockaddr*>(&bind_addr),
+                 bind_addr_len) != 0 ||
+            listen(listen_sock, kTcpDirectListenBacklog) != 0) {
+            close(listen_sock);
+            return false;
+        }
+
+        sockaddr_storage actual_addr = {};
+        socklen_t actual_addr_len = sizeof(actual_addr);
+        if (getsockname(listen_sock,
+                        reinterpret_cast<sockaddr*>(&actual_addr),
+                        &actual_addr_len) != 0) {
+            close(listen_sock);
+            return false;
+        }
+
+        uint16_t port = 0;
+        if (actual_addr.ss_family == AF_INET) {
+            port = ntohs(reinterpret_cast<sockaddr_in*>(&actual_addr)->sin_port);
+        } else if (actual_addr.ss_family == AF_INET6) {
+            port = ntohs(reinterpret_cast<sockaddr_in6*>(&actual_addr)->sin6_port);
+        }
+        if (port == 0) {
+            close(listen_sock);
+            return false;
+        }
+
+        *out_sock = listen_sock;
+        *out_port = port;
+        return true;
+    };
+
+    const int preferred_family = socket_family_ == AF_INET6 ? AF_INET6 : AF_INET;
+    const int fallback_family = preferred_family == AF_INET6 ? AF_INET : AF_INET6;
+    int listen_sock = -1;
+    uint16_t listen_port = 0;
+    if (!try_listen_family(preferred_family, &listen_sock, &listen_port) &&
+        !try_listen_family(fallback_family, &listen_sock, &listen_port)) {
+        if (error != NULL) {
+            *error = std::string("packet tunnel tcp direct listen failed: ") + strerror(errno);
+        }
+        return false;
+    }
+
+    tcp_direct_listen_sock_ = listen_sock;
+    tcp_direct_listen_port_ = listen_port;
+    LogInfo("packet tunnel tcp direct listener ready port=" +
+            std::to_string(tcp_direct_listen_port_));
+    return true;
+}
+
+bool LinuxPacketTunnelClient::SendTcpDirectAdvertise(std::string* error) {
+    if (!tcp_connected_ || tcp_sock_ < 0) {
+        if (error != NULL) {
+            *error = "packet tunnel tcp relay is not connected";
+        }
+        return false;
+    }
+    if (tcp_direct_listen_port_ == 0) {
+        if (error != NULL) {
+            *error = "packet tunnel tcp direct listener is not available";
+        }
+        return false;
+    }
+
+    std::vector<uint8_t> payload(packet_tunnel::kTcpDirectAdvertisePayloadSize, 0);
+    packet_tunnel::write_u16_be(payload.data(), tcp_direct_listen_port_);
+    if (!SendFrameOverTcp(packet_tunnel::kFrameTcpDirectAdvertise,
+                          payload.data(),
+                          payload.size(),
+                          error)) {
+        return false;
+    }
+
+    LogInfo("packet tunnel tcp direct advertised listen_port=" +
+            std::to_string(tcp_direct_listen_port_));
+    return true;
+}
+
 bool LinuxPacketTunnelClient::StartThreads(std::string* error) {
     if (tun_manager_ == NULL) {
         if (error != NULL) {
@@ -1673,9 +1966,58 @@ bool LinuxPacketTunnelClient::StartThreads(std::string* error) {
     if (tcp_connected_ && tcp_sock_ >= 0) {
         tcp_thread_ = std::thread(&LinuxPacketTunnelClient::TcpSocketReadLoop, this);
     }
+    if (tcp_direct_listen_sock_ >= 0) {
+        tcp_direct_accept_thread_ =
+            std::thread(&LinuxPacketTunnelClient::TcpDirectAcceptLoop, this);
+    }
     tun_thread_ = std::thread(&LinuxPacketTunnelClient::TunReadLoop, this);
     heartbeat_thread_ = std::thread(&LinuxPacketTunnelClient::HeartbeatLoop, this);
     return true;
+}
+
+void LinuxPacketTunnelClient::StopTcpDirectSockets() {
+    int listen_sock = -1;
+    std::vector<std::shared_ptr<TcpDirectConnection>> connections;
+    std::vector<std::thread> connect_threads;
+    {
+        std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
+        listen_sock = tcp_direct_listen_sock_;
+        tcp_direct_listen_sock_ = -1;
+        tcp_direct_listen_port_ = 0;
+        for (std::map<std::string, std::shared_ptr<TcpDirectConnection>>::iterator it =
+                 tcp_direct_connections_.begin();
+             it != tcp_direct_connections_.end();
+             ++it) {
+            connections.push_back(it->second);
+        }
+        tcp_direct_connections_.clear();
+        tcp_direct_offers_.clear();
+        connect_threads.swap(tcp_direct_connect_threads_);
+    }
+
+    CloseFdQuiet(&listen_sock);
+
+    for (size_t i = 0; i < connections.size(); ++i) {
+        if (!connections[i]) {
+            continue;
+        }
+        connections[i]->active = false;
+        CloseFdQuiet(&connections[i]->sock);
+    }
+
+    if (tcp_direct_accept_thread_.joinable()) {
+        tcp_direct_accept_thread_.join();
+    }
+    for (size_t i = 0; i < connect_threads.size(); ++i) {
+        if (!connect_threads[i].joinable()) {
+            continue;
+        }
+        if (connect_threads[i].get_id() == std::this_thread::get_id()) {
+            connect_threads[i].detach();
+        } else {
+            connect_threads[i].join();
+        }
+    }
 }
 
 void LinuxPacketTunnelClient::SocketReadLoop() {
@@ -1886,6 +2228,61 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
 bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                                                      const uint8_t* payload,
                                                      size_t length) {
+    if (frame_type == packet_tunnel::kFrameTcpPeerOffer) {
+        ParsedLinuxPeerOffer offer = {};
+        if (!ParseLinuxPeerOfferPayload(payload, length, &offer)) {
+            LogWarn("ignore invalid tcp_peer_offer frame len=" + std::to_string(length));
+            return true;
+        }
+        if (offer.peer_virtual_ip.empty() ||
+            offer.peer_virtual_ip == virtual_ip_ ||
+            offer.endpoint_port == 0) {
+            LogInfo("ignore unusable tcp_peer_offer peer=" +
+                    offer.peer_virtual_ip +
+                    " endpoint=" + offer.endpoint);
+            return true;
+        }
+
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
+            TcpDirectOffer& stored = tcp_direct_offers_[offer.peer_virtual_ip];
+            if (stored.endpoint_version != 0 &&
+                offer.endpoint_version < stored.endpoint_version) {
+                LogInfo("ignore stale tcp_peer_offer peer=" +
+                        offer.peer_virtual_ip +
+                        " version=" + std::to_string(offer.endpoint_version));
+                return true;
+            }
+            changed =
+                stored.endpoint_version != offer.endpoint_version ||
+                stored.endpoint_family != offer.endpoint_family ||
+                stored.endpoint_port != offer.endpoint_port ||
+                memcmp(stored.endpoint_addr,
+                       offer.endpoint_addr,
+                       sizeof(stored.endpoint_addr)) != 0;
+            stored.endpoint_version = offer.endpoint_version;
+            stored.endpoint_family = offer.endpoint_family;
+            stored.endpoint_port = offer.endpoint_port;
+            memcpy(stored.endpoint_addr,
+                   offer.endpoint_addr,
+                   sizeof(stored.endpoint_addr));
+            stored.last_offer_ms = now_ms();
+            if (changed) {
+                stored.cooldown_until_ms = 0;
+                stored.connecting = false;
+            }
+        }
+
+        LogInfo("peer control tcp_peer_offer: peer=" +
+                offer.peer_virtual_ip +
+                " version=" + std::to_string(offer.endpoint_version) +
+                " endpoint=" + offer.endpoint +
+                (changed ? " changed=yes" : " changed=no"));
+        MaybeStartTcpDirectConnect(offer.peer_virtual_ip);
+        return true;
+    }
+
     if (frame_type == packet_tunnel::kFramePeerOffer) {
         ParsedLinuxPeerOffer offer = {};
         if (!ParseLinuxPeerOfferPayload(payload, length, &offer)) {
@@ -2285,6 +2682,494 @@ void LinuxPacketTunnelClient::TcpSocketReadLoop() {
     }
 }
 
+bool LinuxPacketTunnelClient::RecvFrameFromSocket(int sock,
+                                                  uint8_t* frame_type,
+                                                  std::vector<uint8_t>* payload,
+                                                  std::string* error) {
+    if (sock < 0 || frame_type == NULL || payload == NULL) {
+        if (error != NULL) {
+            *error = "packet tunnel tcp direct recv invalid argument";
+        }
+        return false;
+    }
+
+    auto recv_exact = [&](uint8_t* data, size_t length) -> bool {
+        size_t received = 0;
+        while (received < length && !stop_requested_) {
+            ssize_t n = recv(sock,
+                             data + received,
+                             length - received,
+                             0);
+            if (n > 0) {
+                received += static_cast<size_t>(n);
+                continue;
+            }
+            if (n == 0) {
+                if (error != NULL) {
+                    *error = "packet tunnel tcp direct peer closed";
+                }
+                return false;
+            }
+            if ((errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) &&
+                !stop_requested_) {
+                continue;
+            }
+            if (error != NULL) {
+                *error = std::string("packet tunnel tcp direct recv failed: ") + strerror(errno);
+            }
+            return false;
+        }
+        return received == length;
+    };
+
+    uint8_t header[packet_tunnel::kFrameHeaderSize] = {};
+    if (!recv_exact(header, sizeof(header))) {
+        return false;
+    }
+
+    *frame_type = header[0];
+    const uint16_t payload_len = ntohs(*(const uint16_t*)(&header[1]));
+    payload->assign(payload_len, 0);
+    if (payload_len > 0 && !recv_exact(payload->data(), payload_len)) {
+        return false;
+    }
+    return true;
+}
+
+bool LinuxPacketTunnelClient::SendFrameOverSocket(int sock,
+                                                  std::mutex* send_mutex,
+                                                  uint8_t frame_type,
+                                                  const uint8_t* data,
+                                                  size_t length,
+                                                  std::string* error) {
+    if (sock < 0 || length > 0xFFFFu) {
+        if (error != NULL) {
+            *error = "packet tunnel tcp direct send invalid argument";
+        }
+        return false;
+    }
+
+    std::vector<uint8_t> frame(packet_tunnel::kFrameHeaderSize + length, 0);
+    frame[0] = frame_type;
+    *(uint16_t*)(&frame[1]) = htons(static_cast<uint16_t>(length));
+    if (length > 0 && data != NULL) {
+        memcpy(frame.data() + packet_tunnel::kFrameHeaderSize, data, length);
+    }
+
+    std::unique_lock<std::mutex> lock;
+    if (send_mutex != NULL) {
+        lock = std::unique_lock<std::mutex>(*send_mutex);
+    }
+
+    size_t sent = 0;
+    int transient_retries = 0;
+    int last_error = 0;
+    while (sent < frame.size() && !stop_requested_) {
+        ssize_t n = send(sock,
+                         frame.data() + sent,
+                         frame.size() - sent,
+                         MSG_NOSIGNAL);
+        if (n > 0) {
+            sent += static_cast<size_t>(n);
+            transient_retries = 0;
+            continue;
+        }
+        last_error = errno;
+        if ((last_error == EINTR || last_error == EAGAIN || last_error == EWOULDBLOCK) &&
+            transient_retries + 1 < kSocketSendRetryCount) {
+            ++transient_retries;
+            usleep(kSocketSendRetryDelayMs * 1000);
+            continue;
+        }
+        break;
+    }
+
+    if (sent == frame.size()) {
+        return true;
+    }
+    if (error != NULL) {
+        if (last_error != 0) {
+            *error = std::string("packet tunnel tcp direct send failed: ") + strerror(last_error);
+        } else {
+            *error = "packet tunnel tcp direct send interrupted";
+        }
+    }
+    return false;
+}
+
+void LinuxPacketTunnelClient::TcpDirectAcceptLoop() {
+    while (!stop_requested_) {
+        const int listen_sock = tcp_direct_listen_sock_;
+        if (listen_sock < 0) {
+            break;
+        }
+
+        sockaddr_storage peer_addr = {};
+        socklen_t peer_addr_len = sizeof(peer_addr);
+        int accepted = accept(listen_sock,
+                              reinterpret_cast<sockaddr*>(&peer_addr),
+                              &peer_addr_len);
+        if (accepted < 0) {
+            if (!stop_requested_ && errno != EBADF && errno != EINTR) {
+                LogWarn("packet tunnel tcp direct accept failed: " +
+                        std::string(strerror(errno)));
+            }
+            continue;
+        }
+        if (stop_requested_) {
+            close(accepted);
+            break;
+        }
+
+        ConfigureLinuxTcpStreamSocket(accepted);
+        std::shared_ptr<TcpDirectConnection> connection =
+            std::make_shared<TcpDirectConnection>();
+        connection->sock = accepted;
+        connection->active = true;
+        connection->read_thread =
+            std::thread(&LinuxPacketTunnelClient::TcpDirectReadLoop, this, connection, true);
+        connection->read_thread.detach();
+        LogInfo("packet tunnel tcp direct accepted from " +
+                LinuxSockaddrToString(peer_addr, peer_addr_len));
+    }
+}
+
+void LinuxPacketTunnelClient::TcpDirectReadLoop(
+    const std::shared_ptr<TcpDirectConnection>& connection,
+    bool expect_open_frame) {
+    if (!connection) {
+        return;
+    }
+
+    const int socket_for_remove = connection->sock;
+    std::string peer_virtual_ip = connection->peer_virtual_ip;
+
+    if (expect_open_frame) {
+        uint8_t open_frame_type = 0;
+        std::vector<uint8_t> open_payload;
+        std::string open_error;
+        if (!RecvFrameFromSocket(connection->sock,
+                                 &open_frame_type,
+                                 &open_payload,
+                                 &open_error) ||
+            open_frame_type != packet_tunnel::kFrameTcpDirectOpen ||
+            open_payload.size() != packet_tunnel::kTcpDirectOpenPayloadSize) {
+            if (!stop_requested_) {
+                LogInfo("packet tunnel tcp direct incoming open failed: " + open_error);
+            }
+            CloseFdQuiet(&connection->sock);
+            connection->active = false;
+            return;
+        }
+
+        const std::string src_virtual_ip = LinuxIpv4ToString(open_payload.data());
+        const std::string dst_virtual_ip = LinuxIpv4ToString(open_payload.data() + 4);
+        if (src_virtual_ip.empty() ||
+            src_virtual_ip == virtual_ip_ ||
+            dst_virtual_ip != virtual_ip_) {
+            LogInfo("packet tunnel tcp direct incoming open rejected src=" +
+                    src_virtual_ip +
+                    " dst=" + dst_virtual_ip);
+            CloseFdQuiet(&connection->sock);
+            connection->active = false;
+            return;
+        }
+
+        connection->peer_virtual_ip = src_virtual_ip;
+        peer_virtual_ip = src_virtual_ip;
+        RegisterTcpDirectConnection(peer_virtual_ip, connection, true);
+    }
+
+    while (!stop_requested_ && connection->active && connection->sock >= 0) {
+        uint8_t frame_type = 0;
+        std::vector<uint8_t> payload;
+        std::string error;
+        if (!RecvFrameFromSocket(connection->sock, &frame_type, &payload, &error)) {
+            if (!stop_requested_ && !error.empty()) {
+                LogInfo("packet tunnel tcp direct read stopped peer=" +
+                        (peer_virtual_ip.empty() ? std::string("?") : peer_virtual_ip) +
+                        " reason=" + error);
+            }
+            break;
+        }
+
+        if (frame_type != packet_tunnel::kFrameIpv4Packet ||
+            payload.size() < 20 ||
+            (((payload[0] >> 4) & 0x0F) != 4)) {
+            LogInfo("ignore packet tunnel tcp direct frame type=" +
+                    LinuxFrameName(frame_type) +
+                    " len=" + std::to_string(payload.size()));
+            continue;
+        }
+
+        const std::string inner_src_virtual_ip = LinuxIpv4ToString(payload.data() + 12);
+        if (!peer_virtual_ip.empty() && inner_src_virtual_ip != peer_virtual_ip) {
+            LogInfo("ignore packet tunnel tcp direct packet with mismatched src peer=" +
+                    peer_virtual_ip +
+                    " inner_src=" + inner_src_virtual_ip);
+            continue;
+        }
+
+        std::string tun_error;
+        MarkNetworkActivity();
+        if (!tun_manager_ ||
+            !tun_manager_->WritePacket(payload.data(), payload.size(), &tun_error)) {
+            if (!stop_requested_) {
+                LogWarn("packet tunnel tcp direct write to tun failed: " + tun_error);
+            }
+            break;
+        }
+
+        TraceWatchedTcpPacket(payload.data(), payload.size(), "tcp-peer->tun");
+    }
+
+    RemoveTcpDirectConnection(peer_virtual_ip, socket_for_remove, true);
+}
+
+void LinuxPacketTunnelClient::RegisterTcpDirectConnection(
+    const std::string& peer_virtual_ip,
+    const std::shared_ptr<TcpDirectConnection>& connection,
+    bool incoming) {
+    if (peer_virtual_ip.empty() || !connection) {
+        return;
+    }
+
+    std::shared_ptr<TcpDirectConnection> old_connection;
+    {
+        std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
+        std::map<std::string, std::shared_ptr<TcpDirectConnection>>::iterator old_it =
+            tcp_direct_connections_.find(peer_virtual_ip);
+        if (old_it != tcp_direct_connections_.end() &&
+            old_it->second &&
+            old_it->second->sock != connection->sock) {
+            old_connection = old_it->second;
+        }
+        tcp_direct_connections_[peer_virtual_ip] = connection;
+        TcpDirectOffer& offer = tcp_direct_offers_[peer_virtual_ip];
+        offer.connecting = false;
+        offer.cooldown_until_ms = 0;
+    }
+
+    if (old_connection) {
+        old_connection->active = false;
+        CloseFdQuiet(&old_connection->sock);
+    }
+
+    LogInfo(std::string("packet tunnel tcp direct ") +
+            (incoming ? "incoming" : "outgoing") +
+            " active peer=" + peer_virtual_ip);
+}
+
+void LinuxPacketTunnelClient::RemoveTcpDirectConnection(const std::string& peer_virtual_ip,
+                                                        int sock,
+                                                        bool enter_cooldown) {
+    if (peer_virtual_ip.empty()) {
+        return;
+    }
+
+    std::shared_ptr<TcpDirectConnection> removed;
+    {
+        std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
+        std::map<std::string, std::shared_ptr<TcpDirectConnection>>::iterator it =
+            tcp_direct_connections_.find(peer_virtual_ip);
+        if (it == tcp_direct_connections_.end() ||
+            !it->second ||
+            (sock >= 0 && it->second->sock != sock)) {
+            return;
+        }
+        removed = it->second;
+        tcp_direct_connections_.erase(it);
+
+        std::map<std::string, TcpDirectOffer>::iterator offer_it =
+            tcp_direct_offers_.find(peer_virtual_ip);
+        if (offer_it != tcp_direct_offers_.end()) {
+            offer_it->second.connecting = false;
+            if (enter_cooldown) {
+                offer_it->second.cooldown_until_ms =
+                    now_ms() + kTcpDirectRetryCooldownMs;
+            }
+        }
+    }
+
+    if (removed) {
+        removed->active = false;
+        CloseFdQuiet(&removed->sock);
+    }
+}
+
+bool LinuxPacketTunnelClient::TrySendTcpDirectPacket(const std::string& peer_virtual_ip,
+                                                     const uint8_t* data,
+                                                     size_t length) {
+    if (peer_virtual_ip.empty() || data == NULL || length == 0 || length > 0xFFFFu) {
+        return false;
+    }
+
+    std::shared_ptr<TcpDirectConnection> connection;
+    {
+        std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
+        std::map<std::string, std::shared_ptr<TcpDirectConnection>>::iterator it =
+            tcp_direct_connections_.find(peer_virtual_ip);
+        if (it != tcp_direct_connections_.end() &&
+            it->second &&
+            it->second->active &&
+            it->second->sock >= 0) {
+            connection = it->second;
+        }
+    }
+
+    if (!connection) {
+        MaybeStartTcpDirectConnect(peer_virtual_ip);
+        return false;
+    }
+
+    if (SendFrameOverSocket(connection->sock,
+                            &connection->send_mutex,
+                            packet_tunnel::kFrameIpv4Packet,
+                            data,
+                            length,
+                            NULL)) {
+        return true;
+    }
+
+    LogWarn("packet tunnel tcp direct send failed, fallback to relay peer=" +
+            peer_virtual_ip);
+    RemoveTcpDirectConnection(peer_virtual_ip, connection->sock, true);
+    MaybeStartTcpDirectConnect(peer_virtual_ip);
+    return false;
+}
+
+void LinuxPacketTunnelClient::MaybeStartTcpDirectConnect(const std::string& peer_virtual_ip) {
+    if (stop_requested_ || peer_virtual_ip.empty() || peer_virtual_ip == virtual_ip_) {
+        return;
+    }
+
+    const unsigned long long tick = now_ms();
+    {
+        std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
+        std::map<std::string, TcpDirectOffer>::iterator offer_it =
+            tcp_direct_offers_.find(peer_virtual_ip);
+        if (offer_it == tcp_direct_offers_.end() ||
+            offer_it->second.endpoint_port == 0 ||
+            offer_it->second.connecting ||
+            (offer_it->second.cooldown_until_ms != 0 &&
+             tick < offer_it->second.cooldown_until_ms)) {
+            return;
+        }
+        std::map<std::string, std::shared_ptr<TcpDirectConnection>>::iterator conn_it =
+            tcp_direct_connections_.find(peer_virtual_ip);
+        if (conn_it != tcp_direct_connections_.end() &&
+            conn_it->second &&
+            conn_it->second->active &&
+            conn_it->second->sock >= 0) {
+            return;
+        }
+        offer_it->second.connecting = true;
+        tcp_direct_connect_threads_.push_back(
+            std::thread(&LinuxPacketTunnelClient::TcpDirectConnectWorker, this, peer_virtual_ip));
+    }
+}
+
+void LinuxPacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_virtual_ip) {
+    TcpDirectOffer offer;
+    {
+        std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
+        std::map<std::string, TcpDirectOffer>::const_iterator it =
+            tcp_direct_offers_.find(peer_virtual_ip);
+        if (it == tcp_direct_offers_.end()) {
+            return;
+        }
+        offer = it->second;
+    }
+
+    auto finish_connect_attempt = [&](bool cooldown) {
+        std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
+        std::map<std::string, TcpDirectOffer>::iterator it =
+            tcp_direct_offers_.find(peer_virtual_ip);
+        if (it != tcp_direct_offers_.end()) {
+            it->second.connecting = false;
+            if (cooldown) {
+                it->second.cooldown_until_ms = now_ms() + kTcpDirectRetryCooldownMs;
+            }
+        }
+    };
+
+    sockaddr_storage peer_addr = {};
+    socklen_t peer_addr_len = 0;
+    if (!BuildLinuxTcpDirectSockaddr(offer.endpoint_family,
+                                     offer.endpoint_addr,
+                                     offer.endpoint_port,
+                                     &peer_addr,
+                                     &peer_addr_len)) {
+        finish_connect_attempt(true);
+        return;
+    }
+
+    int direct_sock = socket(peer_addr.ss_family, SOCK_STREAM, IPPROTO_TCP);
+    if (direct_sock < 0) {
+        finish_connect_attempt(true);
+        return;
+    }
+    ConfigureLinuxTcpStreamSocket(direct_sock);
+
+    int connect_error = 0;
+    if (stop_requested_ ||
+        !ConnectLinuxSocketWithTimeout(direct_sock,
+                                       peer_addr,
+                                       peer_addr_len,
+                                       kTcpDirectConnectTimeoutMs,
+                                       &connect_error)) {
+        if (!stop_requested_) {
+            LogInfo("packet tunnel tcp direct connect failed peer=" + peer_virtual_ip +
+                    " endpoint=" + LinuxSockaddrToString(peer_addr, peer_addr_len) +
+                    " err=" + std::to_string(connect_error));
+        }
+        close(direct_sock);
+        finish_connect_attempt(true);
+        return;
+    }
+
+    std::shared_ptr<TcpDirectConnection> connection =
+        std::make_shared<TcpDirectConnection>();
+    connection->sock = direct_sock;
+    connection->peer_virtual_ip = peer_virtual_ip;
+    connection->active = true;
+
+    uint32_t local_virtual_ip_be = ParseVirtualIp(NULL);
+    uint32_t peer_virtual_ip_be = 0;
+    if (local_virtual_ip_be == 0 ||
+        !ParseLinuxIpv4StringToBe(peer_virtual_ip, &peer_virtual_ip_be)) {
+        CloseFdQuiet(&connection->sock);
+        finish_connect_attempt(true);
+        return;
+    }
+
+    std::vector<uint8_t> open_payload(packet_tunnel::kTcpDirectOpenPayloadSize, 0);
+    packet_tunnel::write_u32_be(open_payload.data(), ntohl(local_virtual_ip_be));
+    packet_tunnel::write_u32_be(open_payload.data() + 4, ntohl(peer_virtual_ip_be));
+    if (!SendFrameOverSocket(connection->sock,
+                             &connection->send_mutex,
+                             packet_tunnel::kFrameTcpDirectOpen,
+                             open_payload.data(),
+                             open_payload.size(),
+                             NULL)) {
+        CloseFdQuiet(&connection->sock);
+        finish_connect_attempt(true);
+        return;
+    }
+    if (stop_requested_) {
+        CloseFdQuiet(&connection->sock);
+        finish_connect_attempt(false);
+        return;
+    }
+
+    RegisterTcpDirectConnection(peer_virtual_ip, connection, false);
+    connection->read_thread =
+        std::thread(&LinuxPacketTunnelClient::TcpDirectReadLoop, this, connection, false);
+    connection->read_thread.detach();
+    LogInfo("packet tunnel tcp direct connected peer=" + peer_virtual_ip +
+            " endpoint=" + LinuxSockaddrToString(peer_addr, peer_addr_len));
+}
+
 void LinuxPacketTunnelClient::TunReadLoop() {
     uint32_t local_virtual_ip_be = 0;
     std::deque<std::vector<uint8_t>> deferred_packets;
@@ -2339,6 +3224,11 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                 : ("dst=" + dst_virtual_ip +
                    " proto=" + inner_proto_name +
                    " len=" + std::to_string(packet.size()));
+        uint16_t src_port = 0;
+        uint16_t dst_port = 0;
+        if (is_tcp) {
+            TryParseLinuxTcpPorts(packet.data(), packet.size(), &src_port, &dst_port);
+        }
         if (is_udp && !dst_virtual_ip.empty()) {
             UdpEndpoint peer_endpoint;
             bool direct_path_fresh = false;
@@ -2421,6 +3311,15 @@ void LinuxPacketTunnelClient::TunReadLoop() {
             } else {
                 MaybeLogDirectRouteFallback(dst_virtual_ip, "route_unavailable");
             }
+        }
+
+        if (is_tcp && !dst_virtual_ip.empty() &&
+            TrySendTcpDirectPacket(dst_virtual_ip, packet.data(), packet.size())) {
+            LogInfo("tcp tun->tcp-peer dst=" + dst_virtual_ip + ":" +
+                    std::to_string(dst_port) +
+                    " len=" + std::to_string(packet.size()));
+            TraceWatchedTcpPacket(packet.data(), packet.size(), "tun->tcp-peer");
+            continue;
         }
 
         bool relay_send_ok = true;

@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -120,18 +121,62 @@ private:
         }
     };
 
+    struct TcpDirectOffer {
+        uint64_t endpoint_version;
+        uint8_t endpoint_family;
+        uint16_t endpoint_port;
+        uint8_t endpoint_addr[16];
+        unsigned long long last_offer_tick_ms;
+        unsigned long long cooldown_until_tick_ms;
+        bool connecting;
+
+        TcpDirectOffer()
+            : endpoint_version(0),
+              endpoint_family(0),
+              endpoint_port(0),
+              last_offer_tick_ms(0),
+              cooldown_until_tick_ms(0),
+              connecting(false) {
+            ZeroMemory(endpoint_addr, sizeof(endpoint_addr));
+        }
+    };
+
+    struct TcpDirectConnection {
+        SOCKET sock;
+        std::string peer_virtual_ip;
+        std::atomic<bool> active;
+        CRITICAL_SECTION send_lock;
+        std::thread read_thread;
+
+        TcpDirectConnection()
+            : sock(INVALID_SOCKET),
+              active(false) {
+            InitializeCriticalSection(&send_lock);
+        }
+
+        ~TcpDirectConnection() {
+            DeleteCriticalSection(&send_lock);
+        }
+    };
+
     bool ConnectSocket(std::wstring* error_msg);
     bool ConnectTcpSocket(std::wstring* error_msg);
+    bool StartTcpDirectListener(std::wstring* error_msg);
     bool BuildHandshakePayload(bool relay_only,
                                std::vector<uint8_t>* handshake,
                                std::wstring* error_msg) const;
     bool SendHandshake(std::wstring* error_msg);
     bool SendTcpHandshake(std::wstring* error_msg);
+    bool SendTcpDirectAdvertise(std::wstring* error_msg);
     bool ReceiveHandshakeAck(std::wstring* error_msg);
     bool ReceiveTcpHandshakeAck(std::wstring* error_msg);
     bool StartThreads(std::wstring* error_msg);
+    void StopTcpDirectSockets();
     void SocketReadLoop();
     void TcpSocketReadLoop();
+    void TcpDirectAcceptLoop();
+    void TcpDirectReadLoop(const std::shared_ptr<TcpDirectConnection>& connection,
+                           bool expect_open_frame);
     void WintunWriteLoop();
     void WintunReadLoop();
     void HeartbeatLoop();
@@ -180,11 +225,32 @@ private:
                          int* source_addr_len,
                          std::wstring* error_msg);
     bool RecvTcpExact(uint8_t* data, size_t length, std::wstring* error_msg);
+    bool RecvFrameFromSocket(SOCKET sock,
+                             uint8_t* frame_type,
+                             std::vector<uint8_t>* payload,
+                             std::wstring* error_msg);
     bool SendFrame(uint8_t frame_type, const uint8_t* data, size_t length, std::wstring* error_msg);
     bool SendFrameOverTcp(uint8_t frame_type,
                           const uint8_t* data,
                           size_t length,
                           std::wstring* error_msg);
+    bool SendFrameOverSocket(SOCKET sock,
+                             CRITICAL_SECTION* send_lock,
+                             uint8_t frame_type,
+                             const uint8_t* data,
+                             size_t length,
+                             std::wstring* error_msg);
+    bool TrySendTcpDirectPacket(const std::string& peer_virtual_ip,
+                                const uint8_t* data,
+                                size_t length);
+    void MaybeStartTcpDirectConnect(const std::string& peer_virtual_ip);
+    void TcpDirectConnectWorker(const std::string& peer_virtual_ip);
+    void RegisterTcpDirectConnection(const std::string& peer_virtual_ip,
+                                     const std::shared_ptr<TcpDirectConnection>& connection,
+                                     bool incoming);
+    void RemoveTcpDirectConnection(const std::string& peer_virtual_ip,
+                                   SOCKET sock,
+                                   bool enter_cooldown);
     bool SendDatagram(const uint8_t* data, size_t length, std::wstring* error_msg);
     int RecvDatagram(uint8_t* data, size_t length, std::wstring* error_msg);
     uint32_t ParseVirtualIp(std::wstring* error_msg) const;
@@ -219,7 +285,9 @@ private:
     WintunManager* wintun_manager_;
     SOCKET sock_;
     SOCKET tcp_sock_;
+    SOCKET tcp_direct_listen_sock_;
     int socket_family_;
+    uint16_t tcp_direct_listen_port_;
     UdpEndpoint server_endpoint_;
     std::atomic<bool> connected_;
     std::atomic<bool> stop_requested_;
@@ -228,6 +296,7 @@ private:
     std::atomic<unsigned long long> last_network_activity_tick_;
     std::thread socket_read_thread_;
     std::thread tcp_socket_read_thread_;
+    std::thread tcp_direct_accept_thread_;
     std::thread wintun_write_thread_;
     std::thread wintun_read_thread_;
     std::thread heartbeat_thread_;
@@ -248,5 +317,9 @@ private:
     std::map<std::string, unsigned long long> peer_probe_send_tick_;
     std::map<std::string, unsigned long long> mirrored_gateway_udp_signature_tick_;
     std::map<uint16_t, PeerUdpPortOwner> peer_udp_port_owners_;
+    std::mutex tcp_direct_mutex_;
+    std::map<std::string, TcpDirectOffer> tcp_direct_offers_;
+    std::map<std::string, std::shared_ptr<TcpDirectConnection>> tcp_direct_connections_;
+    std::vector<std::thread> tcp_direct_connect_threads_;
     bool peer_direct_allowed_;
 };

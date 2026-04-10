@@ -1108,6 +1108,10 @@ struct ParsedPeerDisableFrame {
     uint8_t reason;
 };
 
+struct ParsedTcpDirectAdvertiseFrame {
+    uint16_t listen_port;
+};
+
 static string packet_tunnel_frame_name(uint8_t frame_type) {
     switch (frame_type) {
     case packet_tunnel::kFrameHeartbeat:
@@ -1126,6 +1130,12 @@ static string packet_tunnel_frame_name(uint8_t frame_type) {
         return "peer_keepalive";
     case packet_tunnel::kFramePeerDisable:
         return "peer_disable";
+    case packet_tunnel::kFrameTcpPeerOffer:
+        return "tcp_peer_offer";
+    case packet_tunnel::kFrameTcpDirectAdvertise:
+        return "tcp_direct_advertise";
+    case packet_tunnel::kFrameTcpDirectOpen:
+        return "tcp_direct_open";
     default:
         return "unknown";
     }
@@ -1182,10 +1192,22 @@ static bool parse_peer_disable_frame(const uint8_t* payload,
     return true;
 }
 
+static bool parse_tcp_direct_advertise_frame(const uint8_t* payload,
+                                             size_t payload_len,
+                                             ParsedTcpDirectAdvertiseFrame* out_advertise) {
+    if (payload == nullptr || out_advertise == nullptr ||
+        payload_len != packet_tunnel::kTcpDirectAdvertisePayloadSize) {
+        return false;
+    }
+    out_advertise->listen_port = packet_tunnel::read_u16_be(payload);
+    return true;
+}
+
 static bool encode_peer_offer_payload(uint32_t peer_virtual_ip_be,
                                       uint64_t endpoint_version,
                                       const sockaddr_storage& endpoint_addr,
                                       socklen_t endpoint_addr_len,
+                                      uint16_t port_override,
                                       vector<uint8_t>* out_payload) {
     (void)endpoint_addr_len;
     if (out_payload == nullptr) {
@@ -1199,12 +1221,14 @@ static bool encode_peer_offer_payload(uint32_t peer_virtual_ip_be,
     if (endpoint_addr.ss_family == AF_INET) {
         const sockaddr_in* addr4 = reinterpret_cast<const sockaddr_in*>(&endpoint_addr);
         payload[12] = packet_tunnel::kPeerEndpointFamilyIpv4;
-        packet_tunnel::write_u16_be(payload.data() + 14, ntohs(addr4->sin_port));
+        packet_tunnel::write_u16_be(payload.data() + 14,
+                                    port_override != 0 ? port_override : ntohs(addr4->sin_port));
         memcpy(payload.data() + 16, &addr4->sin_addr, 4);
     } else if (endpoint_addr.ss_family == AF_INET6) {
         const sockaddr_in6* addr6 = reinterpret_cast<const sockaddr_in6*>(&endpoint_addr);
         payload[12] = packet_tunnel::kPeerEndpointFamilyIpv6;
-        packet_tunnel::write_u16_be(payload.data() + 14, ntohs(addr6->sin6_port));
+        packet_tunnel::write_u16_be(payload.data() + 14,
+                                    port_override != 0 ? port_override : ntohs(addr6->sin6_port));
         memcpy(payload.data() + 16, &addr6->sin6_addr, 16);
     } else {
         return false;
@@ -1378,6 +1402,7 @@ private:
         uint8_t handshake_flags;
         bool allow_peer_direct;
         bool is_remote_linux_node;
+        uint16_t tcp_direct_listen_port;
         mutex send_mutex;
 
         PacketTunnelSession(int fd,
@@ -1400,7 +1425,8 @@ private:
               last_activity_ms(established_ms),
               handshake_flags(packet_tunnel::kHandshakeFlagNone),
               allow_peer_direct(true),
-              is_remote_linux_node(false) {}
+              is_remote_linux_node(false),
+              tcp_direct_listen_port(0) {}
     };
 
     struct PacketTunnelSessionRemoval {
@@ -1424,6 +1450,7 @@ private:
     ServerConfig config;
     string server_name;
     PeerCoord peer_coord_;
+    PeerCoord tcp_peer_coord_;
     int listen_fd;
     atomic<bool> running;
 
@@ -1471,6 +1498,60 @@ private:
         }
 
         return "unknown";
+    }
+
+    static bool parse_client_endpoint_string(const string& client_str,
+                                             sockaddr_storage* out_addr,
+                                             socklen_t* out_addr_len) {
+        if (out_addr == nullptr || out_addr_len == nullptr || client_str.empty()) {
+            return false;
+        }
+
+        memset(out_addr, 0, sizeof(*out_addr));
+        *out_addr_len = 0;
+
+        if (client_str[0] == '[') {
+            size_t closing = client_str.find(']');
+            size_t colon = client_str.rfind(':');
+            if (closing == string::npos || colon == string::npos || colon <= closing + 1) {
+                return false;
+            }
+            string host = client_str.substr(1, closing - 1);
+            string port_str = client_str.substr(colon + 1);
+            int port = atoi(port_str.c_str());
+            if (port <= 0 || port > 65535) {
+                return false;
+            }
+
+            sockaddr_in6* addr6 = reinterpret_cast<sockaddr_in6*>(out_addr);
+            addr6->sin6_family = AF_INET6;
+            addr6->sin6_port = htons(static_cast<uint16_t>(port));
+            if (inet_pton(AF_INET6, host.c_str(), &addr6->sin6_addr) != 1) {
+                return false;
+            }
+            *out_addr_len = sizeof(sockaddr_in6);
+            return true;
+        }
+
+        size_t colon = client_str.rfind(':');
+        if (colon == string::npos) {
+            return false;
+        }
+        string host = client_str.substr(0, colon);
+        string port_str = client_str.substr(colon + 1);
+        int port = atoi(port_str.c_str());
+        if (port <= 0 || port > 65535) {
+            return false;
+        }
+
+        sockaddr_in* addr4 = reinterpret_cast<sockaddr_in*>(out_addr);
+        addr4->sin_family = AF_INET;
+        addr4->sin_port = htons(static_cast<uint16_t>(port));
+        if (inet_pton(AF_INET, host.c_str(), &addr4->sin_addr) != 1) {
+            return false;
+        }
+        *out_addr_len = sizeof(sockaddr_in);
+        return true;
     }
 
     static string build_scoped_virtual_ip_key(const string& server_key, const string& virtual_ip) {
@@ -2346,6 +2427,7 @@ private:
                                        local_version,
                                        session->udp_addr,
                                        session->udp_addr_len,
+                                       0,
                                        &local_offer_payload)) {
             Logger::warning("[" + server_name + "|IP Tunnel] failed to encode peer offer for " +
                             local_scope_label);
@@ -2390,6 +2472,7 @@ private:
                                            peer_version,
                                            peer->udp_addr,
                                            peer->udp_addr_len,
+                                           0,
                                            &peer_offer_payload)) {
                 Logger::warning("[" + server_name + "|IP Tunnel] failed to encode peer offer for " +
                                 peer_scope_label);
@@ -2449,6 +2532,94 @@ private:
         }
 
         announce_peer_offers_for_session(session, false);
+    }
+
+    void announce_tcp_peer_offers_for_session(const shared_ptr<PacketTunnelSession>& session,
+                                              bool force_new_version = true) {
+        if (!session || !session->active || session->use_udp || session->tcp_direct_listen_port == 0) {
+            return;
+        }
+
+        sockaddr_storage local_addr = {};
+        socklen_t local_addr_len = 0;
+        if (!parse_client_endpoint_string(session->client_str, &local_addr, &local_addr_len)) {
+            Logger::warning("[" + server_name + "|IP Tunnel] failed to parse TCP client endpoint for " +
+                            describe_scoped_virtual_ip(session));
+            return;
+        }
+
+        const string local_virtual_ip = ipv4_be_to_string(session->virtual_ip_be);
+        const string local_scope_key =
+            build_scoped_virtual_ip_key(session->server_key, local_virtual_ip);
+        uint64_t local_version = tcp_peer_coord_.GetEndpointVersion(local_scope_key);
+        if (force_new_version || local_version == 0) {
+            local_version = tcp_peer_coord_.BumpEndpointVersion(local_scope_key);
+        }
+        tcp_peer_coord_.SetState(local_scope_key, PeerEndpointState::OfferPending);
+
+        vector<uint8_t> local_offer_payload;
+        if (!encode_peer_offer_payload(session->virtual_ip_be,
+                                       local_version,
+                                       local_addr,
+                                       local_addr_len,
+                                       session->tcp_direct_listen_port,
+                                       &local_offer_payload)) {
+            Logger::warning("[" + server_name + "|IP Tunnel] failed to encode TCP peer offer for " +
+                            describe_scoped_virtual_ip(session));
+            return;
+        }
+
+        vector<shared_ptr<PacketTunnelSession>> peers;
+        {
+            lock_guard<mutex> lock(packet_tunnel_mutex);
+            for (map<string, shared_ptr<PacketTunnelSession>>::const_iterator it = packet_tunnel_tcp_sessions.begin();
+                 it != packet_tunnel_tcp_sessions.end(); ++it) {
+                const shared_ptr<PacketTunnelSession>& peer = it->second;
+                if (!peer || peer == session || !peer->active || peer->use_udp ||
+                    peer->server_key != session->server_key ||
+                    peer->tcp_direct_listen_port == 0) {
+                    continue;
+                }
+                peers.push_back(peer);
+            }
+        }
+
+        for (size_t i = 0; i < peers.size(); ++i) {
+            const shared_ptr<PacketTunnelSession>& peer = peers[i];
+            sockaddr_storage peer_addr = {};
+            socklen_t peer_addr_len = 0;
+            if (!parse_client_endpoint_string(peer->client_str, &peer_addr, &peer_addr_len)) {
+                continue;
+            }
+
+            const string peer_virtual_ip = ipv4_be_to_string(peer->virtual_ip_be);
+            const string peer_scope_key =
+                build_scoped_virtual_ip_key(peer->server_key, peer_virtual_ip);
+            uint64_t peer_version = tcp_peer_coord_.GetEndpointVersion(peer_scope_key);
+            if (force_new_version || peer_version == 0) {
+                peer_version = tcp_peer_coord_.BumpEndpointVersion(peer_scope_key);
+            }
+            tcp_peer_coord_.SetState(peer_scope_key, PeerEndpointState::OfferPending);
+
+            vector<uint8_t> peer_offer_payload;
+            if (!encode_peer_offer_payload(peer->virtual_ip_be,
+                                           peer_version,
+                                           peer_addr,
+                                           peer_addr_len,
+                                           peer->tcp_direct_listen_port,
+                                           &peer_offer_payload)) {
+                continue;
+            }
+
+            send_packet_tunnel_frame(peer,
+                                     packet_tunnel::kFrameTcpPeerOffer,
+                                     local_offer_payload.data(),
+                                     local_offer_payload.size());
+            send_packet_tunnel_frame(session,
+                                     packet_tunnel::kFrameTcpPeerOffer,
+                                     peer_offer_payload.data(),
+                                     peer_offer_payload.size());
+        }
     }
 
     bool route_peer_signal_frame(const shared_ptr<PacketTunnelSession>& sender_session,
@@ -3786,6 +3957,27 @@ private:
                     if (!send_packet_tunnel_frame(session, packet_tunnel::kFrameHeartbeatAck, nullptr, 0)) {
                         Logger::warning("[IP Tunnel|" + session_uuid + "] 发送心跳确认失败");
                         break;
+                    }
+                    continue;
+                }
+
+                if (frame_type == packet_tunnel::kFrameTcpDirectAdvertise) {
+                    ParsedTcpDirectAdvertiseFrame advertise = {};
+                    if (!parse_tcp_direct_advertise_frame(payload.data(), payload_len, &advertise)) {
+                        Logger::warning("[IP Tunnel|" + session_uuid + "] invalid " +
+                                        packet_tunnel_frame_name(frame_type) +
+                                        " payload_len=" + to_string(payload_len));
+                        continue;
+                    }
+
+                    const uint16_t previous_port = session->tcp_direct_listen_port;
+                    session->tcp_direct_listen_port = advertise.listen_port;
+                    Logger::info("[IP Tunnel|" + session_uuid + "] tcp direct advertise: virtual_ip=" +
+                                 describe_scoped_virtual_ip(session->server_key, session->virtual_ip_be) +
+                                 " port=" + to_string(advertise.listen_port));
+                    if (advertise.listen_port != 0 &&
+                        (previous_port == 0 || previous_port != advertise.listen_port)) {
+                        announce_tcp_peer_offers_for_session(session, true);
                     }
                     continue;
                 }

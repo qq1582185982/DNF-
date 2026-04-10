@@ -28,7 +28,10 @@ enum FrameType : uint8_t {
     kFramePeerHello = 0x24,
     kFramePeerAck = 0x25,
     kFramePeerKeepalive = 0x26,
-    kFramePeerDisable = 0x27
+    kFramePeerDisable = 0x27,
+    kFrameTcpPeerOffer = 0x28,
+    kFrameTcpDirectAdvertise = 0x29,
+    kFrameTcpDirectOpen = 0x2A
 };
 
 enum PeerEndpointFamily : uint8_t {
@@ -50,6 +53,8 @@ static const size_t kPeerEndpointAddrSize = 16;
 static const size_t kPeerOfferPayloadSize = 32;
 static const size_t kPeerSignalPayloadSize = 16;
 static const size_t kPeerDisablePayloadSize = 16;
+static const size_t kTcpDirectAdvertisePayloadSize = 4;
+static const size_t kTcpDirectOpenPayloadSize = 8;
 
 inline uint16_t read_u16_be(const uint8_t* data) {
     return static_cast<uint16_t>(data[0] << 8) |
