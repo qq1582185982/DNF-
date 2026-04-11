@@ -137,7 +137,7 @@ void PeerLinkManager::ResetPendingHello(Entry* entry) {
         return;
     }
     entry->pending_hello_version = 0;
-    entry->pending_hello_nonce = 0;
+    entry->pending_hello_nonces.clear();
 }
 
 void PeerLinkManager::ResetDirectAssessment(Entry* entry) {
@@ -271,14 +271,14 @@ bool PeerLinkManager::UpdatePeerOffer(const std::string& peer_virtual_ip,
         }
         if ((entry.state == PeerRouteState::Probing &&
              entry.pending_hello_version == endpoint_version &&
-             entry.pending_hello_nonce != 0) ||
+             !entry.pending_hello_nonces.empty()) ||
             entry.direct_ready ||
             entry.active_direct) {
             return false;
         }
         if (same_endpoint) {
             const bool should_retry_stable_offer =
-                entry.pending_hello_nonce == 0 &&
+                entry.pending_hello_nonces.empty() &&
                 !entry.direct_ready &&
                 !entry.active_direct &&
                 (entry.state == PeerRouteState::RelayOnly ||
@@ -455,8 +455,23 @@ void PeerLinkManager::RecordPeerHelloSent(const std::string& peer_virtual_ip,
 
     ResetDirectAssessment(&entry);
     entry.retry_after_ms = 0;
-    entry.pending_hello_version = entry.endpoint_version;
-    entry.pending_hello_nonce = nonce;
+    if (entry.pending_hello_version != entry.endpoint_version) {
+        entry.pending_hello_nonces.clear();
+        entry.pending_hello_version = entry.endpoint_version;
+    }
+    bool nonce_known = false;
+    for (size_t i = 0; i < entry.pending_hello_nonces.size(); ++i) {
+        if (entry.pending_hello_nonces[i] == nonce) {
+            nonce_known = true;
+            break;
+        }
+    }
+    if (!nonce_known) {
+        if (entry.pending_hello_nonces.size() >= 32) {
+            entry.pending_hello_nonces.erase(entry.pending_hello_nonces.begin());
+        }
+        entry.pending_hello_nonces.push_back(nonce);
+    }
     EnterState(&entry, PeerRouteState::Probing, now);
 }
 
@@ -477,7 +492,18 @@ bool PeerLinkManager::TryPromotePeerDirectReady(const std::string& peer_virtual_
     entry.last_observed_ms = now;
 
     if (entry.pending_hello_version != endpoint_version ||
-        entry.pending_hello_nonce != nonce) {
+        entry.pending_hello_nonces.empty()) {
+        return false;
+    }
+
+    bool matched_pending_nonce = false;
+    for (size_t i = 0; i < entry.pending_hello_nonces.size(); ++i) {
+        if (entry.pending_hello_nonces[i] == nonce) {
+            matched_pending_nonce = true;
+            break;
+        }
+    }
+    if (!matched_pending_nonce) {
         return false;
     }
 
