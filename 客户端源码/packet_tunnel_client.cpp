@@ -4120,6 +4120,7 @@ void PacketTunnelClient::SocketReadLoop() {
                 }
             }
             if (!from_known_peer &&
+                inner_is_udp &&
                 has_inner_ipv4 &&
                 has_fresh_direct_route(inner_src_virtual_ip)) {
                 continue;
@@ -4314,7 +4315,7 @@ void PacketTunnelClient::WintunReadLoop() {
                 }
             }
         }
-        if (is_udp && peer_direct_allowed_ && !dst_virtual_ip.empty()) {
+        if (!is_tcp && peer_direct_allowed_ && !dst_virtual_ip.empty()) {
             const std::string original_dst_virtual_ip = dst_virtual_ip;
             std::string target_peer_virtual_ip = dst_virtual_ip;
             std::string target_resolution = "direct_ip";
@@ -4381,29 +4382,29 @@ void PacketTunnelClient::WintunReadLoop() {
                 }
             }
 
-            PacketFlowRouterInput udp_flow_input;
-            udp_flow_input.is_udp = true;
-            udp_flow_input.has_udp_peer_endpoint = have_peer_endpoint;
-            udp_flow_input.direct_path_fresh = direct_path_fresh;
-            udp_flow_input.active_direct = active_direct;
-            udp_flow_input.resolved_gateway_target = resolved_gateway_target;
-            udp_flow_input.direct_payload_ready = direct_payload_ready;
-            udp_flow_input.route_desc_seed = route_desc;
-            udp_flow_input.target_peer_virtual_ip = target_peer_virtual_ip;
-            udp_flow_input.original_dst_virtual_ip = original_dst_virtual_ip;
-            udp_flow_input.target_resolution = target_resolution;
-            udp_flow_input.can_shadow_payload =
+            PacketFlowRouterInput direct_flow_input;
+            direct_flow_input.is_udp = true;
+            direct_flow_input.has_udp_peer_endpoint = have_peer_endpoint;
+            direct_flow_input.direct_path_fresh = direct_path_fresh;
+            direct_flow_input.active_direct = active_direct;
+            direct_flow_input.resolved_gateway_target = resolved_gateway_target;
+            direct_flow_input.direct_payload_ready = direct_payload_ready;
+            direct_flow_input.route_desc_seed = route_desc;
+            direct_flow_input.target_peer_virtual_ip = target_peer_virtual_ip;
+            direct_flow_input.original_dst_virtual_ip = original_dst_virtual_ip;
+            direct_flow_input.target_resolution = target_resolution;
+            direct_flow_input.can_shadow_payload =
                 direct_payload_ready &&
                 !resolved_gateway_target &&
                 target_peer_virtual_ip == original_dst_virtual_ip &&
                 (src_port == 5063 || dst_port == 5063);
-            const PacketFlowRouterDecision udp_flow_decision =
-                PacketFlowRouter::Decide(udp_flow_input);
-            const std::string direct_route_desc = udp_flow_decision.route_desc;
+            const PacketFlowRouterDecision direct_flow_decision =
+                PacketFlowRouter::Decide(direct_flow_input);
+            const std::string direct_route_desc = direct_flow_decision.route_desc;
 
             if (have_peer_endpoint) {
-                if (udp_flow_decision.primary_route == PacketFlowRoute::UdpDirect) {
-                    if (udp_flow_decision.try_udp_direct_now) {
+                if (direct_flow_decision.primary_route == PacketFlowRoute::UdpDirect) {
+                    if (direct_flow_decision.try_udp_direct_now) {
                         if (!direct_path_fresh && active_direct && resolved_gateway_target) {
                             if (debug_enabled) {
                                 PT_DEBUG("udp stale active direct send " + direct_route_desc);
@@ -4463,7 +4464,7 @@ void PacketTunnelClient::WintunReadLoop() {
                     bool sent_shadow_payload = false;
                     const bool can_shadow_send_payload =
                         should_send_probe &&
-                        udp_flow_decision.try_udp_shadow_payload;
+                        direct_flow_decision.try_udp_shadow_payload;
                     if (can_shadow_send_payload &&
                         SendFrameToEndpoint(peer_endpoint,
                                             packet_tunnel::kFrameIpv4Packet,

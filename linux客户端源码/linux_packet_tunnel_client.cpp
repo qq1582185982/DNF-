@@ -2577,7 +2577,9 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
                 if (!relay_peer_virtual_ip.empty()) {
                     LearnPeerUdpPortOwner(relay_peer_virtual_ip, inner_src_port);
                 }
-                if (payload_len >= 20 && has_fresh_direct_route(LinuxIpv4ToString(payload + 12))) {
+                if (inner_is_udp &&
+                    payload_len >= 20 &&
+                    has_fresh_direct_route(LinuxIpv4ToString(payload + 12))) {
                     continue;
                 }
             }
@@ -4035,7 +4037,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
         if (is_tcp) {
             TryParseLinuxTcpPorts(packet.data(), packet.size(), &src_port, &dst_port);
         }
-        if (is_udp && !dst_virtual_ip.empty()) {
+        if (!is_tcp && !dst_virtual_ip.empty()) {
             const std::string original_dst_virtual_ip = dst_virtual_ip;
             std::string target_peer_virtual_ip = dst_virtual_ip;
             std::string target_resolution = "direct_ip";
@@ -4048,7 +4050,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                      &peer_endpoint,
                                      &direct_path_fresh,
                                      &active_direct);
-            if (!have_peer_endpoint) {
+            if (is_udp && !have_peer_endpoint) {
                 std::string resolved_peer_virtual_ip;
                 std::string resolution;
                 if (TryResolvePeerByCandidateAddress(dst_virtual_ip,
@@ -4066,7 +4068,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                              &active_direct);
                 }
             }
-            if (!have_peer_endpoint) {
+            if (is_udp && !have_peer_endpoint) {
                 std::string resolved_peer_virtual_ip;
                 std::string resolution;
                 if (TryResolveGatewayUdpPeerTarget(dst_virtual_ip,
@@ -4089,7 +4091,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
             std::vector<uint8_t> direct_packet;
             const std::vector<uint8_t>* direct_packet_view = &packet;
             bool direct_payload_ready = true;
-            if (have_peer_endpoint && resolved_gateway_target) {
+            if (have_peer_endpoint && resolved_gateway_target && is_udp) {
                 uint32_t original_dst_ip_be = 0;
                 uint32_t target_peer_ip_be = 0;
                 memcpy(&original_dst_ip_be, packet.data() + 16, sizeof(original_dst_ip_be));
@@ -4105,23 +4107,23 @@ void LinuxPacketTunnelClient::TunReadLoop() {
             }
 
             if (have_peer_endpoint) {
-                PacketFlowRouterInput udp_flow_input;
-                udp_flow_input.is_udp = true;
-                udp_flow_input.has_udp_peer_endpoint = true;
-                udp_flow_input.direct_path_fresh = direct_path_fresh;
-                udp_flow_input.active_direct = active_direct;
-                udp_flow_input.resolved_gateway_target = resolved_gateway_target;
-                udp_flow_input.direct_payload_ready = direct_payload_ready;
-                udp_flow_input.route_desc_seed = route_desc;
-                udp_flow_input.target_peer_virtual_ip = target_peer_virtual_ip;
-                udp_flow_input.original_dst_virtual_ip = original_dst_virtual_ip;
-                udp_flow_input.target_resolution = target_resolution;
-                const PacketFlowRouterDecision udp_flow_decision =
-                    PacketFlowRouter::Decide(udp_flow_input);
-                const std::string direct_route_desc = udp_flow_decision.route_desc;
+                PacketFlowRouterInput direct_flow_input;
+                direct_flow_input.is_udp = true;
+                direct_flow_input.has_udp_peer_endpoint = true;
+                direct_flow_input.direct_path_fresh = direct_path_fresh;
+                direct_flow_input.active_direct = active_direct;
+                direct_flow_input.resolved_gateway_target = resolved_gateway_target;
+                direct_flow_input.direct_payload_ready = direct_payload_ready;
+                direct_flow_input.route_desc_seed = route_desc;
+                direct_flow_input.target_peer_virtual_ip = target_peer_virtual_ip;
+                direct_flow_input.original_dst_virtual_ip = original_dst_virtual_ip;
+                direct_flow_input.target_resolution = target_resolution;
+                const PacketFlowRouterDecision direct_flow_decision =
+                    PacketFlowRouter::Decide(direct_flow_input);
+                const std::string direct_route_desc = direct_flow_decision.route_desc;
 
-                if (udp_flow_decision.primary_route == PacketFlowRoute::UdpDirect) {
-                    if (udp_flow_decision.try_udp_direct_now &&
+                if (direct_flow_decision.primary_route == PacketFlowRoute::UdpDirect) {
+                    if (direct_flow_decision.try_udp_direct_now &&
                         SendFrameToEndpoint(peer_endpoint,
                                             packet_tunnel::kFrameIpv4Packet,
                                             direct_packet_view->data(),
@@ -4131,7 +4133,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                         TraceWatchedTcpPacket(packet.data(), packet.size(), "tun->peer");
                         continue;
                     }
-                    if (!udp_flow_decision.try_udp_direct_now) {
+                    if (!direct_flow_decision.try_udp_direct_now) {
                         MaybeLogDirectRouteFallback(target_peer_virtual_ip, "payload_unavailable");
                         continue;
                     }
@@ -4148,7 +4150,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                         LogInfo("udp direct route entered cooldown peer=" +
                                 failed_status.peer_virtual_ip);
                     }
-                } else if (udp_flow_decision.try_udp_probe) {
+                } else if (direct_flow_decision.try_udp_probe) {
                     const unsigned long long tick = now_ms();
                     std::map<std::string, unsigned long long>::iterator probe_it =
                         peer_probe_send_tick_.find(target_peer_virtual_ip);
