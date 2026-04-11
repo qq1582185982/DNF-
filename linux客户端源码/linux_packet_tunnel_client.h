@@ -307,6 +307,7 @@ private:
     std::map<std::string, unsigned long long> peer_route_debug_log_tick_;
     std::map<std::string, unsigned long long> icmp_debug_log_tick_;
     std::map<std::string, unsigned long long> peer_probe_send_tick_;
+    std::map<std::string, unsigned long long> peer_hello_send_tick_;
     std::map<uint16_t, PeerUdpPortOwner> peer_udp_port_owners_;
     std::map<std::string, WatchedTcpFlowTrace> watched_tcp_flows_;
     std::map<std::string, TcpDirectOffer> tcp_direct_offers_;

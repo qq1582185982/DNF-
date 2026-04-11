@@ -50,6 +50,7 @@ const DWORD kPeerDirectDataTimeoutMs = 5000;
 const DWORD kPeerSnapshotLogIntervalMs = 15000;
 const DWORD kPeerRouteDebugLogIntervalMs = 2000;
 const DWORD kPeerDirectProbeIntervalMs = 500;
+const DWORD kPeerHelloRetryIntervalMs = 500;
 const bool kEnableGatewayUdpPeerHeuristics = true;
 const DWORD kSocketReadTimeoutMs = 1000;
 const DWORD kSocketSendTimeoutMs = 50;
@@ -2564,6 +2565,7 @@ bool PacketTunnelClient::Start(std::wstring* error_msg) {
     icmp_debug_log_tick_.clear();
     payload_ip_debug_log_tick_.clear();
     peer_probe_send_tick_.clear();
+    peer_hello_send_tick_.clear();
     mirrored_gateway_udp_signature_tick_.clear();
     peer_udp_port_owners_.clear();
     {
@@ -2702,6 +2704,7 @@ void PacketTunnelClient::Stop() {
         heartbeat_thread_.join();
     }
     peer_probe_send_tick_.clear();
+    peer_hello_send_tick_.clear();
     mirrored_gateway_udp_signature_tick_.clear();
     peer_udp_port_owners_.clear();
 
@@ -5734,6 +5737,71 @@ void PacketTunnelClient::HeartbeatLoop() {
             const bool has_local_virtual_ip =
                 ParseIpv4StringToBe(virtual_ip_, &local_virtual_ip_be);
             for (size_t i = 0; i < peers.size(); ++i) {
+                if (!peers[i].direct_ready &&
+                    peers[i].endpoint_version != 0 &&
+                    has_local_virtual_ip &&
+                    (peers[i].state == PeerRouteState::OfferReceived ||
+                     peers[i].state == PeerRouteState::Probing)) {
+                    std::map<std::string, unsigned long long>::iterator hello_it =
+                        peer_hello_send_tick_.find(peers[i].peer_virtual_ip);
+                    const bool should_retry_hello =
+                        hello_it == peer_hello_send_tick_.end() ||
+                        now_tick < hello_it->second ||
+                        (now_tick - hello_it->second) >= kPeerHelloRetryIntervalMs;
+                    if (should_retry_hello) {
+                        UdpEndpoint peer_endpoint;
+                        if (TryBuildPeerEndpointFromCandidate(peers[i].endpoint_family,
+                                                              peers[i].endpoint_addr,
+                                                              peers[i].endpoint_port,
+                                                              &peer_endpoint)) {
+                            std::map<std::string, unsigned long long>::iterator probe_it =
+                                peer_probe_send_tick_.find(peers[i].peer_virtual_ip);
+                            const bool should_send_probe =
+                                probe_it == peer_probe_send_tick_.end() ||
+                                now_tick < probe_it->second ||
+                                (now_tick - probe_it->second) >=
+                                    kPeerDirectProbeIntervalMs;
+                            if (should_send_probe) {
+                                uint32_t target_peer_ip_be = 0;
+                                std::vector<uint8_t> probe_packet;
+                                if (ParseIpv4StringToBe(peers[i].peer_virtual_ip,
+                                                        &target_peer_ip_be) &&
+                                    BuildPeerDirectProbePacket(local_virtual_ip_be,
+                                                               target_peer_ip_be,
+                                                               kPeerDirectProbeRequest,
+                                                               &probe_packet) &&
+                                    SendFrameToEndpoint(peer_endpoint,
+                                                        packet_tunnel::kFrameIpv4Packet,
+                                                        probe_packet.data(),
+                                                        probe_packet.size(),
+                                                        NULL)) {
+                                    peer_probe_send_tick_[peers[i].peer_virtual_ip] = now_tick;
+                                }
+                            }
+                        }
+
+                        const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
+                        if (SendPeerSignalFrame(packet_tunnel::kFramePeerHello,
+                                                peers[i].peer_virtual_ip,
+                                                peers[i].endpoint_version,
+                                                nonce)) {
+                            peer_hello_send_tick_[peers[i].peer_virtual_ip] = now_tick;
+                            if (peer_link_manager_ != NULL) {
+                                peer_link_manager_->RecordPeerHelloSent(
+                                    peers[i].peer_virtual_ip,
+                                    peers[i].endpoint_version,
+                                    nonce);
+                            }
+                            PacketTunnelDebugLog("补发对等端问候: 对端=" +
+                                                 peers[i].peer_virtual_ip +
+                                                 " 版本=" +
+                                                 std::to_string(peers[i].endpoint_version) +
+                                                 " 随机数=" + std::to_string(nonce) +
+                                                 " 状态=" +
+                                                 PeerRouteStateName(peers[i].state));
+                        }
+                    }
+                }
                 if (peers[i].direct_ready &&
                     peers[i].endpoint_version != 0 &&
                     has_local_virtual_ip) {

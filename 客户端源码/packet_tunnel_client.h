@@ -371,6 +371,7 @@ private:
     std::map<std::string, unsigned long long> payload_ip_debug_log_tick_;
     std::map<std::string, WatchedTcpFlowTrace> watched_tcp_flows_;
     std::map<std::string, unsigned long long> peer_probe_send_tick_;
+    std::map<std::string, unsigned long long> peer_hello_send_tick_;
     std::map<std::string, unsigned long long> mirrored_gateway_udp_signature_tick_;
     std::map<uint16_t, PeerUdpPortOwner> peer_udp_port_owners_;
     std::mutex tcp_direct_mutex_;
