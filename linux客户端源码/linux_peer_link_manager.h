@@ -85,6 +85,9 @@ public:
                            uint64_t direct_data_timeout_ms,
                            uint64_t direct_probe_grace_ms,
                            LinuxPeerRouteStatus* out_status) const;
+    bool TryResolveUniquePeerByAddress(uint8_t endpoint_family,
+                                       const uint8_t* endpoint_addr,
+                                       LinuxPeerRouteStatus* out_status) const;
     bool TryResolveByEndpoint(uint8_t endpoint_family,
                               const uint8_t* endpoint_addr,
                               uint16_t endpoint_port,

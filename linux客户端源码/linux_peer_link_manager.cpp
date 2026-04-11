@@ -41,6 +41,21 @@ bool LinuxPeerLinkManager::SameCandidate(const Candidate& candidate,
     return memcmp(candidate.endpoint_addr, endpoint_addr, sizeof(candidate.endpoint_addr)) == 0;
 }
 
+namespace {
+
+bool SameEndpointAddress(uint8_t endpoint_family,
+                         const uint8_t* endpoint_addr,
+                         uint8_t candidate_family,
+                         const uint8_t* candidate_addr) {
+    if (endpoint_addr == NULL || candidate_addr == NULL ||
+        endpoint_family == 0 || candidate_family != endpoint_family) {
+        return false;
+    }
+    return memcmp(candidate_addr, endpoint_addr, 16) == 0;
+}
+
+}
+
 bool LinuxPeerLinkManager::AddCandidate(Entry* entry,
                                         uint8_t endpoint_family,
                                         const uint8_t* endpoint_addr,
@@ -718,6 +733,57 @@ bool LinuxPeerLinkManager::TryGetDirectRoute(const std::string& peer_virtual_ip,
     }
 
     FillStatus(it->first, it->second, out_status);
+    return true;
+}
+
+bool LinuxPeerLinkManager::TryResolveUniquePeerByAddress(uint8_t endpoint_family,
+                                                         const uint8_t* endpoint_addr,
+                                                         LinuxPeerRouteStatus* out_status) const {
+    if (endpoint_addr == NULL || endpoint_family == 0) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    const Entry* matched_entry = NULL;
+    std::string matched_peer_virtual_ip;
+    for (std::map<std::string, Entry>::const_iterator it = peers_.begin(); it != peers_.end(); ++it) {
+        if (it->second.state == LinuxPeerRouteState::Cooldown ||
+            !HasEndpoint(it->second)) {
+            continue;
+        }
+
+        bool matched = SameEndpointAddress(endpoint_family,
+                                           endpoint_addr,
+                                           it->second.endpoint_family,
+                                           it->second.endpoint_addr);
+        if (!matched) {
+            for (size_t i = 0; i < it->second.candidates.size(); ++i) {
+                if (SameEndpointAddress(endpoint_family,
+                                        endpoint_addr,
+                                        it->second.candidates[i].endpoint_family,
+                                        it->second.candidates[i].endpoint_addr)) {
+                    matched = true;
+                    break;
+                }
+            }
+        }
+
+        if (!matched) {
+            continue;
+        }
+        if (matched_entry != NULL) {
+            return false;
+        }
+
+        matched_entry = &it->second;
+        matched_peer_virtual_ip = it->first;
+    }
+
+    if (matched_entry == NULL) {
+        return false;
+    }
+
+    FillStatus(matched_peer_virtual_ip, *matched_entry, out_status);
     return true;
 }
 

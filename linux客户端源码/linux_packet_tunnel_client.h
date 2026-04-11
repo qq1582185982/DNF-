@@ -40,6 +40,14 @@ private:
         }
     };
 
+    struct PeerUdpPortOwner {
+        std::string peer_virtual_ip;
+        unsigned long long last_seen_ms;
+
+        PeerUdpPortOwner() : last_seen_ms(0) {
+        }
+    };
+
     struct WatchedTcpFlowTrace {
         std::string client_ip;
         uint16_t client_port;
@@ -175,11 +183,19 @@ private:
                               UdpEndpoint* endpoint,
                               bool* direct_path_fresh = NULL,
                               bool* active_direct = NULL) const;
+    bool TryResolvePeerByCandidateAddress(const std::string& dst_virtual_ip,
+                                          std::string* peer_virtual_ip,
+                                          std::string* resolution = NULL) const;
+    bool TryResolveGatewayUdpPeerTarget(const std::string& dst_virtual_ip,
+                                        uint16_t dst_port,
+                                        std::string* peer_virtual_ip,
+                                        std::string* resolution = NULL) const;
     bool TryResolvePeerBySource(const sockaddr_storage& source_addr,
                                 socklen_t source_addr_len,
                                 std::string* peer_virtual_ip) const;
     bool IsServerEndpoint(const sockaddr_storage& source_addr,
                           socklen_t source_addr_len) const;
+    void LearnPeerUdpPortOwner(const std::string& peer_virtual_ip, uint16_t src_port);
     bool SendFrameToEndpoint(const UdpEndpoint& endpoint,
                              uint8_t frame_type,
                              const uint8_t* data,
@@ -278,6 +294,7 @@ private:
     std::atomic<uint32_t> peer_signal_nonce_;
     std::map<std::string, unsigned long long> peer_route_debug_log_tick_;
     std::map<std::string, unsigned long long> peer_probe_send_tick_;
+    std::map<uint16_t, PeerUdpPortOwner> peer_udp_port_owners_;
     std::map<std::string, WatchedTcpFlowTrace> watched_tcp_flows_;
     std::map<std::string, TcpDirectOffer> tcp_direct_offers_;
     std::map<std::string, std::shared_ptr<TcpDirectConnection>> tcp_direct_connections_;
