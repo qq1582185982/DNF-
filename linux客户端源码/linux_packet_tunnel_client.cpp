@@ -32,6 +32,9 @@ const int kPeerDirectReadyTimeoutMs = 15000;
 const int kPeerCooldownTimeoutMs = 30000;
 const int kPeerDirectProbeGraceMs = 3000;
 const int kPeerDirectDataTimeoutMs = 5000;
+const int kPeerDirectWarmupDurationMs = 15000;
+const int kPeerBusinessHotWindowMs = 15000;
+const int kPeerQuietKeepaliveIntervalMs = 15000;
 const int kPeerSnapshotLogIntervalMs = 15000;
 const int kPeerRouteDebugLogIntervalMs = 2000;
 const int kPeerDirectProbeIntervalMs = 500;
@@ -41,7 +44,9 @@ const int kSocketSendRetryCount = 2;
 const int kSocketSendRetryDelayMs = 5;
 const int kTcpDirectConnectTimeoutMs = 1200;
 const int kTcpDirectRetryCooldownMs = 5000;
+const int kTcpDirectAutoWarmRetryMs = 12000;
 const int kTcpDirectHeartbeatIntervalMs = 3000;
+const int kTcpDirectQuietHeartbeatIntervalMs = 12000;
 const int kTcpDirectIdleTimeoutMs = 15000;
 const int kTcpDirectListenBacklog = 32;
 const int kTunReadWaitMs = 500;
@@ -1640,6 +1645,11 @@ void LinuxPacketTunnelClient::Stop() {
     }
     peer_route_debug_log_tick_.clear();
     peer_probe_send_tick_.clear();
+    peer_keepalive_send_tick_.clear();
+    peer_business_activity_tick_.clear();
+    peer_warmup_until_tick_.clear();
+    peer_tcp_autowarm_tick_.clear();
+    peer_control_log_tick_.clear();
     watched_tcp_flows_.clear();
     last_receive_ms_ = 0;
     last_network_activity_ms_ = 0;
@@ -2712,12 +2722,24 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             }
         }
 
-        LogInfo("peer control tcp_peer_offer: peer=" +
-                offer.peer_virtual_ip +
-                " version=" + std::to_string(offer.endpoint_version) +
-                " endpoint=" + offer.endpoint +
-                (changed ? " changed=yes" : " changed=no"));
-        MaybeStartTcpDirectConnect(offer.peer_virtual_ip);
+        const unsigned long long tick = now_ms();
+        if (changed) {
+            LogInfo("peer control tcp_peer_offer: peer=" +
+                    offer.peer_virtual_ip +
+                    " version=" + std::to_string(offer.endpoint_version) +
+                    " endpoint=" + offer.endpoint +
+                    " changed=yes");
+            MarkPeerWarmupWindow(offer.peer_virtual_ip);
+            if (ShouldAutoWarmTcpPeer(offer.peer_virtual_ip, tick)) {
+                MaybeStartTcpDirectConnect(offer.peer_virtual_ip);
+            }
+        } else if (ShouldLogPeerControlEvent("stable_tcp_offer:" + offer.peer_virtual_ip,
+                                             tick,
+                                             static_cast<unsigned long long>(kPeerSnapshotLogIntervalMs))) {
+            LogInfo("peer control ignore stable tcp_peer_offer: peer=" +
+                    offer.peer_virtual_ip +
+                    " version=" + std::to_string(offer.endpoint_version));
+        }
         return true;
     }
 
@@ -2735,14 +2757,20 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                                                                     offer.endpoint_addr,
                                                                     offer.endpoint_port);
         }
+        if (!should_send_hello) {
+            const unsigned long long tick = now_ms();
+            if (ShouldLogPeerControlEvent("stable_udp_offer:" + offer.peer_virtual_ip,
+                                          tick,
+                                          static_cast<unsigned long long>(kPeerSnapshotLogIntervalMs))) {
+                LogInfo("peer control ignore stable peer_offer: peer=" + offer.peer_virtual_ip +
+                        " version=" + std::to_string(offer.endpoint_version));
+            }
+            return true;
+        }
         LogInfo("peer control peer_offer: peer=" + offer.peer_virtual_ip +
                 " version=" + std::to_string(offer.endpoint_version) +
                 " endpoint=" + offer.endpoint);
-        if (!should_send_hello) {
-            LogInfo("peer control ignore stable peer_offer: peer=" + offer.peer_virtual_ip +
-                    " version=" + std::to_string(offer.endpoint_version));
-            return true;
-        }
+        MarkPeerWarmupWindow(offer.peer_virtual_ip);
         const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
         if (SendPeerSignalFrame(packet_tunnel::kFramePeerHello,
                                 offer.peer_virtual_ip,
@@ -3655,9 +3683,15 @@ void LinuxPacketTunnelClient::MaintainTcpDirectConnections(unsigned long long ti
                 stale_connections.push_back(std::make_pair(it->first, connection->sock));
                 continue;
             }
+            const bool high_frequency =
+                ShouldUseHighFrequencyPeerMaintenance(it->first, tick);
+            const unsigned long long heartbeat_interval =
+                static_cast<unsigned long long>(high_frequency
+                                                    ? kTcpDirectHeartbeatIntervalMs
+                                                    : kTcpDirectQuietHeartbeatIntervalMs);
             if (last_tx == 0 ||
                 tick < last_tx ||
-                (tick - last_tx) >= static_cast<unsigned long long>(kTcpDirectHeartbeatIntervalMs)) {
+                (tick - last_tx) >= heartbeat_interval) {
                 heartbeat_connections.push_back(connection);
             }
         }
@@ -4088,6 +4122,10 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                 }
             }
 
+            if (!target_peer_virtual_ip.empty()) {
+                MarkPeerBusinessActivity(target_peer_virtual_ip);
+            }
+
             std::vector<uint8_t> direct_packet;
             const std::vector<uint8_t>* direct_packet_view = &packet;
             bool direct_payload_ready = true;
@@ -4215,6 +4253,10 @@ void LinuxPacketTunnelClient::TunReadLoop() {
             IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size());
         const PacketFlowRouterDecision flow_decision = PacketFlowRouter::Decide(flow_input);
 
+        if (is_tcp && !dst_virtual_ip.empty()) {
+            MarkPeerBusinessActivity(dst_virtual_ip);
+        }
+
         if (flow_decision.try_tcp_direct_now &&
             TrySendTcpDirectPacket(dst_virtual_ip, packet.data(), packet.size())) {
             LogInfo("tcp tun->tcp-peer dst=" + dst_virtual_ip + ":" +
@@ -4337,6 +4379,89 @@ void LinuxPacketTunnelClient::MaybeLogDirectRouteFallback(const std::string& pee
     LogInfo("udp direct route fallback: reason=" + reason + " peer=" + detail);
 }
 
+void LinuxPacketTunnelClient::MarkPeerBusinessActivity(const std::string& peer_virtual_ip) {
+    if (peer_virtual_ip.empty()) {
+        return;
+    }
+    peer_business_activity_tick_[peer_virtual_ip] = now_ms();
+}
+
+void LinuxPacketTunnelClient::MarkPeerWarmupWindow(const std::string& peer_virtual_ip) {
+    if (peer_virtual_ip.empty()) {
+        return;
+    }
+    const unsigned long long tick = now_ms();
+    const unsigned long long warmup_until =
+        tick + static_cast<unsigned long long>(kPeerDirectWarmupDurationMs);
+    std::map<std::string, unsigned long long>::iterator it =
+        peer_warmup_until_tick_.find(peer_virtual_ip);
+    if (it == peer_warmup_until_tick_.end() ||
+        it->second < tick ||
+        it->second < warmup_until) {
+        peer_warmup_until_tick_[peer_virtual_ip] = warmup_until;
+    }
+}
+
+bool LinuxPacketTunnelClient::ShouldUseHighFrequencyPeerMaintenance(
+    const std::string& peer_virtual_ip,
+    unsigned long long tick) const {
+    if (peer_virtual_ip.empty()) {
+        return false;
+    }
+
+    std::map<std::string, unsigned long long>::const_iterator business_it =
+        peer_business_activity_tick_.find(peer_virtual_ip);
+    if (business_it != peer_business_activity_tick_.end() &&
+        (tick < business_it->second ||
+         (tick - business_it->second) <
+             static_cast<unsigned long long>(kPeerBusinessHotWindowMs))) {
+        return true;
+    }
+
+    std::map<std::string, unsigned long long>::const_iterator warmup_it =
+        peer_warmup_until_tick_.find(peer_virtual_ip);
+    return warmup_it != peer_warmup_until_tick_.end() &&
+           tick < warmup_it->second;
+}
+
+bool LinuxPacketTunnelClient::ShouldAutoWarmTcpPeer(const std::string& peer_virtual_ip,
+                                                    unsigned long long tick) {
+    if (peer_virtual_ip.empty()) {
+        return false;
+    }
+
+    std::map<std::string, unsigned long long>::iterator it =
+        peer_tcp_autowarm_tick_.find(peer_virtual_ip);
+    if (it != peer_tcp_autowarm_tick_.end() &&
+        tick >= it->second &&
+        (tick - it->second) <
+            static_cast<unsigned long long>(kTcpDirectAutoWarmRetryMs)) {
+        return false;
+    }
+
+    peer_tcp_autowarm_tick_[peer_virtual_ip] = tick;
+    return true;
+}
+
+bool LinuxPacketTunnelClient::ShouldLogPeerControlEvent(const std::string& key,
+                                                        unsigned long long tick,
+                                                        unsigned long long interval_ms) {
+    if (key.empty()) {
+        return false;
+    }
+
+    std::map<std::string, unsigned long long>::iterator it =
+        peer_control_log_tick_.find(key);
+    if (it != peer_control_log_tick_.end() &&
+        tick >= it->second &&
+        (tick - it->second) < interval_ms) {
+        return false;
+    }
+
+    peer_control_log_tick_[key] = tick;
+    return true;
+}
+
 void LinuxPacketTunnelClient::HeartbeatLoop() {
     unsigned long long last_peer_snapshot_log_ms = 0;
     while (!stop_requested_) {
@@ -4377,6 +4502,8 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
             }
             const uint32_t local_virtual_ip_be = ParseVirtualIp(NULL);
             for (size_t i = 0; i < peers.size(); ++i) {
+                const bool high_frequency =
+                    ShouldUseHighFrequencyPeerMaintenance(peers[i].peer_virtual_ip, current_ms);
                 if (peers[i].direct_ready &&
                     peers[i].endpoint_version != 0 &&
                     local_virtual_ip_be != 0) {
@@ -4389,14 +4516,14 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                                              &active_direct)) {
                         std::map<std::string, unsigned long long>::iterator probe_it =
                             peer_probe_send_tick_.find(peers[i].peer_virtual_ip);
-                        const bool should_send_probe =
-                            probe_it == peer_probe_send_tick_.end() ||
-                            current_ms < probe_it->second ||
-                            (current_ms - probe_it->second) >=
-                                static_cast<unsigned long long>(kPeerDirectProbeIntervalMs);
-                        // Keep the direct route warm even during short idle gaps so
-                        // the next TCP business flow does not fall back to relay
-                        // before freshness is refreshed again.
+                        bool should_send_probe = false;
+                        if (high_frequency) {
+                            should_send_probe =
+                                probe_it == peer_probe_send_tick_.end() ||
+                                current_ms < probe_it->second ||
+                                (current_ms - probe_it->second) >=
+                                    static_cast<unsigned long long>(kPeerDirectProbeIntervalMs);
+                        }
                         if (should_send_probe) {
                             uint32_t target_peer_ip_be = 0;
                             std::vector<uint8_t> probe_packet;
@@ -4438,11 +4565,25 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                 if (!peers[i].direct_ready || peers[i].endpoint_version == 0) {
                     continue;
                 }
+                std::map<std::string, unsigned long long>::iterator keepalive_it =
+                    peer_keepalive_send_tick_.find(peers[i].peer_virtual_ip);
+                const unsigned long long keepalive_interval =
+                    static_cast<unsigned long long>(high_frequency
+                                                        ? kHeartbeatIntervalMs
+                                                        : kPeerQuietKeepaliveIntervalMs);
+                const bool should_send_keepalive =
+                    keepalive_it == peer_keepalive_send_tick_.end() ||
+                    current_ms < keepalive_it->second ||
+                    (current_ms - keepalive_it->second) >= keepalive_interval;
+                if (!should_send_keepalive) {
+                    continue;
+                }
                 const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
                 if (SendPeerSignalFrame(packet_tunnel::kFramePeerKeepalive,
                                         peers[i].peer_virtual_ip,
                                         peers[i].endpoint_version,
                                         nonce)) {
+                    peer_keepalive_send_tick_[peers[i].peer_virtual_ip] = current_ms;
                     LogInfo("peer control send peer_keepalive: peer=" + peers[i].peer_virtual_ip +
                             " version=" + std::to_string(peers[i].endpoint_version) +
                             " nonce=" + std::to_string(nonce));

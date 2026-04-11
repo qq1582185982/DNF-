@@ -316,6 +316,15 @@ private:
     void TraceWatchedTcpPacket(const uint8_t* packet,
                                size_t packet_len,
                                const char* path);
+    void MarkPeerBusinessActivity(const std::string& peer_virtual_ip);
+    void MarkPeerWarmupWindow(const std::string& peer_virtual_ip);
+    bool ShouldUseHighFrequencyPeerMaintenance(const std::string& peer_virtual_ip,
+                                               unsigned long long now_tick) const;
+    bool ShouldAutoWarmTcpPeer(const std::string& peer_virtual_ip,
+                               unsigned long long now_tick);
+    bool ShouldLogPeerControlEvent(const std::string& key,
+                                   unsigned long long now_tick,
+                                   unsigned long long interval_ms);
     void MarkNetworkActivity();
 
     std::string tunnel_server_ip_;
@@ -358,6 +367,11 @@ private:
     std::map<std::string, unsigned long long> payload_ip_debug_log_tick_;
     std::map<std::string, WatchedTcpFlowTrace> watched_tcp_flows_;
     std::map<std::string, unsigned long long> peer_probe_send_tick_;
+    std::map<std::string, unsigned long long> peer_keepalive_send_tick_;
+    std::map<std::string, unsigned long long> peer_business_activity_tick_;
+    std::map<std::string, unsigned long long> peer_warmup_until_tick_;
+    std::map<std::string, unsigned long long> peer_tcp_autowarm_tick_;
+    std::map<std::string, unsigned long long> peer_control_log_tick_;
     std::map<std::string, unsigned long long> mirrored_gateway_udp_signature_tick_;
     std::map<uint16_t, PeerUdpPortOwner> peer_udp_port_owners_;
     std::mutex tcp_direct_mutex_;

@@ -256,6 +256,15 @@ private:
     int RecvDatagram(uint8_t* data, size_t length, std::string* error);
     uint32_t ParseVirtualIp(std::string* error) const;
     void MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip, const std::string& reason);
+    void MarkPeerBusinessActivity(const std::string& peer_virtual_ip);
+    void MarkPeerWarmupWindow(const std::string& peer_virtual_ip);
+    bool ShouldUseHighFrequencyPeerMaintenance(const std::string& peer_virtual_ip,
+                                               unsigned long long tick) const;
+    bool ShouldAutoWarmTcpPeer(const std::string& peer_virtual_ip,
+                               unsigned long long tick);
+    bool ShouldLogPeerControlEvent(const std::string& key,
+                                   unsigned long long tick,
+                                   unsigned long long interval_ms);
     void MarkNetworkActivity();
     void MarkWatchedTcpTunRead(const uint8_t* packet,
                                size_t packet_len,
@@ -294,6 +303,11 @@ private:
     std::atomic<uint32_t> peer_signal_nonce_;
     std::map<std::string, unsigned long long> peer_route_debug_log_tick_;
     std::map<std::string, unsigned long long> peer_probe_send_tick_;
+    std::map<std::string, unsigned long long> peer_keepalive_send_tick_;
+    std::map<std::string, unsigned long long> peer_business_activity_tick_;
+    std::map<std::string, unsigned long long> peer_warmup_until_tick_;
+    std::map<std::string, unsigned long long> peer_tcp_autowarm_tick_;
+    std::map<std::string, unsigned long long> peer_control_log_tick_;
     std::map<uint16_t, PeerUdpPortOwner> peer_udp_port_owners_;
     std::map<std::string, WatchedTcpFlowTrace> watched_tcp_flows_;
     std::map<std::string, TcpDirectOffer> tcp_direct_offers_;
