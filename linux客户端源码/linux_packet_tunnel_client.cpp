@@ -41,6 +41,7 @@ const int kSocketSendRetryCount = 2;
 const int kSocketSendRetryDelayMs = 5;
 const int kTcpDirectConnectTimeoutMs = 1200;
 const int kTcpDirectRetryCooldownMs = 5000;
+const int kTcpDirectPassiveWaitMs = 1800;
 const int kTcpDirectHeartbeatIntervalMs = 3000;
 const int kTcpDirectIdleTimeoutMs = 15000;
 const int kTcpDirectListenBacklog = 32;
@@ -2513,7 +2514,6 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             stored.last_offer_ms = now_ms();
             if (changed) {
                 stored.cooldown_until_ms = 0;
-                stored.connecting = false;
             }
         }
 
@@ -3462,6 +3462,12 @@ void LinuxPacketTunnelClient::MaybeStartTcpDirectConnect(const std::string& peer
     }
 
     const unsigned long long tick = now_ms();
+    const uint32_t local_virtual_ip_be = ParseVirtualIp(NULL);
+    uint32_t peer_virtual_ip_be = 0;
+    const bool have_virtual_ip_order =
+        local_virtual_ip_be != 0 &&
+        ParseLinuxIpv4StringToBe(peer_virtual_ip, &peer_virtual_ip_be) &&
+        peer_virtual_ip_be != 0;
     {
         std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
         std::map<std::string, TcpDirectOffer>::iterator offer_it =
@@ -3472,6 +3478,13 @@ void LinuxPacketTunnelClient::MaybeStartTcpDirectConnect(const std::string& peer
             offer_it->second.connecting ||
             (offer_it->second.cooldown_until_ms != 0 &&
              tick < offer_it->second.cooldown_until_ms)) {
+            return;
+        }
+        if (have_virtual_ip_order &&
+            local_virtual_ip_be > peer_virtual_ip_be &&
+            offer_it->second.last_offer_ms != 0 &&
+            tick >= offer_it->second.last_offer_ms &&
+            (tick - offer_it->second.last_offer_ms) < kTcpDirectPassiveWaitMs) {
             return;
         }
         std::map<std::string, std::shared_ptr<TcpDirectConnection>>::iterator conn_it =
@@ -3489,17 +3502,6 @@ void LinuxPacketTunnelClient::MaybeStartTcpDirectConnect(const std::string& peer
 }
 
 void LinuxPacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_virtual_ip) {
-    TcpDirectOffer offer;
-    {
-        std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
-        std::map<std::string, TcpDirectOffer>::const_iterator it =
-            tcp_direct_offers_.find(peer_virtual_ip);
-        if (it == tcp_direct_offers_.end()) {
-            return;
-        }
-        offer = it->second;
-    }
-
     auto finish_connect_attempt = [&](bool cooldown) {
         std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
         std::map<std::string, TcpDirectOffer>::iterator it =
@@ -3512,13 +3514,6 @@ void LinuxPacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_vir
         }
     };
 
-    std::vector<TcpDirectCandidate> candidates =
-        BuildOrderedTcpDirectCandidates(offer, now_ms());
-    if (candidates.empty()) {
-        finish_connect_attempt(true);
-        return;
-    }
-
     uint32_t local_virtual_ip_be = ParseVirtualIp(NULL);
     uint32_t peer_virtual_ip_be = 0;
     if (local_virtual_ip_be == 0 ||
@@ -3527,10 +3522,60 @@ void LinuxPacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_vir
         return;
     }
 
-    const size_t candidate_count = candidates.size();
-    for (size_t attempt = 0; attempt < candidate_count && !stop_requested_; ++attempt) {
-        const size_t candidate_index = attempt;
-        const TcpDirectCandidate& candidate = candidates[candidate_index];
+    std::vector<TcpDirectCandidate> attempted_candidates;
+    const auto same_candidate =
+        [](const TcpDirectCandidate& left, const TcpDirectCandidate& right) -> bool {
+            const size_t left_addr_len =
+                left.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4 ? 4 : 16;
+            const size_t right_addr_len =
+                right.endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4 ? 4 : 16;
+            return left.endpoint_family == right.endpoint_family &&
+                   left.endpoint_port == right.endpoint_port &&
+                   left_addr_len == right_addr_len &&
+                   memcmp(left.endpoint_addr, right.endpoint_addr, left_addr_len) == 0;
+        };
+
+    while (!stop_requested_) {
+        TcpDirectOffer offer;
+        {
+            std::lock_guard<std::mutex> lock(tcp_direct_mutex_);
+            std::map<std::string, TcpDirectOffer>::const_iterator it =
+                tcp_direct_offers_.find(peer_virtual_ip);
+            if (it == tcp_direct_offers_.end()) {
+                finish_connect_attempt(true);
+                return;
+            }
+            offer = it->second;
+        }
+
+        std::vector<TcpDirectCandidate> candidates =
+            BuildOrderedTcpDirectCandidates(offer, now_ms());
+        if (candidates.empty()) {
+            finish_connect_attempt(true);
+            return;
+        }
+
+        size_t candidate_index = candidates.size();
+        TcpDirectCandidate candidate;
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            bool already_attempted = false;
+            for (size_t tried = 0; tried < attempted_candidates.size(); ++tried) {
+                if (same_candidate(candidates[i], attempted_candidates[tried])) {
+                    already_attempted = true;
+                    break;
+                }
+            }
+            if (!already_attempted) {
+                candidate = candidates[i];
+                candidate_index = i;
+                break;
+            }
+        }
+        if (candidate_index >= candidates.size()) {
+            break;
+        }
+        attempted_candidates.push_back(candidate);
+        const size_t candidate_count = candidates.size();
 
         sockaddr_storage peer_addr = {};
         socklen_t peer_addr_len = 0;
