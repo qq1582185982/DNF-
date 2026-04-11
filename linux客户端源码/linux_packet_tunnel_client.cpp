@@ -3313,6 +3313,34 @@ bool LinuxPacketTunnelClient::TryResolveGatewayUdpPeerTarget(const std::string& 
         return false;
     }
 
+    size_t candidate_count = 0;
+    std::string sole_candidate_peer_virtual_ip;
+    for (size_t i = 0; i < peers.size(); ++i) {
+        if (peers[i].peer_virtual_ip.empty() ||
+            peers[i].peer_virtual_ip == virtual_ip_ ||
+            peers[i].state == LinuxPeerRouteState::Cooldown ||
+            !peers[i].direct_ready ||
+            peers[i].endpoint_family == packet_tunnel::kPeerEndpointFamilyUnknown ||
+            peers[i].endpoint_port == 0) {
+            continue;
+        }
+        ++candidate_count;
+        if (candidate_count == 1) {
+            sole_candidate_peer_virtual_ip = peers[i].peer_virtual_ip;
+        } else {
+            sole_candidate_peer_virtual_ip.clear();
+        }
+    }
+    if (candidate_count == 1 && !sole_candidate_peer_virtual_ip.empty()) {
+        if (peer_virtual_ip != NULL) {
+            *peer_virtual_ip = sole_candidate_peer_virtual_ip;
+        }
+        if (resolution != NULL) {
+            *resolution = "鍞竴瀵圭";
+        }
+        return true;
+    }
+
     std::map<uint16_t, PeerUdpPortOwner>::const_iterator owner_it =
         peer_udp_port_owners_.find(dst_port);
     if (owner_it == peer_udp_port_owners_.end()) {

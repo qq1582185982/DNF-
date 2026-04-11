@@ -1641,16 +1641,82 @@ private:
 
     vector<shared_ptr<PacketTunnelSession>> collect_tcp_offer_peers_locked(
         const shared_ptr<PacketTunnelSession>& session) const {
-        return packet_tunnel_registry_.CollectTcpPeersLocked(
-            session,
-            [session](const shared_ptr<PacketTunnelSession>& peer) -> bool {
-                return peer &&
-                       peer->active &&
-                       !peer->use_udp &&
-                       session &&
-                       peer->server_key == session->server_key &&
-                       peer->tcp_direct_listen_port != 0;
-            });
+        vector<shared_ptr<PacketTunnelSession>> peers;
+        if (!session) {
+            return peers;
+        }
+
+        std::map<std::string, shared_ptr<PacketTunnelSession>> best_by_scope;
+        auto prefer_session =
+            [](const shared_ptr<PacketTunnelSession>& candidate,
+               const shared_ptr<PacketTunnelSession>& current) -> bool {
+                if (!candidate) {
+                    return false;
+                }
+                if (!current) {
+                    return true;
+                }
+                if ((candidate->tcp_direct_candidates.empty() !=
+                     current->tcp_direct_candidates.empty())) {
+                    return !candidate->tcp_direct_candidates.empty();
+                }
+                if (candidate->tcp_direct_candidates.size() !=
+                    current->tcp_direct_candidates.size()) {
+                    return candidate->tcp_direct_candidates.size() >
+                           current->tcp_direct_candidates.size();
+                }
+                if (candidate->tcp_direct_listen_port != 0 &&
+                    current->tcp_direct_listen_port == 0) {
+                    return true;
+                }
+                if (candidate->use_udp != current->use_udp) {
+                    return !candidate->use_udp;
+                }
+                return candidate->last_activity_ms.load() >
+                       current->last_activity_ms.load();
+            };
+        auto consider_peer =
+            [this, &session, &best_by_scope, &prefer_session](
+                const shared_ptr<PacketTunnelSession>& peer) {
+                if (!peer ||
+                    !peer->active ||
+                    !session ||
+                    peer->server_key != session->server_key ||
+                    peer->virtual_ip_be == session->virtual_ip_be ||
+                    peer->tcp_direct_listen_port == 0 ||
+                    is_peer_direct_excluded_session(peer)) {
+                    return;
+                }
+
+                const string scope_key =
+                    build_scoped_virtual_ip_key(peer->server_key, peer->virtual_ip_be);
+                std::map<std::string, shared_ptr<PacketTunnelSession>>::iterator it =
+                    best_by_scope.find(scope_key);
+                if (it == best_by_scope.end() || prefer_session(peer, it->second)) {
+                    best_by_scope[scope_key] = peer;
+                }
+            };
+
+        for (map<string, shared_ptr<PacketTunnelSession>>::const_iterator it =
+                 packet_tunnel_tcp_sessions.begin();
+             it != packet_tunnel_tcp_sessions.end();
+             ++it) {
+            consider_peer(it->second);
+        }
+        for (map<string, shared_ptr<PacketTunnelSession>>::const_iterator it =
+                 packet_tunnel_sessions.begin();
+             it != packet_tunnel_sessions.end();
+             ++it) {
+            consider_peer(it->second);
+        }
+
+        for (map<std::string, shared_ptr<PacketTunnelSession>>::const_iterator it =
+                 best_by_scope.begin();
+             it != best_by_scope.end();
+             ++it) {
+            peers.push_back(it->second);
+        }
+        return peers;
     }
 
     bool is_local_or_server_side_session(const shared_ptr<PacketTunnelSession>& session) const {
@@ -4049,6 +4115,19 @@ private:
                     if (previous_port != advertise.listen_port) {
                         session->tcp_direct_candidates.clear();
                     }
+                    {
+                        lock_guard<mutex> lock(packet_tunnel_mutex);
+                        shared_ptr<PacketTunnelSession> udp_session =
+                            packet_tunnel_registry_.FindUdpLocked(session->server_key,
+                                                                  session->virtual_ip_be);
+                        if (udp_session && udp_session != session) {
+                            const uint16_t udp_previous_port = udp_session->tcp_direct_listen_port;
+                            udp_session->tcp_direct_listen_port = advertise.listen_port;
+                            if (udp_previous_port != advertise.listen_port) {
+                                udp_session->tcp_direct_candidates.clear();
+                            }
+                        }
+                    }
                     Logger::info("[IP Tunnel|" + session_uuid + "] TCP直连监听上报: 虚拟IP=" +
                                  describe_scoped_virtual_ip(session->server_key, session->virtual_ip_be) +
                                  " 端口=" + to_string(advertise.listen_port));
@@ -4070,6 +4149,17 @@ private:
                         continue;
                     }
                     AppendUniquePacketTunnelDirectCandidate(&session->tcp_direct_candidates, candidate);
+                    {
+                        lock_guard<mutex> lock(packet_tunnel_mutex);
+                        shared_ptr<PacketTunnelSession> udp_session =
+                            packet_tunnel_registry_.FindUdpLocked(session->server_key,
+                                                                  session->virtual_ip_be);
+                        if (udp_session && udp_session != session) {
+                            AppendUniquePacketTunnelDirectCandidate(
+                                &udp_session->tcp_direct_candidates,
+                                candidate);
+                        }
+                    }
                     Logger::info("[IP Tunnel|" + session_uuid + "] TCP直连候选上报: 虚拟IP=" +
                                  describe_scoped_virtual_ip(session->server_key, session->virtual_ip_be) +
                                  " 端点=" + PacketTunnelDirectCandidateToString(candidate) +
