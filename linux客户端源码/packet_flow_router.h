@@ -92,16 +92,14 @@ public:
                 return decision;
             }
 
-            if (input.direct_path_fresh ||
-                (input.active_direct && input.resolved_gateway_target)) {
+            if (input.active_direct &&
+                (input.direct_path_fresh || input.resolved_gateway_target)) {
                 decision.primary_route = PacketFlowRoute::UdpDirect;
                 decision.try_udp_direct_now = input.direct_payload_ready;
                 return decision;
             }
 
-            decision.primary_route = PacketFlowRoute::UdpProbe;
-            decision.try_udp_probe = true;
-            decision.try_udp_shadow_payload = input.can_shadow_payload;
+            decision.primary_route = PacketFlowRoute::UdpRelay;
             return decision;
         }
 

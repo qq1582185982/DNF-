@@ -4610,7 +4610,7 @@ void PacketTunnelClient::WintunReadLoop() {
                     } else {
                         MaybeLogDirectRouteFallback(target_peer_virtual_ip, "目标改写失败");
                     }
-                } else {
+                } else if (udp_flow_decision.try_udp_probe) {
                     const unsigned long long now_tick = GetTickCount64();
                     std::map<std::string, unsigned long long>::iterator probe_it =
                         peer_probe_send_tick_.find(target_peer_virtual_ip);

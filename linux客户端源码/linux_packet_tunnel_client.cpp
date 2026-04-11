@@ -4418,7 +4418,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                         LogInfo("UDP直连进入冷却: 对端=" +
                                 failed_status.peer_virtual_ip);
                     }
-                } else {
+                } else if (udp_flow_decision.try_udp_probe) {
                     const unsigned long long tick = now_ms();
                     std::map<std::string, unsigned long long>::iterator probe_it =
                         peer_probe_send_tick_.find(target_peer_virtual_ip);
