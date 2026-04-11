@@ -42,6 +42,7 @@ const int kSocketReadTimeoutMs = 1000;
 const int kSocketSendTimeoutMs = 50;
 const int kSocketSendRetryCount = 2;
 const int kSocketSendRetryDelayMs = 5;
+const int kTcpRelayConnectTimeoutMs = 3000;
 const int kTcpDirectConnectTimeoutMs = 1200;
 const int kTcpDirectRetryCooldownMs = 5000;
 const int kTcpDirectPassiveWaitMs = 1800;
@@ -1955,6 +1956,28 @@ bool LinuxPacketTunnelClient::ConnectTcpSocket(std::string* error) {
     setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
     int tcp_nodelay = 1;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &tcp_nodelay, sizeof(tcp_nodelay));
+
+    int connect_error = 0;
+    if (ConnectLinuxSocketWithTimeout(sock,
+                                      server_endpoint_.addr,
+                                      server_endpoint_.addr_len,
+                                      kTcpRelayConnectTimeoutMs,
+                                      &connect_error)) {
+        tcp_sock_ = sock;
+        tcp_connected_ = true;
+        LogInfo("TCP涓浆杞戒綋宸茶繛鎺ュ埌 " +
+                LinuxSockaddrToString(server_endpoint_.addr, server_endpoint_.addr_len));
+        return true;
+    }
+    {
+        const std::string connect_error_text =
+            std::string(strerror(connect_error != 0 ? connect_error : errno));
+        close(sock);
+        if (error != NULL) {
+            *error = "杩炴帴TCP涓浆杞戒綋澶辫触: " + connect_error_text;
+        }
+        return false;
+    }
 
     if (connect(sock,
                 reinterpret_cast<const sockaddr*>(&server_endpoint_.addr),

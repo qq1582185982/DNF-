@@ -56,6 +56,7 @@ const DWORD kSocketReadTimeoutMs = 1000;
 const DWORD kSocketSendTimeoutMs = 50;
 const int kSocketSendRetryCount = 2;
 const DWORD kSocketSendRetryDelayMs = 5;
+const DWORD kTcpRelayConnectTimeoutMs = 3000;
 const DWORD kTcpDirectConnectTimeoutMs = 1200;
 const DWORD kTcpDirectRetryCooldownMs = 5000;
 const DWORD kTcpDirectPassiveWaitMs = 1800;
@@ -2944,13 +2945,15 @@ bool PacketTunnelClient::ConnectTcpSocket(std::wstring* error_msg) {
     BOOL tcp_nodelay = TRUE;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&tcp_nodelay), sizeof(tcp_nodelay));
 
-    if (connect(sock,
-                reinterpret_cast<const sockaddr*>(&server_endpoint_.addr),
-                server_endpoint_.addr_len) != 0) {
-        const int err = WSAGetLastError();
+    int connect_error = 0;
+    if (!ConnectSocketWithTimeout(sock,
+                                  server_endpoint_.addr,
+                                  server_endpoint_.addr_len,
+                                  kTcpRelayConnectTimeoutMs,
+                                  &connect_error)) {
         closesocket(sock);
         if (error_msg != NULL) {
-            *error_msg = BuildSocketError(L"IP Tunnel TCP connect failed", err);
+            *error_msg = BuildSocketError(L"IP Tunnel TCP connect failed", connect_error);
         }
         return false;
     }
