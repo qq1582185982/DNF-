@@ -179,6 +179,15 @@ private:
     bool SendPeerDisableFrame(const std::string& target_peer_virtual_ip,
                               uint64_t endpoint_version,
                               uint8_t reason);
+    bool TryBuildPeerEndpointFromCandidate(uint8_t endpoint_family,
+                                           const uint8_t* endpoint_addr,
+                                           uint16_t endpoint_port,
+                                           UdpEndpoint* endpoint) const;
+    bool SendImmediatePeerDirectProbe(const std::string& peer_virtual_ip,
+                                      uint8_t endpoint_family,
+                                      const uint8_t* endpoint_addr,
+                                      uint16_t endpoint_port,
+                                      const std::string& endpoint_text);
     bool TryBuildPeerEndpoint(const std::string& peer_virtual_ip,
                               UdpEndpoint* endpoint,
                               bool* direct_path_fresh = NULL,

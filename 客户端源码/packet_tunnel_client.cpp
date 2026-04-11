@@ -4546,7 +4546,7 @@ void PacketTunnelClient::WintunReadLoop() {
                 direct_payload_ready &&
                 !resolved_gateway_target &&
                 target_peer_virtual_ip == original_dst_virtual_ip &&
-                (src_port == 5063 || dst_port == 5063);
+                (!is_udp || src_port == 5063 || dst_port == 5063);
             const PacketFlowRouterDecision udp_flow_decision =
                 PacketFlowRouter::Decide(udp_flow_input);
             const std::string direct_route_desc = udp_flow_decision.route_desc;
@@ -6244,6 +6244,11 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                                  " 版本=" + std::to_string(offer.endpoint_version));
             return true;
         }
+        SendImmediatePeerDirectProbe(offer.peer_virtual_ip,
+                                     offer.endpoint_family,
+                                     offer.endpoint_addr,
+                                     offer.endpoint_port,
+                                     offer.endpoint);
         const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
         if (SendPeerSignalFrame(packet_tunnel::kFramePeerHello,
                                 offer.peer_virtual_ip,
@@ -6442,6 +6447,91 @@ bool PacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtual_ip
     }
 
     return false;
+}
+
+bool PacketTunnelClient::TryBuildPeerEndpointFromCandidate(uint8_t endpoint_family,
+                                                           const uint8_t* endpoint_addr,
+                                                           uint16_t endpoint_port,
+                                                           UdpEndpoint* endpoint) const {
+    if (endpoint == NULL || endpoint_addr == NULL ||
+        endpoint_family == packet_tunnel::kPeerEndpointFamilyUnknown ||
+        endpoint_port == 0) {
+        return false;
+    }
+
+    ZeroMemory(&endpoint->addr, sizeof(endpoint->addr));
+    endpoint->addr_len = 0;
+    endpoint->valid = false;
+
+    if (socket_family_ == AF_INET &&
+        endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4) {
+        sockaddr_in* addr4 = reinterpret_cast<sockaddr_in*>(&endpoint->addr);
+        addr4->sin_family = AF_INET;
+        addr4->sin_port = htons(endpoint_port);
+        memcpy(&addr4->sin_addr, endpoint_addr, 4);
+        endpoint->addr_len = sizeof(sockaddr_in);
+        endpoint->valid = true;
+        return true;
+    }
+
+    if (socket_family_ == AF_INET6) {
+        sockaddr_in6* addr6 = reinterpret_cast<sockaddr_in6*>(&endpoint->addr);
+        addr6->sin6_family = AF_INET6;
+        addr6->sin6_port = htons(endpoint_port);
+        if (endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv6) {
+            memcpy(&addr6->sin6_addr, endpoint_addr, 16);
+            endpoint->addr_len = sizeof(sockaddr_in6);
+            endpoint->valid = true;
+            return true;
+        }
+        if (endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4) {
+            memset(&addr6->sin6_addr, 0, sizeof(addr6->sin6_addr));
+            addr6->sin6_addr.u.Word[5] = 0xFFFF;
+            memcpy(&addr6->sin6_addr.u.Byte[12], endpoint_addr, 4);
+            endpoint->addr_len = sizeof(sockaddr_in6);
+            endpoint->valid = true;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool PacketTunnelClient::SendImmediatePeerDirectProbe(const std::string& peer_virtual_ip,
+                                                      uint8_t endpoint_family,
+                                                      const uint8_t* endpoint_addr,
+                                                      uint16_t endpoint_port,
+                                                      const std::string& endpoint_text) {
+    if (!peer_direct_allowed_ || peer_virtual_ip.empty()) {
+        return false;
+    }
+
+    const uint32_t local_virtual_ip_be = ParseVirtualIp(NULL);
+    uint32_t target_peer_ip_be = 0;
+    UdpEndpoint endpoint;
+    std::vector<uint8_t> probe_packet;
+    if (local_virtual_ip_be == 0 ||
+        !ParseIpv4StringToBe(peer_virtual_ip, &target_peer_ip_be) ||
+        !TryBuildPeerEndpointFromCandidate(endpoint_family,
+                                           endpoint_addr,
+                                           endpoint_port,
+                                           &endpoint) ||
+        !BuildPeerDirectProbePacket(local_virtual_ip_be,
+                                    target_peer_ip_be,
+                                    kPeerDirectProbeRequest,
+                                    &probe_packet) ||
+        !SendFrameToEndpoint(endpoint,
+                             packet_tunnel::kFrameIpv4Packet,
+                             probe_packet.data(),
+                             probe_packet.size(),
+                             NULL)) {
+        return false;
+    }
+
+    peer_probe_send_tick_[peer_virtual_ip] = GetTickCount64();
+    PacketTunnelDebugLog("收到对等提议后立即发送直连探测: 对端=" + peer_virtual_ip +
+                         " 端点=" + endpoint_text);
+    return true;
 }
 
 bool PacketTunnelClient::TryResolvePeerBySource(const sockaddr_storage& source_addr,

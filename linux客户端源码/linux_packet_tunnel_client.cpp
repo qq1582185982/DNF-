@@ -2914,6 +2914,11 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                     " 版本=" + std::to_string(offer.endpoint_version));
             return true;
         }
+        SendImmediatePeerDirectProbe(offer.peer_virtual_ip,
+                                     offer.endpoint_family,
+                                     offer.endpoint_addr,
+                                     offer.endpoint_port,
+                                     offer.endpoint);
         const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
         if (SendPeerSignalFrame(packet_tunnel::kFramePeerHello,
                                 offer.peer_virtual_ip,
@@ -3092,6 +3097,92 @@ bool LinuxPacketTunnelClient::TryBuildPeerEndpoint(const std::string& peer_virtu
     }
 
     return false;
+}
+
+bool LinuxPacketTunnelClient::TryBuildPeerEndpointFromCandidate(uint8_t endpoint_family,
+                                                                const uint8_t* endpoint_addr,
+                                                                uint16_t endpoint_port,
+                                                                UdpEndpoint* endpoint) const {
+    if (endpoint == NULL || endpoint_addr == NULL ||
+        endpoint_family == packet_tunnel::kPeerEndpointFamilyUnknown ||
+        endpoint_port == 0) {
+        return false;
+    }
+
+    memset(&endpoint->addr, 0, sizeof(endpoint->addr));
+    endpoint->addr_len = 0;
+    endpoint->valid = false;
+
+    if (socket_family_ == AF_INET &&
+        endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4) {
+        sockaddr_in* addr4 = reinterpret_cast<sockaddr_in*>(&endpoint->addr);
+        addr4->sin_family = AF_INET;
+        addr4->sin_port = htons(endpoint_port);
+        memcpy(&addr4->sin_addr, endpoint_addr, 4);
+        endpoint->addr_len = sizeof(sockaddr_in);
+        endpoint->valid = true;
+        return true;
+    }
+
+    if (socket_family_ == AF_INET6) {
+        sockaddr_in6* addr6 = reinterpret_cast<sockaddr_in6*>(&endpoint->addr);
+        addr6->sin6_family = AF_INET6;
+        addr6->sin6_port = htons(endpoint_port);
+        if (endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv6) {
+            memcpy(&addr6->sin6_addr, endpoint_addr, 16);
+            endpoint->addr_len = sizeof(sockaddr_in6);
+            endpoint->valid = true;
+            return true;
+        }
+        if (endpoint_family == packet_tunnel::kPeerEndpointFamilyIpv4) {
+            memset(&addr6->sin6_addr, 0, sizeof(addr6->sin6_addr));
+            addr6->sin6_addr.s6_addr[10] = 0xFF;
+            addr6->sin6_addr.s6_addr[11] = 0xFF;
+            memcpy(&addr6->sin6_addr.s6_addr[12], endpoint_addr, 4);
+            endpoint->addr_len = sizeof(sockaddr_in6);
+            endpoint->valid = true;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool LinuxPacketTunnelClient::SendImmediatePeerDirectProbe(const std::string& peer_virtual_ip,
+                                                           uint8_t endpoint_family,
+                                                           const uint8_t* endpoint_addr,
+                                                           uint16_t endpoint_port,
+                                                           const std::string& endpoint_text) {
+    if (peer_virtual_ip.empty()) {
+        return false;
+    }
+
+    UdpEndpoint endpoint;
+    uint32_t local_virtual_ip_be = 0;
+    uint32_t target_peer_ip_be = 0;
+    std::vector<uint8_t> probe_packet;
+    if (!ParseLinuxIpv4StringToBe(virtual_ip_, &local_virtual_ip_be) ||
+        !ParseLinuxIpv4StringToBe(peer_virtual_ip, &target_peer_ip_be) ||
+        !TryBuildPeerEndpointFromCandidate(endpoint_family,
+                                           endpoint_addr,
+                                           endpoint_port,
+                                           &endpoint) ||
+        !BuildLinuxPeerDirectProbePacket(local_virtual_ip_be,
+                                         target_peer_ip_be,
+                                         kPeerDirectProbeRequest,
+                                         &probe_packet) ||
+        !SendFrameToEndpoint(endpoint,
+                             packet_tunnel::kFrameIpv4Packet,
+                             probe_packet.data(),
+                             probe_packet.size(),
+                             NULL)) {
+        return false;
+    }
+
+    peer_probe_send_tick_[peer_virtual_ip] = now_ms();
+    LogInfo("收到对等提议后立即发送直连探测: 对端=" + peer_virtual_ip +
+            " 端点=" + endpoint_text);
+    return true;
 }
 
 bool LinuxPacketTunnelClient::TryResolvePeerByCandidateAddress(const std::string& dst_virtual_ip,
@@ -4285,8 +4376,14 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                 udp_flow_input.target_peer_virtual_ip = target_peer_virtual_ip;
                 udp_flow_input.original_dst_virtual_ip = original_dst_virtual_ip;
                 udp_flow_input.target_resolution = target_resolution;
+                udp_flow_input.can_shadow_payload =
+                    direct_payload_ready &&
+                    !resolved_gateway_target &&
+                    target_peer_virtual_ip == original_dst_virtual_ip &&
+                    (!is_udp || src_port == 5063 || dst_port == 5063);
                 const PacketFlowRouterDecision udp_flow_decision =
                     PacketFlowRouter::Decide(udp_flow_input);
+                const std::string direct_route_desc = udp_flow_decision.route_desc;
 
                 if (udp_flow_decision.primary_route == PacketFlowRoute::UdpDirect) {
                     if (udp_flow_decision.try_udp_direct_now &&
@@ -4327,6 +4424,38 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                         probe_it == peer_probe_send_tick_.end() ||
                         tick < probe_it->second ||
                         (tick - probe_it->second) >= static_cast<unsigned long long>(kPeerDirectProbeIntervalMs);
+                    const bool can_shadow_send_payload =
+                        should_send_probe &&
+                        udp_flow_decision.try_udp_shadow_payload;
+                    if (can_shadow_send_payload &&
+                        SendFrameToEndpoint(peer_endpoint,
+                                            packet_tunnel::kFrameIpv4Packet,
+                                            direct_packet_view->data(),
+                                            direct_packet_view->size(),
+                                            NULL)) {
+                        peer_probe_send_tick_[target_peer_virtual_ip] = tick;
+                        if (!is_udp) {
+                            MaybeLogIcmpPacket("ICMP TUN->对端(影子)",
+                                               direct_packet_view->data(),
+                                               direct_packet_view->size());
+                        }
+                        LogInfo(inner_proto_name + " 直连影子发送 " + direct_route_desc);
+                    } else if (can_shadow_send_payload) {
+                        LinuxPeerRouteStatus failed_status = {};
+                        const bool state_changed =
+                            peer_link_manager_ != NULL &&
+                            peer_link_manager_->RecordDirectSendFailure(target_peer_virtual_ip,
+                                                                        0,
+                                                                        active_direct,
+                                                                        &failed_status);
+                        LogInfo(inner_proto_name +
+                                " 直连影子发送失败，继续以中转为主 " +
+                                direct_route_desc);
+                        if (state_changed && failed_status.state == LinuxPeerRouteState::Cooldown) {
+                            LogInfo("UDP直连进入冷却: 对端=" +
+                                    failed_status.peer_virtual_ip);
+                        }
+                    }
                     if (should_send_probe) {
                         uint32_t dst_virtual_ip_be = 0;
                         std::vector<uint8_t> probe_packet;
