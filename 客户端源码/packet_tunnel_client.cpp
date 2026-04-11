@@ -4,6 +4,7 @@
 #include "packet_tunnel_protocol.h"
 #include "peer_link_manager.h"
 #include "wintun_manager.h"
+#include "../shared/nat_pmp_helper.h"
 
 #include <windows.h>
 #include <windns.h>
@@ -3089,6 +3090,28 @@ bool PacketTunnelClient::SendUdpDirectCandidateAdvertises(std::wstring* error_ms
         }
     }
 
+    nat_pmp::PortMapping udp_mapping;
+    std::string udp_nat_error;
+    if (local_addr.ss_family == AF_INET &&
+        nat_pmp::TryMapPort(local_addr,
+                            nat_pmp::Protocol::Udp,
+                            local_port,
+                            1800,
+                            &udp_mapping,
+                            &udp_nat_error)) {
+        TcpDirectCandidate public_candidate;
+        public_candidate.endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
+        public_candidate.endpoint_port = udp_mapping.external_port;
+        memcpy(public_candidate.endpoint_addr, &udp_mapping.public_ipv4_be, 4);
+        if (SendUdpDirectCandidateAdvertise(public_candidate, NULL)) {
+            ++candidate_count;
+            PacketTunnelInfoLog("NAT-PMP UDP公网映射已上报，本地端口=" +
+                                std::to_string(local_port) +
+                                " 公网=" + nat_pmp::Ipv4BeToString(udp_mapping.public_ipv4_be) +
+                                ":" + std::to_string(udp_mapping.external_port));
+        }
+    }
+
     PacketTunnelInfoLog("UDP直连本地候选已上报，数量=" +
                         std::to_string(candidate_count));
     return true;
@@ -3377,6 +3400,33 @@ bool PacketTunnelClient::SendTcpDirectAdvertise(std::wstring* error_msg) {
                     ++candidate_count;
                 }
             }
+        }
+    }
+
+    sockaddr_storage route_hint_addr = {};
+    int route_hint_addr_len = sizeof(route_hint_addr);
+    nat_pmp::PortMapping tcp_mapping;
+    std::string tcp_nat_error;
+    if (getsockname(tcp_sock_,
+                    reinterpret_cast<sockaddr*>(&route_hint_addr),
+                    &route_hint_addr_len) == 0 &&
+        route_hint_addr.ss_family == AF_INET &&
+        nat_pmp::TryMapPort(route_hint_addr,
+                            nat_pmp::Protocol::Tcp,
+                            tcp_direct_listen_port_,
+                            1800,
+                            &tcp_mapping,
+                            &tcp_nat_error)) {
+        TcpDirectCandidate public_candidate;
+        public_candidate.endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
+        public_candidate.endpoint_port = tcp_mapping.external_port;
+        memcpy(public_candidate.endpoint_addr, &tcp_mapping.public_ipv4_be, 4);
+        if (SendTcpDirectCandidateAdvertise(public_candidate, NULL)) {
+            ++candidate_count;
+            PacketTunnelInfoLog("NAT-PMP TCP公网映射已上报，本地端口=" +
+                                std::to_string(tcp_direct_listen_port_) +
+                                " 公网=" + nat_pmp::Ipv4BeToString(tcp_mapping.public_ipv4_be) +
+                                ":" + std::to_string(tcp_mapping.external_port));
         }
     }
 

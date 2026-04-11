@@ -1417,6 +1417,11 @@ int replace_ip_in_payload(uint8_t* payload, size_t payload_len,
 
 
 // ==================== 隧道服务器 ====================
+#include "packet_tunnel_service_context.h"
+#include "packet_tunnel_udp_relay_service.h"
+#include "packet_tunnel_tcp_relay_service.h"
+#include "packet_tunnel_coordination_service.h"
+
 class TunnelServer : public enable_shared_from_this<TunnelServer> {
 private:
     struct GatewayUdpPortOwner {
@@ -1513,6 +1518,87 @@ private:
 
     static bool packet_tunnel_payload_is_tcp(const uint8_t* payload, size_t payload_len) {
         return PacketTunnelSessionRegistry::PacketTunnelPayloadIsTcp(payload, payload_len);
+    }
+
+    PacketTunnelServiceContext build_packet_tunnel_service_context() {
+        PacketTunnelServiceContext context;
+        context.server_name = server_name;
+        context.session_mutex = &packet_tunnel_mutex;
+        context.udp_sessions = &packet_tunnel_sessions;
+        context.tcp_sessions = &packet_tunnel_tcp_sessions;
+        context.endpoint_sessions = &packet_tunnel_sessions_by_endpoint;
+        context.registry = &packet_tunnel_registry_;
+        context.udp_peer_coord = &peer_coord_;
+        context.tcp_peer_coord = &tcp_peer_coord_;
+        context.peer_offer_timeout_ms = kPeerOfferTimeoutMs;
+        context.peer_active_timeout_ms = kPeerActiveTimeoutMs;
+        context.udp_idle_timeout_ms = kPacketTunnelUdpIdleTimeoutMs;
+        context.describe_scoped_session =
+            [this](const shared_ptr<PacketTunnelSession>& session) -> string {
+            return describe_scoped_virtual_ip(session);
+        };
+        context.describe_scoped_virtual_ip =
+            [this](const string& server_key, uint32_t virtual_ip_be) -> string {
+            return describe_scoped_virtual_ip(server_key, virtual_ip_be);
+        };
+        context.build_scoped_virtual_ip_key =
+            [this](const string& server_key, uint32_t virtual_ip_be) -> string {
+            return build_scoped_virtual_ip_key(server_key, virtual_ip_be);
+        };
+        context.is_peer_direct_excluded_session =
+            [this](const shared_ptr<PacketTunnelSession>& session) -> bool {
+            return is_peer_direct_excluded_session(session);
+        };
+        context.session_allows_peer_direct =
+            [](const shared_ptr<PacketTunnelSession>& session) -> bool {
+            return session_allows_peer_direct(session);
+        };
+        context.session_has_active_lease =
+            [this](const shared_ptr<PacketTunnelSession>& session, string* error) -> bool {
+            return session_has_active_lease(session, nullptr, error);
+        };
+        context.send_frame =
+            [this](const shared_ptr<PacketTunnelSession>& session,
+                   uint8_t frame_type,
+                   const uint8_t* payload,
+                   size_t payload_len) -> bool {
+            return send_packet_tunnel_frame(session, frame_type, payload, payload_len);
+        };
+        context.maybe_log_virtual_peer_udp_relay =
+            [this](const shared_ptr<PacketTunnelSession>& sender_session,
+                   const shared_ptr<PacketTunnelSession>& target_session,
+                   uint32_t src_ip_be,
+                   uint32_t dst_ip_be,
+                   uint16_t src_port,
+                   uint16_t dst_port,
+                   size_t payload_len) {
+            maybe_log_virtual_peer_udp_relay(sender_session,
+                                             target_session,
+                                             src_ip_be,
+                                             dst_ip_be,
+                                             src_port,
+                                             dst_port,
+                                             payload_len);
+        };
+        context.build_udp_direct_candidates =
+            [](const shared_ptr<PacketTunnelSession>& session) -> vector<TcpDirectCandidate> {
+            return build_udp_direct_candidates_for_session(session);
+        };
+        context.build_tcp_direct_candidates =
+            [](const shared_ptr<PacketTunnelSession>& session) -> vector<TcpDirectCandidate> {
+            return build_tcp_direct_candidates_for_session(session);
+        };
+        context.collect_udp_offer_peers =
+            [this](const shared_ptr<PacketTunnelSession>& session)
+                -> vector<shared_ptr<PacketTunnelSession>> {
+            return collect_udp_offer_peers_locked(session);
+        };
+        context.collect_tcp_offer_peers =
+            [this](const shared_ptr<PacketTunnelSession>& session)
+                -> vector<shared_ptr<PacketTunnelSession>> {
+            return collect_tcp_offer_peers_locked(session);
+        };
+        return context;
     }
 
     shared_ptr<PacketTunnelSession> find_packet_tunnel_tcp_session_locked(const string& server_key,
@@ -2043,6 +2129,13 @@ private:
                                    uint32_t dst_ip_be,
                                    const uint8_t* payload,
                                    size_t payload_len) {
+        PacketTunnelServiceContext service_context = build_packet_tunnel_service_context();
+        UdpRelayService relay_service(service_context);
+        return relay_service.RelayVirtualPeerPacket(sender_session,
+                                                    dst_ip_be,
+                                                    payload,
+                                                    payload_len);
+
         if (!sender_session || !sender_session->active || payload == nullptr || payload_len < 20) {
             return false;
         }
@@ -2156,6 +2249,10 @@ private:
     }
 
     vector<PacketTunnelSessionRemoval> cleanup_idle_packet_tunnel_sessions(uint64_t now_ms) {
+        PacketTunnelServiceContext service_context = build_packet_tunnel_service_context();
+        UdpRelayService relay_service(service_context);
+        return relay_service.CleanupIdleSessions(now_ms);
+
         vector<PacketTunnelSessionRemoval> removed;
         lock_guard<mutex> lock(packet_tunnel_mutex);
 
@@ -2212,6 +2309,10 @@ private:
     }
 
     vector<PacketTunnelSessionRemoval> cleanup_packet_tunnel_tcp_sessions(uint64_t now_ms) {
+        PacketTunnelServiceContext service_context = build_packet_tunnel_service_context();
+        TcpRelayService relay_service(service_context);
+        return relay_service.CleanupSessions(now_ms);
+
         (void)now_ms;
         vector<PacketTunnelSessionRemoval> removed;
         lock_guard<mutex> lock(packet_tunnel_mutex);
@@ -2251,6 +2352,20 @@ private:
 
     void announce_peer_offers_for_session(const shared_ptr<PacketTunnelSession>& session,
                                           bool force_new_version = true) {
+        vector<PacketTunnelSessionRemoval> service_expired_sessions =
+            cleanup_idle_packet_tunnel_sessions(monotonic_millis());
+        for (size_t i = 0; i < service_expired_sessions.size(); ++i) {
+            Logger::info("[" + server_name + "|IP Tunnel] 丢弃无效UDP会话: 虚拟IP=" +
+                         ipv4_be_to_string(service_expired_sessions[i].session->virtual_ip_be) +
+                         " 端点=" + service_expired_sessions[i].session->client_str +
+                         " 原因=" + service_expired_sessions[i].reason);
+        }
+
+        PacketTunnelServiceContext service_context = build_packet_tunnel_service_context();
+        CoordinationService service_coordination(service_context);
+        service_coordination.AnnouncePeerOffersForSession(session, force_new_version);
+        return;
+
         if (!session || !session->active || !session->use_udp) {
             return;
         }
@@ -2401,6 +2516,24 @@ private:
     }
 
     void announce_peer_offers_if_due(const shared_ptr<PacketTunnelSession>& session) {
+        static const uint64_t kPeerOfferRefreshIntervalMsService = 10000;
+        if (!session || !session->active || !session->use_udp) {
+            return;
+        }
+
+        const uint64_t now_ms_service = monotonic_millis();
+        if (session->last_peer_offer_announce_ms != 0 &&
+            now_ms_service >= session->last_peer_offer_announce_ms &&
+            (now_ms_service - session->last_peer_offer_announce_ms) <
+                kPeerOfferRefreshIntervalMsService) {
+            return;
+        }
+
+        PacketTunnelServiceContext service_context = build_packet_tunnel_service_context();
+        CoordinationService service_coordination(service_context);
+        service_coordination.AnnouncePeerOffersForSession(session, false);
+        return;
+
         static const uint64_t kPeerOfferRefreshIntervalMs = 10000;
         if (!session || !session->active || !session->use_udp) {
             return;
@@ -2418,6 +2551,11 @@ private:
 
     void announce_tcp_peer_offers_for_session(const shared_ptr<PacketTunnelSession>& session,
                                               bool force_new_version = true) {
+        PacketTunnelServiceContext service_context = build_packet_tunnel_service_context();
+        CoordinationService coordination_service(service_context);
+        coordination_service.AnnounceTcpPeerOffersForSession(session, force_new_version);
+        return;
+
         if (!session || !session->active || session->use_udp || session->tcp_direct_listen_port == 0) {
             return;
         }
@@ -2502,6 +2640,10 @@ private:
     bool route_peer_signal_frame(const shared_ptr<PacketTunnelSession>& sender_session,
                                  uint8_t frame_type,
                                  const ParsedPeerSignalFrame& signal) {
+        PacketTunnelServiceContext service_context = build_packet_tunnel_service_context();
+        CoordinationService coordination_service(service_context);
+        return coordination_service.RoutePeerSignalFrame(sender_session, frame_type, signal);
+
         if (!sender_session || !sender_session->active || !sender_session->use_udp) {
             return false;
         }
@@ -2610,6 +2752,10 @@ private:
 
     bool route_peer_disable_frame(const shared_ptr<PacketTunnelSession>& sender_session,
                                   const ParsedPeerDisableFrame& disable) {
+        PacketTunnelServiceContext service_context = build_packet_tunnel_service_context();
+        CoordinationService coordination_service(service_context);
+        return coordination_service.RoutePeerDisableFrame(sender_session, disable);
+
         if (!sender_session || !sender_session->active || !sender_session->use_udp) {
             return false;
         }
