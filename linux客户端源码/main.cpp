@@ -131,7 +131,7 @@ bool LoadConfigFile(const std::string& path, Options* options, std::string* erro
         size_t equal_pos = line.find('=');
         if (equal_pos == std::string::npos) {
             if (error != NULL) {
-                *error = "invalid config line " + std::to_string(line_number) + ": " + line;
+                *error = "无效的配置行 " + std::to_string(line_number) + ": " + line;
             }
             return false;
         }
@@ -237,12 +237,12 @@ bool ParseArgs(int argc, char** argv, Options* options) {
     if (!detected_config.empty()) {
         std::string config_error;
         if (!LoadConfigFile(detected_config, options, &config_error)) {
-            LogError("load config failed: " + config_error);
+            LogError("加载配置失败: " + config_error);
             return false;
         }
         options->config_path = detected_config;
     } else if (!options->config_path.empty()) {
-        LogError("config file not found: " + options->config_path);
+        LogError("未找到配置文件: " + options->config_path);
         return false;
     }
 
@@ -351,12 +351,12 @@ int main(int argc, char** argv) {
     signal(SIGINT, SignalHandler);
     signal(SIGTERM, SignalHandler);
 
-    LogInfo("Linux tunnel client starting");
-    LogInfo("session_uuid=" + options.session_uuid);
+    LogInfo("Linux 隧道客户端启动中");
+    LogInfo("会话UUID=" + options.session_uuid);
     if (!options.config_path.empty()) {
-        LogInfo("config=" + options.config_path);
+        LogInfo("配置文件=" + options.config_path);
     }
-    LogInfo("client_id=" + options.client_id);
+    LogInfo("客户端ID=" + options.client_id);
 
     std::string selected_server_key = options.server_key;
     if (selected_server_key.empty() && !options.server_virtual_ip.empty()) {
@@ -377,9 +377,9 @@ int main(int argc, char** argv) {
         std::vector<LinuxServerInfo> servers;
         std::string error;
         if (!config_client.GetServerList(options.api_url, options.api_port, &servers, &error)) {
-            LogWarn("GET_SERVERS failed, retrying in " +
+            LogWarn("获取节点列表失败，" +
                     std::to_string(kInitialRetryDelaySeconds) +
-                    "s: " + error);
+                    "秒后重试: " + error);
             sleep(kInitialRetryDelaySeconds);
             continue;
         }
@@ -389,21 +389,21 @@ int main(int argc, char** argv) {
         if (effective_selector.empty()) {
             if (servers.size() == 1) {
                 effective_selector = std::to_string(servers[0].id);
-                LogInfo("node auto selected: " + effective_selector + " (" + servers[0].name + ")");
+                LogInfo("已自动选择节点: " + effective_selector + " (" + servers[0].name + ")");
             } else {
-                LogWarn("server selector is unavailable while GET_SERVERS returned " +
+                LogWarn("未指定节点，但获取到 " +
                         std::to_string(servers.size()) +
-                        " nodes, retrying in " +
-                        std::to_string(kInitialRetryDelaySeconds) + "s");
+                        " 个节点，" +
+                        std::to_string(kInitialRetryDelaySeconds) + "秒后重试");
                 sleep(kInitialRetryDelaySeconds);
                 continue;
             }
         }
 
         if (!FindServerInfo(servers, effective_selector, &server_info)) {
-            LogWarn("node not found from GET_SERVERS result, retrying in " +
+            LogWarn("在节点列表中未找到目标节点，" +
                     std::to_string(kInitialRetryDelaySeconds) +
-                    "s: " + effective_selector);
+                    "秒后重试: " + effective_selector);
             sleep(kInitialRetryDelaySeconds);
             continue;
         }
@@ -422,29 +422,29 @@ int main(int argc, char** argv) {
 
         ip_tunnel::LeaseGrant lease;
         if (!lease_client.RequestLease(options.api_url, options.api_port, lease_request, &lease, &error)) {
-            LogWarn("LEASE_IP failed, retrying in " +
+            LogWarn("申请租约失败，" +
                     std::to_string(kInitialRetryDelaySeconds) +
-                    "s: " + error);
+                    "秒后重试: " + error);
             sleep(kInitialRetryDelaySeconds);
             continue;
         }
 
-        LogInfo("lease granted: virtual_ip=" + lease.virtual_ip +
-                " gateway=" + lease.gateway_ip +
-                " server_virtual_ip=" + lease.server_virtual_ip);
+        LogInfo("已获取租约: 虚拟IP=" + lease.virtual_ip +
+                " 网关=" + lease.gateway_ip +
+                " 服务端虚拟IP=" + lease.server_virtual_ip);
 
         LinuxTunManager tun_manager;
         LinuxTunConfig tun_config = BuildTunConfig(options, server_info, lease);
         if (!tun_manager.Setup(tun_config, &error)) {
-            LogWarn("TUN setup failed, retrying in " +
+            LogWarn("TUN 初始化失败，" +
                     std::to_string(kInitialRetryDelaySeconds) +
-                    "s: " + error);
+                    "秒后重试: " + error);
             lease_client.ReleaseLease(options.api_url, options.api_port, effective_server_key, options.session_uuid, NULL);
             sleep(kInitialRetryDelaySeconds);
             continue;
         }
 
-        LogInfo("TUN ready: if=" + tun_manager.GetIfName() + " ip=" + lease.virtual_ip);
+        LogInfo("TUN 已就绪: 接口=" + tun_manager.GetIfName() + " IP=" + lease.virtual_ip);
 
         std::unique_ptr<LinuxPacketTunnelClient> packet_client;
         auto start_packet_client = [&](const ip_tunnel::LeaseGrant& current_lease, std::string* start_error) -> bool {
@@ -459,9 +459,9 @@ int main(int argc, char** argv) {
         };
 
         if (!start_packet_client(lease, &error)) {
-            LogWarn("packet tunnel start failed, retrying in " +
+            LogWarn("数据隧道启动失败，" +
                     std::to_string(kInitialRetryDelaySeconds) +
-                    "s: " + error);
+                    "秒后重试: " + error);
             tun_manager.Cleanup();
             lease_client.ReleaseLease(options.api_url, options.api_port, effective_server_key, options.session_uuid, NULL);
             sleep(kInitialRetryDelaySeconds);
@@ -469,9 +469,9 @@ int main(int argc, char** argv) {
         }
 
         if (startup_attempt > 1) {
-            LogInfo("startup recovery succeeded on attempt " + std::to_string(startup_attempt));
+            LogInfo("启动恢复成功，当前为第 " + std::to_string(startup_attempt) + " 次尝试");
         }
-        LogInfo("packet tunnel connected: " + effective_tunnel_host + ":" + std::to_string(effective_tunnel_port));
+        LogInfo("数据隧道已连接: " + effective_tunnel_host + ":" + std::to_string(effective_tunnel_port));
 
         std::mutex lease_mutex;
         std::atomic<bool> renew_stop(false);
@@ -501,7 +501,7 @@ int main(int argc, char** argv) {
                     if (!lease_client.RenewLease(options.api_url, options.api_port, effective_server_key,
                                                  options.session_uuid, &renewed, &renew_error)) {
                         renew_failed = true;
-                        LogWarn("lease renew failed: " + renew_error);
+                        LogWarn("租约续约失败: " + renew_error);
                         continue;
                     }
 
@@ -510,7 +510,7 @@ int main(int argc, char** argv) {
                         lease = renewed;
                     }
                     renew_failed = false;
-                    LogInfo("lease renewed: virtual_ip=" + renewed.virtual_ip);
+                    LogInfo("租约续约成功: 虚拟IP=" + renewed.virtual_ip);
                 }
             });
         };
@@ -535,7 +535,7 @@ int main(int argc, char** argv) {
                 renew_thread.join();
             }
 
-            LogWarn("packet tunnel disconnected, starting automatic recovery");
+            LogWarn("数据隧道已断开，开始自动恢复");
 
             std::string preferred_ip;
             {
@@ -555,13 +555,13 @@ int main(int argc, char** argv) {
 
                 if (!lease_client.RequestLease(options.api_url, options.api_port, recover_request,
                                                &recovered_lease, &recover_error)) {
-                    LogWarn("lease recovery failed: " + recover_error);
+                    LogWarn("租约恢复失败: " + recover_error);
                     sleep(2);
                     continue;
                 }
-                LogInfo("lease reacquired: virtual_ip=" + recovered_lease.virtual_ip);
+                LogInfo("已重新申请租约: 虚拟IP=" + recovered_lease.virtual_ip);
             } else {
-                LogInfo("lease recovered: virtual_ip=" + recovered_lease.virtual_ip);
+                LogInfo("已恢复原租约: 虚拟IP=" + recovered_lease.virtual_ip);
             }
 
             {
@@ -571,13 +571,13 @@ int main(int argc, char** argv) {
 
             LinuxTunConfig recovered_tun_config = BuildTunConfig(options, server_info, recovered_lease);
             if (!tun_manager.Setup(recovered_tun_config, &error)) {
-                LogWarn("TUN reconfigure failed: " + error);
+                LogWarn("TUN 重新配置失败: " + error);
                 sleep(2);
                 continue;
             }
 
             if (!start_packet_client(recovered_lease, &error)) {
-                LogWarn("packet tunnel reconnect failed: " + error);
+                LogWarn("数据隧道重连失败: " + error);
                 sleep(2);
                 continue;
             }
@@ -585,7 +585,7 @@ int main(int argc, char** argv) {
             renew_failed = false;
             renew_stop = false;
             renew_thread = start_renew_thread();
-            LogInfo("automatic reconnect succeeded: virtual_ip=" + recovered_lease.virtual_ip);
+            LogInfo("自动重连成功: 虚拟IP=" + recovered_lease.virtual_ip);
         }
 
         renew_stop = true;
@@ -603,15 +603,15 @@ int main(int argc, char** argv) {
             if (release_error == "lease server returned empty response" ||
                 release_error.find("cannot connect to lease server: ") == 0 ||
                 release_error.find("send lease command failed") == 0) {
-                LogInfo("lease server unavailable during release, skipping");
+                LogInfo("释放租约时租约服务不可用，已跳过");
             } else {
-                LogWarn("release lease failed: " + release_error);
+                LogWarn("释放租约失败: " + release_error);
             }
         } else {
-            LogInfo("lease released");
+            LogInfo("租约已释放");
         }
     }
 
-    LogInfo("Linux tunnel client stopped");
+    LogInfo("Linux 隧道客户端已停止");
     return 0;
 }

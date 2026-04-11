@@ -60,14 +60,14 @@ bool LinuxConfigClient::TcpGetData(const std::string& host,
 
     if (!connected || sock < 0) {
         if (error != NULL) {
-            *error = "connect failed: " + host + ":" + port_str;
+            *error = "连接失败: " + host + ":" + port_str;
         }
         return false;
     }
 
     if (send(sock, request.data(), request.size(), 0) != (ssize_t)request.size()) {
         if (error != NULL) {
-            *error = "send request failed";
+            *error = "发送请求失败";
         }
         close(sock);
         return false;
@@ -89,7 +89,7 @@ bool LinuxConfigClient::TcpGetData(const std::string& host,
 
     if (response->empty()) {
         if (error != NULL) {
-            *error = "empty server response";
+            *error = "服务器返回为空";
         }
         return false;
     }

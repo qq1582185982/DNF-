@@ -589,10 +589,10 @@ bool WintunManager::WritePacket(const uint8_t* packet, size_t length, std::wstri
     send_packet_(session_, outgoing);
     const DWORD write_elapsed = GetTickCount() - write_start;
     if (retry_count > 0 || write_elapsed >= kSlowWintunWriteWarnMs) {
-        PacketTunnelWarnLog("wintun write delayed elapsed_ms=" +
+        PacketTunnelWarnLog("Wintun写入耗时偏长 elapsed_ms=" +
                             std::to_string(write_elapsed) +
-                            " retries=" + std::to_string(retry_count) +
-                            " len=" + std::to_string(length));
+                            " 重试次数=" + std::to_string(retry_count) +
+                            " 长度=" + std::to_string(length));
     }
     return true;
 }

@@ -77,15 +77,15 @@ std::string NowString() {
 }
 
 void LogInfo(const std::string& message) {
-    std::cout << NowString() << " [INFO] " << message << std::endl;
+    std::cout << NowString() << " [信息] " << message << std::endl;
 }
 
 void LogWarn(const std::string& message) {
-    std::cout << NowString() << " [WARN] " << message << std::endl;
+    std::cout << NowString() << " [警告] " << message << std::endl;
 }
 
 void LogError(const std::string& message) {
-    std::cerr << NowString() << " [ERROR] " << message << std::endl;
+    std::cerr << NowString() << " [错误] " << message << std::endl;
 }
 
 std::string GenerateSessionUuid() {

@@ -706,7 +706,7 @@ bool load_server_config(const char* config_file, const char* tunnel_server_ip) {
             has_explicit_gateway_binding = true;
         }
 
-        printf("节点 #%d: name=%s server_virtual_ip=%s\n",
+        printf("节点 #%d: 名称=%s 服务端虚拟IP=%s\n",
                node.id,
                node.name.c_str(),
                node.server_virtual_ip.c_str());
@@ -784,7 +784,7 @@ string generate_version_json() {
 static void send_tcp_response(int client_fd, const string& response, const char* context, const char* request = NULL) {
     ssize_t sent = send(client_fd, response.c_str(), response.length(), 0);
     if (sent < 0) {
-        fprintf(stderr, "[TCP][WARN] send failed context=%s errno=%d request=%s\n",
+        fprintf(stderr, "[TCP][警告] 发送失败 context=%s errno=%d request=%s\n",
                 context, errno, request != NULL ? request : "(unknown)");
         tcp_config_log_warn("发送响应失败: context=" + string(context) +
                             " errno=" + to_string(errno) +
@@ -799,11 +799,11 @@ void handle_tcp_request(int client_fd, const string& client_label) {
     int n = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
     if (n <= 0) {
         if (n == 0) {
-            fprintf(stderr, "[TCP][WARN] connection closed before request: client=%s\n",
+            fprintf(stderr, "[TCP][警告] 读取请求前连接已关闭: client=%s\n",
                     client_label.c_str());
             tcp_config_log_warn("连接在读取请求前被关闭: client=" + client_label);
         } else {
-            fprintf(stderr, "[TCP][WARN] recv request failed: client=%s errno=%d\n",
+            fprintf(stderr, "[TCP][警告] 读取请求失败: client=%s errno=%d\n",
                     client_label.c_str(), errno);
             tcp_config_log_warn("读取请求失败: client=" + client_label +
                                 " errno=" + to_string(errno) +
@@ -839,14 +839,14 @@ void handle_tcp_request(int client_fd, const string& client_label) {
     else if (!parts.empty() && parts[0] == "LEASE_IP") {
         if (parts.size() < 4) {
             string json_response = make_status_json(ip_tunnel::kStatusInvalidRequest,
-                                                    "usage: LEASE_IP <server_key> <session_uuid> <client_id> [preferred_ip]");
+                                                    "用法: LEASE_IP <server_key> <session_uuid> <client_id> [preferred_ip]");
             send_tcp_response(client_fd, json_response, "LEASE_IP/usage", request.c_str());
         } else {
             string json_response;
             lock_guard<mutex> lock(g_servers_mutex);
             const NodeConfig* node = find_node_by_key_locked(parts[1]);
             if (node == NULL) {
-                json_response = make_status_json(ip_tunnel::kStatusServerNotFound, "node not found", parts[1]);
+                json_response = make_status_json(ip_tunnel::kStatusServerNotFound, "未找到节点", parts[1]);
             } else {
                 ip_tunnel::LeaseRequest lease_request;
                 lease_request.server_key = canonical_node_key(*node);
@@ -863,18 +863,18 @@ void handle_tcp_request(int client_fd, const string& client_label) {
                         ? lease_record.client_id.substr(0, 16)
                         : lease_record.client_id;
                     lease_record.server_virtual_ip = node->server_virtual_ip;
-                    Logger::debug("[TCP lease trace] client=" + client_label +
-                                  " session=" + lease_record.session_uuid +
-                                  " client_id=" + lease_client_id +
-                                  " server_key=" + canonical_node_key(*node) +
-                                  " virtual_ip=" + lease_record.virtual_ip);
-                    Logger::debug("[TCP配置] lease granted: client=" + client_label +
-                                  " server_key=" + canonical_node_key(*node) +
-                                  " virtual_ip=" + lease_record.virtual_ip +
-                                  " gateway=" + lease_record.gateway_ip +
-                                  " server_virtual_ip=" + lease_record.server_virtual_ip +
-                                  " route=" + g_network.virtual_subnet);
-                    json_response = generate_lease_json(*node, lease_record, "lease granted");
+                    Logger::debug("[TCP租约追踪] 客户端=" + client_label +
+                                  " 会话=" + lease_record.session_uuid +
+                                  " 客户端标识=" + lease_client_id +
+                                  " 服务器键=" + canonical_node_key(*node) +
+                                  " 虚拟IP=" + lease_record.virtual_ip);
+                    Logger::debug("[TCP配置] 已发放租约: 客户端=" + client_label +
+                                  " 服务器键=" + canonical_node_key(*node) +
+                                  " 虚拟IP=" + lease_record.virtual_ip +
+                                  " 网关=" + lease_record.gateway_ip +
+                                  " 服务端虚拟IP=" + lease_record.server_virtual_ip +
+                                  " 路由=" + g_network.virtual_subnet);
+                    json_response = generate_lease_json(*node, lease_record, "已发放租约");
                 } else {
                     json_response = make_status_json(status_from_error(error), error, canonical_node_key(*node));
                 }
@@ -886,14 +886,14 @@ void handle_tcp_request(int client_fd, const string& client_label) {
     else if (!parts.empty() && parts[0] == "RENEW_LEASE") {
         if (parts.size() < 3) {
             string json_response = make_status_json(ip_tunnel::kStatusInvalidRequest,
-                                                    "usage: RENEW_LEASE <server_key> <session_uuid>");
+                                                    "用法: RENEW_LEASE <server_key> <session_uuid>");
             send_tcp_response(client_fd, json_response, "RENEW_LEASE/usage", request.c_str());
         } else {
             string json_response;
             lock_guard<mutex> lock(g_servers_mutex);
             const NodeConfig* node = find_node_by_key_locked(parts[1]);
             if (node == NULL) {
-                json_response = make_status_json(ip_tunnel::kStatusServerNotFound, "node not found", parts[1]);
+                json_response = make_status_json(ip_tunnel::kStatusServerNotFound, "未找到节点", parts[1]);
             } else {
                 IPPoolManager::LeaseRecord lease_record;
                 string error;
@@ -902,26 +902,26 @@ void handle_tcp_request(int client_fd, const string& client_label) {
                         ? lease_record.client_id.substr(0, 16)
                         : lease_record.client_id;
                     lease_record.server_virtual_ip = node->server_virtual_ip;
-                    Logger::debug("[TCP lease trace] renew client=" + client_label +
-                                  " session=" + lease_record.session_uuid +
-                                  " client_id=" + lease_client_id +
-                                  " server_key=" + canonical_node_key(*node) +
-                                  " virtual_ip=" + lease_record.virtual_ip);
-                    Logger::debug("[TCP閰嶇疆] lease renewed: client=" + client_label +
-                                  " server_key=" + canonical_node_key(*node) +
-                                  " virtual_ip=" + lease_record.virtual_ip +
-                                  " gateway=" + lease_record.gateway_ip +
-                                  " server_virtual_ip=" + lease_record.server_virtual_ip +
-                                  " route=" + g_network.virtual_subnet);
-                    json_response = generate_lease_json(*node, lease_record, "lease renewed");
+                    Logger::debug("[TCP租约追踪] 续租 客户端=" + client_label +
+                                  " 会话=" + lease_record.session_uuid +
+                                  " 客户端标识=" + lease_client_id +
+                                  " 服务器键=" + canonical_node_key(*node) +
+                                  " 虚拟IP=" + lease_record.virtual_ip);
+                    Logger::debug("[TCP配置] 已续租: 客户端=" + client_label +
+                                  " 服务器键=" + canonical_node_key(*node) +
+                                  " 虚拟IP=" + lease_record.virtual_ip +
+                                  " 网关=" + lease_record.gateway_ip +
+                                  " 服务端虚拟IP=" + lease_record.server_virtual_ip +
+                                  " 路由=" + g_network.virtual_subnet);
+                    json_response = generate_lease_json(*node, lease_record, "已续租");
                 } else {
                     fprintf(stderr,
-                            "[TCP][WARN] renew lease failed: client=%s server_key=%s session=%s error=%s\n",
+                            "[TCP][警告] 续租失败: 客户端=%s 服务器键=%s 会话=%s 错误=%s\n",
                             client_label.c_str(), parts[1].c_str(), parts[2].c_str(), error.c_str());
-                    tcp_config_log_warn("续租失败: client=" + client_label +
-                                        " server_key=" + parts[1] +
-                                        " session=" + parts[2] +
-                                        " error=" + error);
+                    tcp_config_log_warn("续租失败: 客户端=" + client_label +
+                                        " 服务器键=" + parts[1] +
+                                        " 会话=" + parts[2] +
+                                        " 错误=" + error);
                     json_response = make_status_json(status_from_error(error), error, canonical_node_key(*node));
                 }
             }
@@ -932,14 +932,14 @@ void handle_tcp_request(int client_fd, const string& client_label) {
     else if (!parts.empty() && parts[0] == "RELEASE_LEASE") {
         if (parts.size() < 3) {
             string json_response = make_status_json(ip_tunnel::kStatusInvalidRequest,
-                                                    "usage: RELEASE_LEASE <server_key> <session_uuid>");
+                                                    "用法: RELEASE_LEASE <server_key> <session_uuid>");
             send_tcp_response(client_fd, json_response, "RELEASE_LEASE/usage", request.c_str());
         } else {
             string json_response;
             lock_guard<mutex> lock(g_servers_mutex);
             const NodeConfig* node = find_node_by_key_locked(parts[1]);
             if (node == NULL) {
-                json_response = make_status_json(ip_tunnel::kStatusServerNotFound, "node not found", parts[1]);
+                json_response = make_status_json(ip_tunnel::kStatusServerNotFound, "未找到节点", parts[1]);
             } else if (g_ip_pool_manager.ReleaseLease(canonical_node_key(*node), parts[2])) {
                 json_response = make_status_json(ip_tunnel::kStatusOk, "lease released", canonical_node_key(*node));
             } else {
@@ -988,7 +988,7 @@ void* tcp_server_thread(void* arg) {
     }
 
     if (listen(listen_fd, 10) < 0) {
-        perror("listen failed");
+        perror("监听失败");
         close(listen_fd);
         return NULL;
     }
@@ -1008,7 +1008,7 @@ void* tcp_server_thread(void* arg) {
         int client_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &addr_len);
         if (client_fd < 0) {
             if (errno == EINTR) continue;
-            perror("accept failed");
+            perror("接受连接失败");
             break;
         }
 

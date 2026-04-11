@@ -152,7 +152,7 @@ public:
         SYSTEMTIME st;
         GetLocalTime(&st);
         char log_line[512];
-        sprintf(log_line, "%04d-%02d-%02d %02d:%02d:%02d.%03d [INFO] 日志文件已初始化: %s\n",
+        sprintf(log_line, "%04d-%02d-%02d %02d:%02d:%02d.%03d [信息] 日志文件已初始化: %s\n",
                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
                filename.c_str());
         printf("%s", log_line);
@@ -206,13 +206,19 @@ private:
 
         if (level_priority < current_priority) return;
 
+        string display_level = level;
+        if (level == "DEBUG") display_level = "调试";
+        else if (level == "INFO") display_level = "信息";
+        else if (level == "WARN") display_level = "警告";
+        else if (level == "ERROR") display_level = "错误";
+
         SYSTEMTIME st;
         GetLocalTime(&st);
         char log_line[65536];
         sprintf(log_line, "%04d-%02d-%02d %02d:%02d:%02d.%03d [%s] %s\n",
                st.wYear, st.wMonth, st.wDay,
                st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
-               level.c_str(), msg.c_str());
+               display_level.c_str(), msg.c_str());
 
         lock_guard<mutex> lock(log_mutex);
         printf("%s", log_line);
@@ -238,15 +244,15 @@ mutex Logger::log_mutex;
 DWORD Logger::last_flush_tick = 0;
 
 void PacketTunnelDebugLog(const string& msg) {
-    Logger::debug("[PacketTunnel] " + msg);
+    Logger::debug("[数据隧道] " + msg);
 }
 
 void PacketTunnelWarnLog(const string& msg) {
-    Logger::warning("[PacketTunnel] " + msg);
+    Logger::warning("[数据隧道] " + msg);
 }
 
 void PacketTunnelInfoLog(const string& msg) {
-    Logger::info("[PacketTunnel] " + msg);
+    Logger::info("[数据隧道] " + msg);
 }
 
 bool PacketTunnelDebugEnabled() {
@@ -726,9 +732,9 @@ string get_local_client_id() {
     string persisted_created_at;
     if (load_persisted_client_id(&persisted_client_id, &persisted_created_at) &&
         !persisted_client_id.empty()) {
-        Logger::debug("[租约] client_id source=persisted created_at=" +
-                      (persisted_created_at.empty() ? string("unknown") : persisted_created_at) +
-                      " id=" + persisted_client_id.substr(0, min<size_t>(persisted_client_id.size(), 16)));
+        Logger::debug("[租约] client_id来源=已持久化 创建时间=" +
+                      (persisted_created_at.empty() ? string("未知") : persisted_created_at) +
+                      " 标识=" + persisted_client_id.substr(0, min<size_t>(persisted_client_id.size(), 16)));
         return persisted_client_id;
     }
 
@@ -745,11 +751,11 @@ string get_local_client_id() {
     }
 
     if (!persist_client_identity(client_id, created_at_ms, source)) {
-        Logger::warning("[租约] client_id persist failed, source=" + source);
+        Logger::warning("[租约] 持久化client_id失败，来源=" + source);
     } else {
-        Logger::debug("[租约] client_id generated source=" + source +
-                      " created_at=" + to_string(created_at_ms) +
-                      " id=" + client_id.substr(0, min<size_t>(client_id.size(), 16)));
+        Logger::debug("[租约] 已生成client_id，来源=" + source +
+                      " 创建时间=" + to_string(created_at_ms) +
+                      " 标识=" + client_id.substr(0, min<size_t>(client_id.size(), 16)));
     }
 
     return client_id;
@@ -818,11 +824,11 @@ public:
         renew_thread_ = thread(&LeaseSessionGuard::RenewLoop, this);
 
         const string route_summary = lease.routes.empty() ? "(none)" : lease.routes[0].cidr;
-        Logger::debug("[lease-trace] server_key=" + server_key +
-                      " virtual_ip=" + lease.virtual_ip +
-                      " gateway=" + lease.gateway_ip +
-                      " server_virtual_ip=" + lease.server_virtual_ip +
-                      " route=" + route_summary);
+        Logger::debug("[租约追踪] 服务器键=" + server_key +
+                      " 虚拟IP=" + lease.virtual_ip +
+                      " 网关=" + lease.gateway_ip +
+                      " 服务端虚拟IP=" + lease.server_virtual_ip +
+                      " 路由=" + route_summary);
 
         Logger::info("[租约] 虚拟IP租约申请成功");
         Logger::debug("[租约] 已申请虚拟IP: " + lease.virtual_ip +
@@ -1111,7 +1117,7 @@ int main(int argc, char* argv[]) {
     Logger::init(log_filename);
     const string initial_log_level = determine_initial_log_level();
     Logger::set_log_level(initial_log_level);
-    Logger::info("[Log] Default log level: " + initial_log_level);
+    Logger::info("[日志] 默认日志级别: " + initial_log_level);
 
     // 生成会话UUID
     g_session_uuid = generate_session_uuid();
