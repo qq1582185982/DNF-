@@ -1616,6 +1616,15 @@ private:
                                                             payload_len);
     }
 
+    shared_ptr<PacketTunnelSession> select_packet_tunnel_delivery_session_across_scopes_locked(
+        uint32_t virtual_ip_be,
+        const uint8_t* payload,
+        size_t payload_len) const {
+        return packet_tunnel_registry_.SelectDeliveryAcrossScopesLocked(virtual_ip_be,
+                                                                        payload,
+                                                                        payload_len);
+    }
+
     vector<shared_ptr<PacketTunnelSession>> collect_udp_offer_peers_locked(
         const shared_ptr<PacketTunnelSession>& session) const {
         return packet_tunnel_registry_.CollectUdpPeersLocked(
@@ -2875,12 +2884,20 @@ private:
             }
 
             shared_ptr<PacketTunnelSession> session;
-            if (!scoped_server_key.empty()) {
+            {
                 lock_guard<mutex> lock(packet_tunnel_mutex);
-                session = select_packet_tunnel_delivery_session_locked(scoped_server_key,
-                                                                       dst_ip_be,
-                                                                       packet.data(),
-                                                                       packet.size());
+                if (!scoped_server_key.empty()) {
+                    session = select_packet_tunnel_delivery_session_locked(scoped_server_key,
+                                                                           dst_ip_be,
+                                                                           packet.data(),
+                                                                           packet.size());
+                }
+                if (!session) {
+                    session = select_packet_tunnel_delivery_session_across_scopes_locked(
+                        dst_ip_be,
+                        packet.data(),
+                        packet.size());
+                }
             }
 
             if (!session) {
@@ -2974,12 +2991,22 @@ private:
                     }
 
                     shared_ptr<PacketTunnelSession> next_session;
-                    if (!next_scoped_server_key.empty()) {
+                    {
                         lock_guard<mutex> lock(packet_tunnel_mutex);
-                        next_session = select_packet_tunnel_delivery_session_locked(next_scoped_server_key,
-                                                                                     next_dst_ip_be,
-                                                                                     next_packet.data(),
-                                                                                     next_packet.size());
+                        if (!next_scoped_server_key.empty()) {
+                            next_session =
+                                select_packet_tunnel_delivery_session_locked(next_scoped_server_key,
+                                                                             next_dst_ip_be,
+                                                                             next_packet.data(),
+                                                                             next_packet.size());
+                        }
+                        if (!next_session) {
+                            next_session =
+                                select_packet_tunnel_delivery_session_across_scopes_locked(
+                                    next_dst_ip_be,
+                                    next_packet.data(),
+                                    next_packet.size());
+                        }
                     }
 
                     if (!next_session || next_session != session) {

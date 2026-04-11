@@ -84,6 +84,9 @@ public:
                                     uint32_t virtual_ip_be,
                                     const uint8_t* payload,
                                     size_t payload_len) const;
+    SessionPtr SelectDeliveryAcrossScopesLocked(uint32_t virtual_ip_be,
+                                                const uint8_t* payload,
+                                                size_t payload_len) const;
     SessionList CollectUdpPeersLocked(const SessionPtr& session,
                                       const SessionPredicate& predicate) const;
     SessionList CollectTcpPeersLocked(const SessionPtr& session,
@@ -100,6 +103,9 @@ private:
     SessionMap* udp_sessions_;
     SessionMap* tcp_sessions_;
     SessionMap* endpoint_sessions_;
+
+    SessionPtr FindUniqueByVirtualIpLocked(const SessionMap* sessions,
+                                           uint32_t virtual_ip_be) const;
 };
 
 #endif

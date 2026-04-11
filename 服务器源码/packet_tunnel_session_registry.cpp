@@ -165,6 +165,28 @@ PacketTunnelSessionRegistry::SessionPtr PacketTunnelSessionRegistry::FindByEndpo
     return it->second;
 }
 
+PacketTunnelSessionRegistry::SessionPtr PacketTunnelSessionRegistry::FindUniqueByVirtualIpLocked(
+    const SessionMap* sessions,
+    uint32_t virtual_ip_be) const {
+    if (sessions == nullptr) {
+        return SessionPtr();
+    }
+
+    SessionPtr matched_session;
+    for (SessionMap::const_iterator it = sessions->begin(); it != sessions->end(); ++it) {
+        const SessionPtr& session = it->second;
+        if (!session || !session->active || session->virtual_ip_be != virtual_ip_be) {
+            continue;
+        }
+        if (matched_session && matched_session != session) {
+            return SessionPtr();
+        }
+        matched_session = session;
+    }
+
+    return matched_session;
+}
+
 PacketTunnelSessionRegistry::SessionPtr PacketTunnelSessionRegistry::SelectDeliveryLocked(
     const std::string& server_key,
     uint32_t virtual_ip_be,
@@ -187,6 +209,25 @@ PacketTunnelSessionRegistry::SessionPtr PacketTunnelSessionRegistry::SelectDeliv
         if (tcp_session && tcp_session->active) {
             return tcp_session;
         }
+    }
+
+    return SessionPtr();
+}
+
+PacketTunnelSessionRegistry::SessionPtr
+PacketTunnelSessionRegistry::SelectDeliveryAcrossScopesLocked(uint32_t virtual_ip_be,
+                                                              const uint8_t* payload,
+                                                              size_t payload_len) const {
+    if (PacketTunnelPayloadIsTcp(payload, payload_len)) {
+        SessionPtr tcp_session = FindUniqueByVirtualIpLocked(tcp_sessions_, virtual_ip_be);
+        if (tcp_session) {
+            return tcp_session;
+        }
+    }
+
+    SessionPtr udp_session = FindUniqueByVirtualIpLocked(udp_sessions_, virtual_ip_be);
+    if (udp_session) {
+        return udp_session;
     }
 
     return SessionPtr();
