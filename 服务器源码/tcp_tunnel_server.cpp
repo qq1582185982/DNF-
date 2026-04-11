@@ -3987,6 +3987,7 @@ private:
         shared_ptr<PacketTunnelSession> session;
         uint32_t virtual_ip_be = 0;
         string resolved_server_key;
+        string client_id;
 
         try {
             int flag = 1;
@@ -3997,7 +3998,37 @@ private:
             setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &buffer_bytes, sizeof(buffer_bytes));
 
             uint8_t tail[packet_tunnel::kHandshakeTailSize] = {};
-            if (!recv_all_exact(client_fd, tail, sizeof(tail))) {
+            bool tail_loaded = false;
+            uint8_t next_handshake_byte = 0;
+            if (!recv_all_exact(client_fd, &next_handshake_byte, 1)) {
+                Logger::error("[IP Tunnel|" + session_uuid + "] 读取TCP握手扩展头失败");
+                close(client_fd);
+                return;
+            }
+            if (next_handshake_byte == packet_tunnel::kProtocolVersion) {
+                tail[0] = next_handshake_byte;
+                if (!recv_all_exact(client_fd, tail + 1, sizeof(tail) - 1)) {
+                    Logger::error("[IP Tunnel|" + session_uuid + "] 读取旧版TCP握手尾部失败");
+                    close(client_fd);
+                    return;
+                }
+                tail_loaded = true;
+            } else {
+                const uint8_t client_id_len = next_handshake_byte;
+                if (client_id_len > 0) {
+                    vector<char> client_id_buf(client_id_len, 0);
+                    if (!recv_all_exact(client_fd,
+                                        reinterpret_cast<uint8_t*>(client_id_buf.data()),
+                                        client_id_len)) {
+                        Logger::error("[IP Tunnel|" + session_uuid + "] 读取TCP握手client_id失败");
+                        close(client_fd);
+                        return;
+                    }
+                    client_id.assign(client_id_buf.begin(), client_id_buf.end());
+                }
+                tail_loaded = recv_all_exact(client_fd, tail, sizeof(tail));
+            }
+            if (!tail_loaded) {
                 Logger::error("[IP Tunnel|" + session_uuid + "] 接收握手尾部失败");
                 close(client_fd);
                 return;
@@ -4009,9 +4040,12 @@ private:
             memcpy(&virtual_ip_be, tail + 4, sizeof(virtual_ip_be));
 
             string virtual_ip = ipv4_be_to_string(virtual_ip_be);
-            Logger::debug("[IP Tunnel|" + session_uuid + "] 握手参数: version=" + to_string((int)version) +
-                         ", mtu=" + to_string(mtu) + ", virtual_ip=" + virtual_ip +
-                         ", flags=" + to_string((int)flags));
+            const string client_id_short =
+                client_id.size() > 16 ? client_id.substr(0, 16) : client_id;
+            Logger::debug("[IP Tunnel|" + session_uuid + "] 握手参数: 版本=" + to_string((int)version) +
+                         ", MTU=" + to_string(mtu) + ", 虚拟IP=" + virtual_ip +
+                         ", 标志=" + to_string((int)flags) +
+                         (client_id_short.empty() ? "" : ", 客户端标识=" + client_id_short));
 
             IPPoolManager::LeaseRecord active_lease;
             string lease_error;
