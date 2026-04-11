@@ -127,8 +127,7 @@ private:
               direct_eligible(false),
               active_direct(false),
               selected_candidate_index(0),
-              pending_hello_version(0),
-              pending_hello_nonce(0) {
+              pending_hello_version(0) {
             memset(endpoint_addr, 0, sizeof(endpoint_addr));
         }
 
@@ -154,7 +153,7 @@ private:
         std::vector<Candidate> candidates;
         size_t selected_candidate_index;
         uint64_t pending_hello_version;
-        uint32_t pending_hello_nonce;
+        std::vector<uint32_t> pending_hello_nonces;
     };
 
     mutable std::mutex mutex_;
