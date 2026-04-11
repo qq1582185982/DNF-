@@ -240,6 +240,9 @@ private:
     int RecvDatagram(uint8_t* data, size_t length, std::string* error);
     uint32_t ParseVirtualIp(std::string* error) const;
     void MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip, const std::string& reason);
+    void MaybeLogIcmpPacket(const std::string& direction,
+                            const uint8_t* packet,
+                            size_t packet_len);
     void MarkNetworkActivity();
     void MarkWatchedTcpTunRead(const uint8_t* packet,
                                size_t packet_len,
@@ -277,6 +280,7 @@ private:
     LinuxPeerLinkManager* peer_link_manager_;
     std::atomic<uint32_t> peer_signal_nonce_;
     std::map<std::string, unsigned long long> peer_route_debug_log_tick_;
+    std::map<std::string, unsigned long long> icmp_debug_log_tick_;
     std::map<std::string, unsigned long long> peer_probe_send_tick_;
     std::map<std::string, WatchedTcpFlowTrace> watched_tcp_flows_;
     std::map<std::string, TcpDirectOffer> tcp_direct_offers_;

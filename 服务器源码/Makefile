@@ -3,7 +3,7 @@ MUSL_CXX ?= x86_64-linux-musl-g++
 CXXFLAGS = -std=c++11 -O2 -Wall -pthread
 TARGET = dnf-tunnel-server
 SOURCES = tcp_tunnel_server.cpp tcp_config_server.cpp ip_pool_manager.cpp tun_manager.cpp peer_coord.cpp packet_tunnel_direct_candidates.cpp packet_tunnel_session_registry.cpp
-HEADERS = tcp_config_server.h ip_pool_manager.h ip_lease_protocol.h packet_tunnel_protocol.h tun_manager.h peer_coord.h packet_tunnel_direct_candidates.h packet_tunnel_session_registry.h
+HEADERS = tcp_config_server.h ip_pool_manager.h ip_lease_protocol.h packet_tunnel_protocol.h tun_manager.h peer_coord.h packet_tunnel_direct_candidates.h packet_tunnel_session_registry.h packet_tunnel_service_context.h packet_tunnel_udp_relay_service.h packet_tunnel_tcp_relay_service.h packet_tunnel_coordination_service.h
 
 all: musl
 

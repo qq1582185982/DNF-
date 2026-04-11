@@ -303,6 +303,9 @@ private:
     void MaybeLogWintunTargetIntent(const std::string& dst_virtual_ip,
                                     uint16_t dst_port,
                                     const std::string& route_desc);
+    void MaybeLogIcmpPacket(const std::string& direction,
+                            const uint8_t* packet,
+                            size_t packet_len);
     void MaybeLogTcpPayloadIpHints(const std::string& direction,
                                    const uint8_t* packet,
                                    size_t packet_len);
@@ -355,6 +358,7 @@ private:
     std::atomic<uint32_t> peer_signal_nonce_;
     std::map<std::string, unsigned long long> peer_route_debug_log_tick_;
     std::map<std::string, unsigned long long> wintun_target_debug_log_tick_;
+    std::map<std::string, unsigned long long> icmp_debug_log_tick_;
     std::map<std::string, unsigned long long> payload_ip_debug_log_tick_;
     std::map<std::string, WatchedTcpFlowTrace> watched_tcp_flows_;
     std::map<std::string, unsigned long long> peer_probe_send_tick_;

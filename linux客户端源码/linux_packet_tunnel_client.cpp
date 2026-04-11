@@ -481,6 +481,88 @@ std::string LinuxIpv4ToString(const uint8_t* addr) {
     return std::string(buffer);
 }
 
+bool TryParseLinuxIcmpPacket(const uint8_t* packet,
+                             size_t packet_len,
+                             size_t* out_ip_header_len,
+                             uint8_t* out_type,
+                             uint8_t* out_code) {
+    if (packet == NULL || packet_len < 20) {
+        return false;
+    }
+
+    const size_t ip_header_len = static_cast<size_t>(packet[0] & 0x0F) * 4;
+    if (((packet[0] >> 4) & 0x0F) != 4 ||
+        packet[9] != IPPROTO_ICMP ||
+        ip_header_len < 20 ||
+        packet_len < ip_header_len + 4) {
+        return false;
+    }
+
+    if (out_ip_header_len != NULL) {
+        *out_ip_header_len = ip_header_len;
+    }
+    if (out_type != NULL) {
+        *out_type = packet[ip_header_len];
+    }
+    if (out_code != NULL) {
+        *out_code = packet[ip_header_len + 1];
+    }
+    return true;
+}
+
+std::string DescribeLinuxIcmpTypeCode(uint8_t type, uint8_t code) {
+    switch (type) {
+    case 0:
+        return "回显应答";
+    case 3:
+        if (code == 1) {
+            return "主机不可达";
+        }
+        if (code == 3) {
+            return "端口不可达";
+        }
+        return "目的不可达";
+    case 8:
+        return "回显请求";
+    case 11:
+        return "超时";
+    default:
+        break;
+    }
+    return std::string();
+}
+
+std::string BuildLinuxIcmpPacketSummary(const uint8_t* packet, size_t packet_len) {
+    size_t ip_header_len = 0;
+    uint8_t icmp_type = 0;
+    uint8_t icmp_code = 0;
+    if (!TryParseLinuxIcmpPacket(packet,
+                                 packet_len,
+                                 &ip_header_len,
+                                 &icmp_type,
+                                 &icmp_code)) {
+        return std::string();
+    }
+
+    std::ostringstream ss;
+    ss << "src=" << LinuxIpv4ToString(packet + 12)
+       << " dst=" << LinuxIpv4ToString(packet + 16)
+       << " type=" << static_cast<int>(icmp_type)
+       << " code=" << static_cast<int>(icmp_code);
+    const std::string meaning = DescribeLinuxIcmpTypeCode(icmp_type, icmp_code);
+    if (!meaning.empty()) {
+        ss << " 说明=" << meaning;
+    }
+    if ((icmp_type == 0 || icmp_type == 8) && packet_len >= ip_header_len + 8) {
+        const uint16_t identifier = ntohs(*(const uint16_t*)(packet + ip_header_len + 4));
+        const uint16_t sequence = ntohs(*(const uint16_t*)(packet + ip_header_len + 6));
+        ss << " 标识=" << identifier
+           << " 序号=" << sequence;
+    }
+    ss << " len=" << packet_len;
+    return ss.str();
+}
+
 bool IsLinuxNoisyUdpPacket(const uint8_t* packet, size_t packet_len) {
     if (packet == NULL || packet_len < 20) {
         return true;
@@ -1481,6 +1563,7 @@ void LinuxPacketTunnelClient::Stop() {
         peer_link_manager_->ResetAll();
     }
     peer_route_debug_log_tick_.clear();
+    icmp_debug_log_tick_.clear();
     peer_probe_send_tick_.clear();
     watched_tcp_flows_.clear();
     last_receive_ms_ = 0;
@@ -2461,6 +2544,10 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
                 LogInfo(std::string(from_known_peer ? "UDP 对端->TUN " : "UDP 中转->TUN ") +
                         udp_desc);
             }
+            MaybeLogIcmpPacket(from_known_peer ? "ICMP 对端->TUN"
+                                               : "ICMP 中转->TUN",
+                               payload,
+                               payload_len);
             TraceWatchedTcpPacket(payload,
                                   payload_len,
                                   from_known_peer ? "对端->TUN" : "中转->TUN");
@@ -2962,6 +3049,7 @@ void LinuxPacketTunnelClient::TcpSocketReadLoop() {
             continue;
         }
 
+        MaybeLogIcmpPacket("ICMP TCP中转->TUN", payload.data(), payload.size());
         TraceWatchedTcpPacket(payload.data(), payload.size(), "中转->TUN/TCP");
     }
 
@@ -3233,6 +3321,7 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
             break;
         }
 
+        MaybeLogIcmpPacket("ICMP TCP对端->TUN", payload.data(), payload.size());
         TraceWatchedTcpPacket(payload.data(), payload.size(), "TCP对端->TUN");
     }
 
@@ -3758,6 +3847,9 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                 : ("dst=" + dst_virtual_ip +
                    " proto=" + inner_proto_name +
                    " len=" + std::to_string(packet.size()));
+        if (!is_udp && !is_tcp && !dst_virtual_ip.empty()) {
+            MaybeLogIcmpPacket("ICMP TUN读取", packet.data(), packet.size());
+        }
         uint16_t src_port = 0;
         uint16_t dst_port = 0;
         if (is_tcp) {
@@ -3956,6 +4048,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
             break;
         }
 
+        MaybeLogIcmpPacket("ICMP TUN->中转", packet.data(), packet.size());
         TraceWatchedTcpPacket(packet.data(), packet.size(), "TUN->中转");
         if (has_desc) {
             LogInfo("UDP TUN->中转 " + desc);
@@ -3988,6 +4081,42 @@ void LinuxPacketTunnelClient::MaybeLogDirectRouteFallback(const std::string& pee
 
     peer_route_debug_log_tick_[peer_virtual_ip] = tick;
     LogInfo("UDP直连回退: 原因=" + reason + " 对端=" + detail);
+}
+
+void LinuxPacketTunnelClient::MaybeLogIcmpPacket(const std::string& direction,
+                                                 const uint8_t* packet,
+                                                 size_t packet_len) {
+    size_t ip_header_len = 0;
+    uint8_t icmp_type = 0;
+    uint8_t icmp_code = 0;
+    if (!TryParseLinuxIcmpPacket(packet,
+                                 packet_len,
+                                 &ip_header_len,
+                                 &icmp_type,
+                                 &icmp_code)) {
+        return;
+    }
+
+    const unsigned long long tick = now_ms();
+    const std::string flow_key =
+        direction + "|" +
+        LinuxIpv4ToString(packet + 12) + ">" +
+        LinuxIpv4ToString(packet + 16) + "|" +
+        std::to_string(static_cast<int>(icmp_type)) + ":" +
+        std::to_string(static_cast<int>(icmp_code));
+    std::map<std::string, unsigned long long>::iterator it =
+        icmp_debug_log_tick_.find(flow_key);
+    if (it != icmp_debug_log_tick_.end() &&
+        tick >= it->second &&
+        (tick - it->second) < static_cast<unsigned long long>(kPeerRouteDebugLogIntervalMs)) {
+        return;
+    }
+
+    icmp_debug_log_tick_[flow_key] = tick;
+    const std::string summary = BuildLinuxIcmpPacketSummary(packet, packet_len);
+    if (!summary.empty()) {
+        LogInfo(direction + " " + summary);
+    }
 }
 
 void LinuxPacketTunnelClient::HeartbeatLoop() {
