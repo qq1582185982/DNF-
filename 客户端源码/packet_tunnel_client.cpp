@@ -3241,11 +3241,15 @@ void PacketTunnelClient::MarkNetworkActivity() {
 }
 
 bool PacketTunnelClient::ReceiveHandshakeAck(std::wstring* error_msg) {
-    uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
+    std::vector<uint8_t> ack_datagram(65535, 0);
     while (!stop_requested_) {
         sockaddr_storage source_addr = {};
         int source_addr_len = 0;
-        int received = RecvDatagramFrom(ack, sizeof(ack), &source_addr, &source_addr_len, error_msg);
+        int received = RecvDatagramFrom(ack_datagram.data(),
+                                        ack_datagram.size(),
+                                        &source_addr,
+                                        &source_addr_len,
+                                        error_msg);
         if (received < 0) {
             return false;
         }
@@ -3255,13 +3259,15 @@ bool PacketTunnelClient::ReceiveHandshakeAck(std::wstring* error_msg) {
         if (!IsServerEndpoint(source_addr, source_addr_len)) {
             continue;
         }
-        if (received != (int)sizeof(ack)) {
+        if (received < (int)packet_tunnel::kHandshakeAckSize) {
             if (error_msg != NULL) {
                 *error_msg = L"IP Tunnel握手确认长度不匹配";
             }
             return false;
         }
 
+        uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
+        memcpy(ack, ack_datagram.data(), sizeof(ack));
         if (ack[0] != packet_tunnel::kProtocolVersion) {
             if (error_msg != NULL) {
                 *error_msg = L"IP Tunnel握手确认版本不匹配";

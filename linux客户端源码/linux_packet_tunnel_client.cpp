@@ -2203,11 +2203,15 @@ bool LinuxPacketTunnelClient::SendUdpDirectCandidateAdvertise(
 }
 
 bool LinuxPacketTunnelClient::ReceiveHandshakeAck(std::string* error) {
-    uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
+    std::vector<uint8_t> ack_datagram(65535, 0);
     while (!stop_requested_) {
         sockaddr_storage source_addr = {};
         socklen_t source_addr_len = sizeof(source_addr);
-        int received = RecvDatagramFrom(ack, sizeof(ack), &source_addr, &source_addr_len, error);
+        int received = RecvDatagramFrom(ack_datagram.data(),
+                                        ack_datagram.size(),
+                                        &source_addr,
+                                        &source_addr_len,
+                                        error);
         if (received < 0) {
             return false;
         }
@@ -2217,13 +2221,15 @@ bool LinuxPacketTunnelClient::ReceiveHandshakeAck(std::string* error) {
         if (!IsServerEndpoint(source_addr, source_addr_len)) {
             continue;
         }
-        if (received != static_cast<int>(sizeof(ack))) {
+        if (received < static_cast<int>(packet_tunnel::kHandshakeAckSize)) {
             if (error != NULL) {
                 *error = "握手确认长度不匹配";
             }
             return false;
         }
 
+        uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
+        memcpy(ack, ack_datagram.data(), sizeof(ack));
         if (ack[0] != packet_tunnel::kProtocolVersion) {
             if (error != NULL) {
                 *error = "握手确认协议版本不匹配";
