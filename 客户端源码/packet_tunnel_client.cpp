@@ -499,6 +499,14 @@ bool IsDirectPathFresh(const PeerRouteStatus& route, unsigned long long now_tick
         (now_tick - route.last_direct_data_ms) <= kPeerDirectDataTimeoutMs;
 }
 
+bool ShouldSuppressRelayIpv4PacketWhenDirectActive(const uint8_t* packet,
+                                                   size_t packet_len) {
+    return packet != NULL &&
+           packet_len >= 20 &&
+           ((packet[0] >> 4) & 0x0F) == 4 &&
+           packet[9] == IPPROTO_UDP;
+}
+
 std::wstring BuildSocketError(const wchar_t* prefix, int error_code) {
     std::wstringstream stream;
     stream << prefix << L" (WSA=" << error_code << L")";
@@ -4255,6 +4263,7 @@ void PacketTunnelClient::SocketReadLoop() {
             }
             if (!from_known_peer &&
                 has_inner_ipv4 &&
+                ShouldSuppressRelayIpv4PacketWhenDirectActive(payload, payload_len) &&
                 has_fresh_direct_route(inner_src_virtual_ip)) {
                 continue;
             }
@@ -4455,7 +4464,7 @@ void PacketTunnelClient::WintunReadLoop() {
         if (debug_enabled && !is_udp && !is_tcp && !dst_virtual_ip.empty()) {
             MaybeLogWintunTargetIntent(dst_virtual_ip, 0, route_desc);
         }
-        if (is_udp && peer_direct_allowed_ && !dst_virtual_ip.empty()) {
+        if (!is_tcp && peer_direct_allowed_ && !dst_virtual_ip.empty()) {
             const std::string original_dst_virtual_ip = dst_virtual_ip;
             std::string target_peer_virtual_ip = dst_virtual_ip;
             std::string target_resolution = "直连IP";
@@ -4568,6 +4577,11 @@ void PacketTunnelClient::WintunReadLoop() {
                                 TraceWatchedTcpPacket(direct_packet_view->data(),
                                                       direct_packet_view->size(),
                                                       "Wintun->对端");
+                                if (!is_udp) {
+                                    MaybeLogIcmpPacket("ICMP Wintun->对端",
+                                                       direct_packet_view->data(),
+                                                       direct_packet_view->size());
+                                }
                                 PT_DEBUG(inner_proto_name + " Wintun->对端 " + direct_route_desc);
                             }
                             continue;

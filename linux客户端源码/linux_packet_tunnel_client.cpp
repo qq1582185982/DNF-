@@ -293,6 +293,14 @@ bool IsDirectPathFresh(const LinuxPeerRouteStatus& route, unsigned long long now
         (now_tick - route.last_direct_data_ms) <= kPeerDirectDataTimeoutMs;
 }
 
+bool ShouldSuppressRelayIpv4PacketWhenDirectActive(const uint8_t* packet,
+                                                   size_t packet_len) {
+    return packet != NULL &&
+           packet_len >= 20 &&
+           ((packet[0] >> 4) & 0x0F) == 4 &&
+           packet[9] == IPPROTO_UDP;
+}
+
 unsigned long long now_ms() {
     return static_cast<unsigned long long>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2519,7 +2527,8 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
                 if (!has_fresh_direct_route(peer_virtual_ip)) {
                     continue;
                 }
-            } else if (payload_len >= 20 && has_fresh_direct_route(LinuxIpv4ToString(payload + 12))) {
+            } else if (ShouldSuppressRelayIpv4PacketWhenDirectActive(payload, payload_len) &&
+                       has_fresh_direct_route(LinuxIpv4ToString(payload + 12))) {
                 continue;
             }
             const bool should_log_focused_udp = IsFocusedLinuxGameUdpPacket(payload, payload_len);
@@ -3855,7 +3864,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
         if (is_tcp) {
             TryParseLinuxTcpPorts(packet.data(), packet.size(), &src_port, &dst_port);
         }
-        if (is_udp && !dst_virtual_ip.empty()) {
+        if (!is_tcp && !dst_virtual_ip.empty()) {
             UdpEndpoint peer_endpoint;
             bool direct_path_fresh = false;
             bool active_direct = false;
@@ -3881,6 +3890,9 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                             packet.data(),
                                             packet.size(),
                                             NULL)) {
+                        if (!is_udp) {
+                            MaybeLogIcmpPacket("ICMP TUN->对端", packet.data(), packet.size());
+                        }
                         LogInfo(inner_proto_name + " TUN->对端 " + route_desc);
                         TraceWatchedTcpPacket(packet.data(), packet.size(), "TUN->对端");
                         continue;
