@@ -4486,7 +4486,7 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                 kPeerDirectReadyTimeoutMs,
                 kPeerCooldownTimeoutMs);
             for (size_t i = 0; i < expired.size(); ++i) {
-                LogDebug("对等端控制 状态切换: 对端=" + expired[i].peer_virtual_ip +
+                LogInfo("对等端控制 状态切换: 对端=" + expired[i].peer_virtual_ip +
                         " 状态=" + LinuxPeerRouteStateName(expired[i].state) +
                         " 版本=" + std::to_string(expired[i].endpoint_version));
             }

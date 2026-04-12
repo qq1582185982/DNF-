@@ -4036,16 +4036,13 @@ void PacketTunnelClient::SocketReadLoop() {
                         probe_type == kPeerDirectProbeRequest
                             ? "request"
                             : (probe_type == kPeerDirectProbeResponse ? "response" : "unknown");
-                    if (debug_enabled) {
-                        PT_DEBUG("学习直连端点 对端=" +
-                                 peer_virtual_ip +
-                                 " 原因=" + learned_direct_reason +
-                                 " 探测类型=" + probe_kind +
-                                 " 来源虚拟IP=" + inferred_peer_virtual_ip +
-                                 " 目标虚拟IP=" + inferred_local_virtual_ip +
-                                 " 来源=" + SockaddrToString(source_addr, source_addr_len) +
-                                 (learned_direct_endpoint_changed ? " 已变化=是" : " 已变化=否"));
-                    }
+                    PacketTunnelInfoLog("通过直连探测学习到对端地址: 对端=" +
+                                        peer_virtual_ip +
+                                        " 原因=" + learned_direct_reason +
+                                        " 探测类型=" + probe_kind +
+                                        " 来源=" + SockaddrToString(source_addr, source_addr_len) +
+                                        (learned_direct_endpoint_changed ? " 已变化=是"
+                                                                         : " 已变化=否"));
                 }
             }
             if (!from_server && !from_known_peer) {
@@ -5539,10 +5536,10 @@ void PacketTunnelClient::HeartbeatLoop() {
                 kPeerDirectReadyTimeoutMs,
                 kPeerCooldownTimeoutMs);
             for (size_t i = 0; i < expired.size(); ++i) {
-                PacketTunnelDebugLog("对等端控制 状态切换: 对端=" +
-                                     expired[i].peer_virtual_ip +
-                                     " 状态=" + PeerRouteStateName(expired[i].state) +
-                                     " 版本=" + std::to_string(expired[i].endpoint_version));
+                PacketTunnelInfoLog("对等端控制 状态切换: 对端=" +
+                                    expired[i].peer_virtual_ip +
+                                    " 状态=" + PeerRouteStateName(expired[i].state) +
+                                    " 版本=" + std::to_string(expired[i].endpoint_version));
             }
 
             std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
