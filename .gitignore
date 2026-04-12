@@ -43,3 +43,11 @@ IPv6域名支持_更新日志.md
 服务器源码/nul
 服务器源码/README_HTTP_API.md
 shared/ip_lease_protocol.h
+
+# Generated artifacts
+.idea/
+客户端源码/embedded_wintun.h
+客户端源码/*.md5
+linux客户端源码/dnf-linux-client
+linux客户端源码/dnf-linux-client-static-test
+服务器源码/dnf-tunnel-server
