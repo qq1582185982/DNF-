@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <arpa/inet.h>
+#include <cctype>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <random>
@@ -12,6 +14,50 @@
 std::atomic<bool> g_linux_client_stop(false);
 
 namespace {
+
+std::string DetectInitialLogLevel();
+
+std::string g_current_log_level = DetectInitialLogLevel();
+
+std::string NormalizeLogLevel(std::string level) {
+    for (size_t i = 0; i < level.size(); ++i) {
+        level[i] = static_cast<char>(toupper(static_cast<unsigned char>(level[i])));
+    }
+    if (level == "DEBUG" || level == "INFO" || level == "WARN" || level == "ERROR") {
+        return level;
+    }
+    return "INFO";
+}
+
+std::string DetectInitialLogLevel() {
+    const char* linux_level = getenv("DNF_LINUX_CLIENT_LOG_LEVEL");
+    if (linux_level != NULL && linux_level[0] != '\0') {
+        return NormalizeLogLevel(linux_level);
+    }
+
+    const char* shared_level = getenv("DNF_PROXY_LOG_LEVEL");
+    if (shared_level != NULL && shared_level[0] != '\0') {
+        return NormalizeLogLevel(shared_level);
+    }
+
+    return "INFO";
+}
+
+bool ShouldLog(const std::string& level) {
+    int level_priority = 0;
+    if (level == "DEBUG") level_priority = 0;
+    else if (level == "INFO") level_priority = 1;
+    else if (level == "WARN") level_priority = 2;
+    else if (level == "ERROR") level_priority = 3;
+
+    int current_priority = 1;
+    if (g_current_log_level == "DEBUG") current_priority = 0;
+    else if (g_current_log_level == "INFO") current_priority = 1;
+    else if (g_current_log_level == "WARN") current_priority = 2;
+    else if (g_current_log_level == "ERROR") current_priority = 3;
+
+    return level_priority >= current_priority;
+}
 
 std::string ExtractRawJsonValue(const std::string& json, const std::string& key) {
     const std::string search = "\"" + key + "\"";
@@ -58,6 +104,18 @@ std::string ExtractRawJsonValue(const std::string& json, const std::string& key)
 
 }  // namespace
 
+void SetLogLevel(const std::string& level) {
+    g_current_log_level = NormalizeLogLevel(level);
+}
+
+std::string GetLogLevel() {
+    return g_current_log_level;
+}
+
+bool IsDebugLogEnabled() {
+    return g_current_log_level == "DEBUG";
+}
+
 std::string NowString() {
     const std::chrono::system_clock::time_point now = std::chrono::system_clock::now();
     const std::chrono::milliseconds epoch_ms =
@@ -76,15 +134,31 @@ std::string NowString() {
     return stream.str();
 }
 
+void LogDebug(const std::string& message) {
+    if (!ShouldLog("DEBUG")) {
+        return;
+    }
+    std::cout << NowString() << " [调试] " << message << std::endl;
+}
+
 void LogInfo(const std::string& message) {
+    if (!ShouldLog("INFO")) {
+        return;
+    }
     std::cout << NowString() << " [信息] " << message << std::endl;
 }
 
 void LogWarn(const std::string& message) {
+    if (!ShouldLog("WARN")) {
+        return;
+    }
     std::cout << NowString() << " [警告] " << message << std::endl;
 }
 
 void LogError(const std::string& message) {
+    if (!ShouldLog("ERROR")) {
+        return;
+    }
     std::cerr << NowString() << " [错误] " << message << std::endl;
 }
 

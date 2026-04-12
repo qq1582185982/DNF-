@@ -1396,7 +1396,7 @@ void LinuxPacketTunnelClient::MarkWatchedTcpTunRead(const uint8_t* packet,
         std::ostringstream flow_ss;
         flow_ss << trace.client_ip << ":" << trace.client_port
                 << " -> " << trace.server_ip << ":" << trace.server_port;
-        LogInfo("TCP业务跟踪 TUN读取阻塞 流=" + flow_ss.str() +
+        LogDebug("TCP业务跟踪 TUN读取阻塞 流=" + flow_ss.str() +
                 " 阻塞=" + std::to_string(read_wait_ms) + "ms" +
                 " 字节数=" + std::to_string(info.payload_len));
     }
@@ -1414,7 +1414,7 @@ void LinuxPacketTunnelClient::MarkWatchedTcpTunRead(const uint8_t* packet,
     std::ostringstream flow_ss;
     flow_ss << trace.client_ip << ":" << trace.client_port
             << " -> " << trace.server_ip << ":" << trace.server_port;
-    LogInfo("TCP业务跟踪 服务端发包等待 流=" + flow_ss.str() +
+    LogDebug("TCP业务跟踪 服务端发包等待 流=" + flow_ss.str() +
             " 来源=tun-read" +
             " 等待=" + std::to_string(emit_wait) + "ms" +
             " 字节数=" + std::to_string(info.payload_len));
@@ -1451,14 +1451,14 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
 
     if (info.from_client && info.syn && !info.ack && trace.syn_ms == 0) {
         trace.syn_ms = tick;
-        LogInfo("TCP业务跟踪 SYN 流=" + flow +
+        LogDebug("TCP业务跟踪 SYN 流=" + flow +
                 " 来源=" + origin +
                 " 端口=" + std::to_string(trace.server_port));
     }
 
     if (!info.from_client && info.syn && info.ack && trace.synack_ms == 0) {
         trace.synack_ms = tick;
-        LogInfo("TCP业务跟踪 SYNACK 流=" + flow +
+        LogDebug("TCP业务跟踪 SYNACK 流=" + flow +
                 " 来源=" + origin +
                 " 自SYN起=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms");
     }
@@ -1472,7 +1472,7 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
         trace.synack_ms != 0 &&
         trace.established_ms == 0) {
         trace.established_ms = tick;
-        LogInfo("TCP业务跟踪 已建立 流=" + flow +
+        LogDebug("TCP业务跟踪 已建立 流=" + flow +
                 " 来源=" + origin +
                 " 自SYN起=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms" +
                 " 自SYNACK起=" + LinuxFormatElapsedMs(trace.synack_ms, tick) + "ms");
@@ -1489,7 +1489,7 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
             tick >= trace.last_server_payload_ms) {
             const unsigned long long ack_delay = tick - trace.last_server_payload_ms;
             if (ack_delay >= 80) {
-                LogInfo("TCP业务跟踪 客户端确认延迟 流=" + flow +
+                LogDebug("TCP业务跟踪 客户端确认延迟 流=" + flow +
                         " 来源=" + origin +
                         " 延迟=" + std::to_string(ack_delay) + "ms");
             }
@@ -1504,7 +1504,7 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
             trace.pending_request_ms = tick;
             if (trace.first_client_payload_ms == 0) {
                 trace.first_client_payload_ms = tick;
-                LogInfo("TCP业务跟踪 客户端首个负载 流=" + flow +
+                LogDebug("TCP业务跟踪 客户端首个负载 流=" + flow +
                         " 来源=" + origin +
                         " 字节数=" + std::to_string(info.payload_len) +
                         " 自SYN起=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms" +
@@ -1517,7 +1517,7 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
                 tick >= trace.pending_server_tun_read_ms) {
                 const unsigned long long send_lag = tick - trace.pending_server_tun_read_ms;
                 if (send_lag >= 20) {
-                    LogInfo("TCP业务跟踪 服务端发送滞后 流=" + flow +
+                    LogDebug("TCP业务跟踪 服务端发送滞后 流=" + flow +
                             " 来源=" + origin +
                             " lag=" + std::to_string(send_lag) + "ms" +
                             " 字节数=" + std::to_string(info.payload_len));
@@ -1526,7 +1526,7 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
             }
             if (trace.first_server_payload_ms == 0) {
                 trace.first_server_payload_ms = tick;
-                LogInfo("TCP业务跟踪 服务端首个负载 流=" + flow +
+                LogDebug("TCP业务跟踪 服务端首个负载 流=" + flow +
                         " 来源=" + origin +
                         " 字节数=" + std::to_string(info.payload_len) +
                         " 自SYN起=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms" +
@@ -1535,7 +1535,7 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
             } else if (trace.pending_request_ms != 0 &&
                        tick >= trace.pending_request_ms &&
                        (tick - trace.pending_request_ms) >= kWatchedTcpServerWaitLogMs) {
-                LogInfo("TCP业务跟踪 等待服务端回复 流=" + flow +
+                LogDebug("TCP业务跟踪 等待服务端回复 流=" + flow +
                         " 来源=" + origin +
                         " 等待=" + std::to_string(tick - trace.pending_request_ms) + "ms" +
                         " 字节数=" + std::to_string(info.payload_len));
@@ -1558,7 +1558,7 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
         if (trace.pending_request_ms != 0 && tick >= trace.pending_request_ms) {
             close_ss << " 挂起等待=" << (tick - trace.pending_request_ms) << "ms";
         }
-        LogInfo(close_ss.str());
+        LogDebug(close_ss.str());
     }
 }
 
@@ -2612,7 +2612,7 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
             }
 
             if (should_log_focused_udp && !udp_desc.empty()) {
-                LogInfo(std::string(from_known_peer ? "UDP 对端->TUN " : "UDP 中转->TUN ") +
+                LogDebug(std::string(from_known_peer ? "UDP 对端->TUN " : "UDP 中转->TUN ") +
                         udp_desc);
             }
             TraceWatchedTcpPacket(payload,
@@ -2642,7 +2642,7 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
         if (offer.peer_virtual_ip.empty() ||
             offer.peer_virtual_ip == virtual_ip_ ||
             offer.endpoint_port == 0) {
-            LogInfo("忽略不可用的TCP对等提议: 对端=" +
+            LogDebug("忽略不可用的TCP对等提议: 对端=" +
                     offer.peer_virtual_ip +
                     " 端点=" + offer.endpoint);
             return true;
@@ -2654,7 +2654,7 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             TcpDirectOffer& stored = tcp_direct_offers_[offer.peer_virtual_ip];
             if (stored.endpoint_version != 0 &&
                 offer.endpoint_version < stored.endpoint_version) {
-                LogInfo("忽略过期的TCP对等提议: 对端=" +
+                LogDebug("忽略过期的TCP对等提议: 对端=" +
                         offer.peer_virtual_ip +
                         " 版本=" + std::to_string(offer.endpoint_version));
                 return true;
@@ -2724,7 +2724,7 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
 
         const unsigned long long tick = now_ms();
         if (changed) {
-            LogInfo("对等端控制 TCP对等提议: 对端=" +
+            LogDebug("对等端控制 TCP对等提议: 对端=" +
                     offer.peer_virtual_ip +
                     " 版本=" + std::to_string(offer.endpoint_version) +
                     " 端点=" + offer.endpoint +
@@ -2736,7 +2736,7 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
         } else if (ShouldLogPeerControlEvent("stable_tcp_offer:" + offer.peer_virtual_ip,
                                              tick,
                                              static_cast<unsigned long long>(kPeerSnapshotLogIntervalMs))) {
-            LogInfo("对等端控制 忽略稳定的TCP对等提议: 对端=" +
+            LogDebug("对等端控制 忽略稳定的TCP对等提议: 对端=" +
                     offer.peer_virtual_ip +
                     " 版本=" + std::to_string(offer.endpoint_version));
         }
@@ -2762,12 +2762,12 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             if (ShouldLogPeerControlEvent("stable_udp_offer:" + offer.peer_virtual_ip,
                                           tick,
                                           static_cast<unsigned long long>(kPeerSnapshotLogIntervalMs))) {
-                LogInfo("对等端控制 忽略稳定的对等提议: 对端=" + offer.peer_virtual_ip +
+                LogDebug("对等端控制 忽略稳定的对等提议: 对端=" + offer.peer_virtual_ip +
                         " 版本=" + std::to_string(offer.endpoint_version));
             }
             return true;
         }
-        LogInfo("对等端控制 对等提议: 对端=" + offer.peer_virtual_ip +
+        LogDebug("对等端控制 对等提议: 对端=" + offer.peer_virtual_ip +
                 " 版本=" + std::to_string(offer.endpoint_version) +
                 " 端点=" + offer.endpoint);
         MarkPeerWarmupWindow(offer.peer_virtual_ip);
@@ -2781,7 +2781,7 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                                                         offer.endpoint_version,
                                                         nonce);
             }
-            LogInfo("对等端控制 发送对等问候: 对端=" + offer.peer_virtual_ip +
+            LogDebug("对等端控制 发送对等问候: 对端=" + offer.peer_virtual_ip +
                     " 版本=" + std::to_string(offer.endpoint_version) +
                     " 随机数=" + std::to_string(nonce));
         } else {
@@ -2809,7 +2809,7 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                 if (!peer_link_manager_->TryPromotePeerDirectReady(signal.peer_virtual_ip,
                                                                    signal.endpoint_version,
                                                                    signal.nonce)) {
-                    LogInfo("对等端控制 忽略非预期的对等确认: 对端=" + signal.peer_virtual_ip +
+                    LogDebug("对等端控制 忽略非预期的对等确认: 对端=" + signal.peer_virtual_ip +
                             " 版本=" + std::to_string(signal.endpoint_version) +
                             " 随机数=" + std::to_string(signal.nonce));
                     return true;
@@ -2819,7 +2819,7 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             }
         }
 
-        LogInfo("对等端控制 " + LinuxFrameName(frame_type) +
+        LogDebug("对等端控制 " + LinuxFrameName(frame_type) +
                 ": 对端=" + signal.peer_virtual_ip +
                 " 版本=" + std::to_string(signal.endpoint_version) +
                 " 随机数=" + std::to_string(signal.nonce));
@@ -2828,7 +2828,7 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                                     signal.peer_virtual_ip,
                                     signal.endpoint_version,
                                     signal.nonce)) {
-                LogInfo("对等端控制 发送对等确认: 对端=" + signal.peer_virtual_ip +
+                LogDebug("对等端控制 发送对等确认: 对端=" + signal.peer_virtual_ip +
                         " 版本=" + std::to_string(signal.endpoint_version) +
                         " 随机数=" + std::to_string(signal.nonce));
             } else {
@@ -3296,7 +3296,7 @@ void LinuxPacketTunnelClient::TcpSocketReadLoop() {
             continue;
         }
         if (frame_type != packet_tunnel::kFrameIpv4Packet || tun_manager_ == NULL) {
-            LogInfo("忽略TCP中转载体帧: 类型=" + std::to_string(frame_type) +
+            LogDebug("忽略TCP中转载体帧: 类型=" + std::to_string(frame_type) +
                     " 长度=" + std::to_string(payload.size()));
             continue;
         }
@@ -3473,7 +3473,7 @@ void LinuxPacketTunnelClient::TcpDirectAcceptLoop() {
         connection->read_thread =
             std::thread(&LinuxPacketTunnelClient::TcpDirectReadLoop, this, connection, true);
         connection->read_thread.detach();
-        LogInfo("已接受TCP直连接入，来源=" +
+        LogDebug("已接受TCP直连接入，来源=" +
                 LinuxSockaddrToString(peer_addr, peer_addr_len));
     }
 }
@@ -3499,7 +3499,7 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
             open_frame_type != packet_tunnel::kFrameTcpDirectOpen ||
             open_payload.size() != packet_tunnel::kTcpDirectOpenPayloadSize) {
             if (!stop_requested_) {
-                LogInfo("TCP直连接入打开失败: " + open_error);
+                LogDebug("TCP直连接入打开失败: " + open_error);
             }
             CloseFdQuiet(&connection->sock);
             connection->active = false;
@@ -3511,7 +3511,7 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
         if (src_virtual_ip.empty() ||
             src_virtual_ip == virtual_ip_ ||
             dst_virtual_ip != virtual_ip_) {
-            LogInfo("拒绝TCP直连接入，来源=" +
+            LogDebug("拒绝TCP直连接入，来源=" +
                     src_virtual_ip +
                     " 目标=" + dst_virtual_ip);
             CloseFdQuiet(&connection->sock);
@@ -3530,7 +3530,7 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
         std::string error;
         if (!RecvFrameFromSocket(connection->sock, &frame_type, &payload, &error)) {
             if (!stop_requested_ && !error.empty()) {
-                LogInfo("TCP直连读取结束，对端=" +
+                LogDebug("TCP直连读取结束，对端=" +
                         (peer_virtual_ip.empty() ? std::string("?") : peer_virtual_ip) +
                         " 原因=" + error);
             }
@@ -3556,7 +3556,7 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
         if (frame_type != packet_tunnel::kFrameIpv4Packet ||
             payload.size() < 20 ||
             (((payload[0] >> 4) & 0x0F) != 4)) {
-            LogInfo("忽略TCP直连帧，类型=" +
+            LogDebug("忽略TCP直连帧，类型=" +
                     LinuxFrameName(frame_type) +
                     " 长度=" + std::to_string(payload.size()));
             continue;
@@ -3564,7 +3564,7 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
 
         const std::string inner_src_virtual_ip = LinuxIpv4ToString(payload.data() + 12);
         if (!peer_virtual_ip.empty() && inner_src_virtual_ip != peer_virtual_ip) {
-            LogInfo("忽略源地址不匹配的TCP直连包，对端=" +
+            LogDebug("忽略源地址不匹配的TCP直连包，对端=" +
                     peer_virtual_ip +
                     " inner_来源=" + inner_src_virtual_ip);
             continue;
@@ -3959,7 +3959,7 @@ void LinuxPacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_vir
                                            kTcpDirectConnectTimeoutMs,
                                            &connect_error)) {
             if (!stop_requested_) {
-                LogInfo("TCP直连候选连接失败，对端=" + peer_virtual_ip +
+                LogDebug("TCP直连候选连接失败，对端=" + peer_virtual_ip +
                         " 端点=" + LinuxSockaddrToString(peer_addr, peer_addr_len) +
                         " 错误码=" + std::to_string(connect_error));
             }
@@ -4167,7 +4167,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                             direct_packet_view->data(),
                                             direct_packet_view->size(),
                                             NULL)) {
-                        LogInfo(inner_proto_name + " TUN->对端 " + direct_route_desc);
+                        LogDebug(inner_proto_name + " TUN->对端 " + direct_route_desc);
                         TraceWatchedTcpPacket(packet.data(), packet.size(), "tun->peer");
                         continue;
                     }
@@ -4185,7 +4185,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                     LogWarn(inner_proto_name + " 激活直连发送失败，回退到中转 " +
                             direct_route_desc);
                     if (state_changed && failed_status.state == LinuxPeerRouteState::Cooldown) {
-                        LogInfo("UDP直连进入冷却: 对端=" +
+                        LogDebug("UDP直连进入冷却: 对端=" +
                                 failed_status.peer_virtual_ip);
                     }
                 } else if (direct_flow_decision.try_udp_probe) {
@@ -4211,7 +4211,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                                 probe_packet.size(),
                                                 NULL)) {
                             peer_probe_send_tick_[target_peer_virtual_ip] = tick;
-                            LogInfo(inner_proto_name + " 直连探测请求 " + direct_route_desc);
+                            LogDebug(inner_proto_name + " 直连探测请求 " + direct_route_desc);
                         } else {
                             LinuxPeerRouteStatus failed_status = {};
                             const bool state_changed =
@@ -4225,12 +4225,12 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                         " active direct probe failed, fallback to relay " +
                                         direct_route_desc);
                             } else {
-                                LogInfo(inner_proto_name +
+                                LogDebug(inner_proto_name +
                                         " 直连探测发送失败，继续以中转为主 " +
                                         direct_route_desc);
                             }
                             if (state_changed && failed_status.state == LinuxPeerRouteState::Cooldown) {
-                                LogInfo("UDP直连进入冷却: 对端=" +
+                                LogDebug("UDP直连进入冷却: 对端=" +
                                         failed_status.peer_virtual_ip);
                             }
                         }
@@ -4259,7 +4259,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
 
         if (flow_decision.try_tcp_direct_now &&
             TrySendTcpDirectPacket(dst_virtual_ip, packet.data(), packet.size())) {
-            LogInfo("TCP TUN->TCP对端 目标=" + dst_virtual_ip + ":" +
+            LogDebug("TCP TUN->TCP对端 目标=" + dst_virtual_ip + ":" +
                     std::to_string(dst_port) +
                     " 长度=" + std::to_string(packet.size()));
             TraceWatchedTcpPacket(packet.data(), packet.size(), "tun->tcp-peer");
@@ -4329,7 +4329,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                                        relay_datagram.size(),
                                                        NULL);
                 if (relay_batch_frames > 1) {
-                    LogInfo("TCP TUN->中转 批量帧数=" +
+                    LogDebug("TCP TUN->中转 批量帧数=" +
                             std::to_string(relay_batch_frames) +
                             " 字节数=" + std::to_string(relay_datagram.size()));
                 }
@@ -4347,7 +4347,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
 
         TraceWatchedTcpPacket(packet.data(), packet.size(), "tun->tunnel");
         if (has_desc) {
-            LogInfo("UDP TUN->中转 " + desc);
+            LogDebug("UDP TUN->中转 " + desc);
         }
     }
 
@@ -4376,7 +4376,7 @@ void LinuxPacketTunnelClient::MaybeLogDirectRouteFallback(const std::string& pee
     }
 
     peer_route_debug_log_tick_[peer_virtual_ip] = tick;
-    LogInfo("UDP直连回退: 原因=" + reason + " 对端=" + detail);
+    LogDebug("UDP直连回退: 原因=" + reason + " 对端=" + detail);
 }
 
 void LinuxPacketTunnelClient::MarkPeerBusinessActivity(const std::string& peer_virtual_ip) {
@@ -4486,7 +4486,7 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                 kPeerDirectReadyTimeoutMs,
                 kPeerCooldownTimeoutMs);
             for (size_t i = 0; i < expired.size(); ++i) {
-                LogInfo("对等端控制 状态切换: 对端=" + expired[i].peer_virtual_ip +
+                LogDebug("对等端控制 状态切换: 对端=" + expired[i].peer_virtual_ip +
                         " 状态=" + LinuxPeerRouteStateName(expired[i].state) +
                         " 版本=" + std::to_string(expired[i].endpoint_version));
             }
@@ -4496,7 +4496,7 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                 (last_peer_snapshot_log_ms == 0 ||
                  current_ms < last_peer_snapshot_log_ms ||
                  (current_ms - last_peer_snapshot_log_ms) >= kPeerSnapshotLogIntervalMs)) {
-                LogInfo("对等端控制 快照: " +
+                LogDebug("对等端控制 快照: " +
                         BuildLinuxPeerRouteSnapshotSummary(peers, current_ms));
                 last_peer_snapshot_log_ms = current_ms;
             }
@@ -4538,7 +4538,7 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                                                     probe_packet.size(),
                                                     NULL)) {
                                 peer_probe_send_tick_[peers[i].peer_virtual_ip] = current_ms;
-                                LogInfo("对等端控制 主动直连探测: 对端=" +
+                                LogDebug("对等端控制 主动直连探测: 对端=" +
                                         peers[i].peer_virtual_ip +
                                         " 状态=" + LinuxPeerRouteStateName(peers[i].state) +
                                         " 激活=" + (active_direct ? std::string("是")
@@ -4551,11 +4551,11 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                                         peers[i].endpoint_version,
                                         active_direct,
                                         &failed_status);
-                                LogInfo("对等端控制 主动直连探测失败: 对端=" +
+                                LogDebug("对等端控制 主动直连探测失败: 对端=" +
                                         peers[i].peer_virtual_ip);
                                 if (state_changed &&
                                     failed_status.state == LinuxPeerRouteState::Cooldown) {
-                                    LogInfo("UDP直连进入冷却: 对端=" +
+                                    LogDebug("UDP直连进入冷却: 对端=" +
                                             failed_status.peer_virtual_ip);
                                 }
                             }
@@ -4584,7 +4584,7 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                                         peers[i].endpoint_version,
                                         nonce)) {
                     peer_keepalive_send_tick_[peers[i].peer_virtual_ip] = current_ms;
-                    LogInfo("对等端控制 发送对等保活: 对端=" + peers[i].peer_virtual_ip +
+                    LogDebug("对等端控制 发送对等保活: 对端=" + peers[i].peer_virtual_ip +
                             " 版本=" + std::to_string(peers[i].endpoint_version) +
                             " 随机数=" + std::to_string(nonce));
                 }

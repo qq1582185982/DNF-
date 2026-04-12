@@ -23,9 +23,13 @@ struct LinuxServerInfo {
 };
 
 std::string NowString();
+void LogDebug(const std::string& message);
 void LogInfo(const std::string& message);
 void LogWarn(const std::string& message);
 void LogError(const std::string& message);
+void SetLogLevel(const std::string& level);
+std::string GetLogLevel();
+bool IsDebugLogEnabled();
 
 std::string GenerateSessionUuid();
 

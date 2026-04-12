@@ -339,6 +339,7 @@ LinuxTunConfig BuildTunConfig(const Options& options,
 }  // namespace
 
 int main(int argc, char** argv) {
+    SetLogLevel(GetLogLevel());
     Options options;
     if (!ParseArgs(argc, argv, &options)) {
         PrintUsage();
@@ -352,6 +353,7 @@ int main(int argc, char** argv) {
     signal(SIGTERM, SignalHandler);
 
     LogInfo("Linux 隧道客户端启动");
+    LogInfo("日志级别=" + GetLogLevel());
     LogInfo("会话UUID=" + options.session_uuid);
     if (!options.config_path.empty()) {
         LogInfo("配置文件=" + options.config_path);
