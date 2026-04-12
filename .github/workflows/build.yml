@@ -120,7 +120,7 @@ jobs:
                 Remove-Item $extractPath -Recurse -Force
               }
 
-              Write-Host "下载 Wintun 运行时，第 $attempt/$maxAttempts 次尝试"
+              Write-Host "Downloading Wintun runtime, attempt $attempt/$maxAttempts"
               Invoke-WebRequest -Uri $url -OutFile $zipPath -TimeoutSec 60
               Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
 
@@ -129,16 +129,16 @@ jobs:
                 Select-Object -First 1 -ExpandProperty FullName
 
               if (-not $dllPath) {
-                throw "在下载归档中未找到 amd64 版本的 wintun.dll"
+                throw "Failed to locate amd64 wintun.dll in downloaded archive"
               }
 
               Copy-Item $dllPath $fallbackDllPath -Force
               $downloadSucceeded = $true
-              Write-Host "已从官方源下载并更新 Wintun 运行时"
+              Write-Host "Downloaded and refreshed Wintun runtime from upstream"
               break
             } catch {
               $lastErrorMessage = $_.Exception.Message
-              Write-Warning "第 $attempt 次下载 Wintun 失败: $lastErrorMessage"
+              Write-Warning "Wintun download attempt $attempt failed: $lastErrorMessage"
               if ($attempt -lt $maxAttempts) {
                 Start-Sleep -Seconds (5 * $attempt)
               }
@@ -147,9 +147,9 @@ jobs:
 
           if (-not $downloadSucceeded) {
             if (Test-Path $fallbackDllPath) {
-              Write-Warning "官方源持续失败，改用仓库内置的 Wintun 运行时: $fallbackDllPath"
+              Write-Warning "Upstream download kept failing, falling back to repository Wintun runtime: $fallbackDllPath"
             } else {
-              throw "官方源持续失败，且仓库内未找到可回退的 wintun.dll。最后错误: $lastErrorMessage"
+              throw "Upstream download kept failing and no repository fallback wintun.dll was found. Last error: $lastErrorMessage"
             }
           }
 
