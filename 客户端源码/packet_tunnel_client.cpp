@@ -71,10 +71,10 @@ const DWORD kMirroredGatewayUdpSignatureTtlMs = 1000;
 const uint16_t kPeerToWintunPacedBusinessTcpPort = 10011;
 const unsigned int kPeerToWintunBusinessTcpPaceUs = 500;
 const int kSocketBufferBytes = 4 * 1024 * 1024;
-const unsigned long long kSlowSocketSendWarnMs = 10;
-const unsigned long long kSlowWintunWriteWarnMs = 10;
-const unsigned long long kSlowPacketProcessWarnMs = 20;
-const unsigned long long kSlowWintunQueueWarnMs = 10;
+const unsigned long long kSlowSocketSendWarnMs = 30;
+const unsigned long long kSlowWintunWriteWarnMs = 30;
+const unsigned long long kSlowPacketProcessWarnMs = 50;
+const unsigned long long kSlowWintunQueueWarnMs = 30;
 const unsigned long long kWatchedTcpFlowIdleCleanupMs = 180000;
 const unsigned long long kWatchedTcpClosedRetentionMs = 10000;
 const unsigned long long kWatchedTcpServerWaitLogMs = 200;
@@ -2684,8 +2684,10 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         return false;
     }
 
-    PacketTunnelInfoLog("中转端点候选: " +
-                        BuildRelayEndpointCandidateSummary(relay_candidates));
+    PacketTunnelInfoLog("中转端点候选已准备，数量=" +
+                        std::to_string(relay_candidates.size()));
+    PacketTunnelDebugLog("中转端点候选: " +
+                         BuildRelayEndpointCandidateSummary(relay_candidates));
 
     auto configure_socket = [&](SOCKET sock, int family) {
         if (family == AF_INET6) {
@@ -2795,8 +2797,9 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         server_endpoint_.addr_len = endpoint_addr_len;
         server_endpoint_.valid = true;
         if (ipv4_direct_test_override) {
-            PacketTunnelInfoLog("已为非公网IPv4中转启用对等直连测试覆盖 " +
-                                SockaddrToString(endpoint_addr, endpoint_addr_len));
+            PacketTunnelInfoLog("已为非公网IPv4中转启用对等直连测试覆盖");
+            PacketTunnelDebugLog("已为非公网IPv4中转启用对等直连测试覆盖 " +
+                                 SockaddrToString(endpoint_addr, endpoint_addr_len));
         } else if (!peer_direct_allowed_) {
             PacketTunnelDebugLog("已禁用对等直连: 中转目标不是公网地址 " +
                                  SockaddrToString(endpoint_addr, endpoint_addr_len));
@@ -2877,8 +2880,9 @@ bool PacketTunnelClient::ConnectTcpSocket(std::wstring* error_msg) {
 
     tcp_sock_ = sock;
     tcp_connected_ = true;
-    PacketTunnelInfoLog("TCP中转载体已连接到 " +
-                        SockaddrToString(server_endpoint_.addr, server_endpoint_.addr_len));
+    PacketTunnelInfoLog("TCP中转载体已连接");
+    PacketTunnelDebugLog("TCP中转载体已连接到 " +
+                         SockaddrToString(server_endpoint_.addr, server_endpoint_.addr_len));
     return true;
 }
 
@@ -4040,9 +4044,15 @@ void PacketTunnelClient::SocketReadLoop() {
                                         peer_virtual_ip +
                                         " 原因=" + learned_direct_reason +
                                         " 探测类型=" + probe_kind +
-                                        " 来源=" + SockaddrToString(source_addr, source_addr_len) +
                                         (learned_direct_endpoint_changed ? " 已变化=是"
                                                                          : " 已变化=否"));
+                    PacketTunnelDebugLog("通过直连探测学习到对端地址详情: 对端=" +
+                                         peer_virtual_ip +
+                                         " 原因=" + learned_direct_reason +
+                                         " 探测类型=" + probe_kind +
+                                         " 来源=" + SockaddrToString(source_addr, source_addr_len) +
+                                         (learned_direct_endpoint_changed ? " 已变化=是"
+                                                                          : " 已变化=否"));
                 }
             }
             if (!from_server && !from_known_peer) {
@@ -5502,9 +5512,12 @@ void PacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_virtual_
             std::thread(&PacketTunnelClient::TcpDirectReadLoop, this, connection, false);
         connection->read_thread.detach();
         PacketTunnelInfoLog("TCP直连已连接 对端=" + peer_virtual_ip +
-                            " 端点=" + SockaddrToString(peer_addr, peer_addr_len) +
                             " 候选=" + std::to_string(candidate_index + 1) +
                             "/" + std::to_string(candidate_count));
+        PacketTunnelDebugLog("TCP直连已连接详情 对端=" + peer_virtual_ip +
+                             " 端点=" + SockaddrToString(peer_addr, peer_addr_len) +
+                             " 候选=" + std::to_string(candidate_index + 1) +
+                             "/" + std::to_string(candidate_count));
         return;
     }
 
@@ -6538,9 +6551,14 @@ bool PacketTunnelClient::SendFrameToEndpoint(const UdpEndpoint& endpoint,
         PacketTunnelWarnLog("发送帧耗时偏长 耗时毫秒=" +
                             std::to_string(send_elapsed) +
                             " 帧=" + PacketTunnelFrameName(frame_type) +
-                            " 端点=" + SockaddrToString(endpoint.addr, endpoint.addr_len) +
                             " 负载长度=" + std::to_string(length) +
                             " 成功=" + (ok ? std::string("是") : std::string("否")));
+        PacketTunnelDebugLog("发送帧耗时偏长详情 耗时毫秒=" +
+                             std::to_string(send_elapsed) +
+                             " 帧=" + PacketTunnelFrameName(frame_type) +
+                             " 端点=" + SockaddrToString(endpoint.addr, endpoint.addr_len) +
+                             " 负载长度=" + std::to_string(length) +
+                             " 成功=" + (ok ? std::string("是") : std::string("否")));
     }
     return ok;
 }
@@ -6585,8 +6603,11 @@ bool PacketTunnelClient::SendDatagramToEndpoint(const UdpEndpoint& endpoint,
 
     PacketTunnelWarnLog("IP Tunnel 发送在短暂阻塞后丢弃 错误=" +
                         std::to_string(last_error) +
-                        " 端点=" + SockaddrToString(endpoint.addr, endpoint.addr_len) +
                         " 长度=" + std::to_string(length));
+    PacketTunnelDebugLog("IP Tunnel 发送在短暂阻塞后丢弃详情 错误=" +
+                         std::to_string(last_error) +
+                         " 端点=" + SockaddrToString(endpoint.addr, endpoint.addr_len) +
+                         " 长度=" + std::to_string(length));
     if (error_msg != NULL) {
         *error_msg = BuildSocketError(L"IP Tunnel send dropped", last_error);
     }
