@@ -1851,7 +1851,7 @@ private:
         }
 
         if (owner_changed) {
-            Logger::debug("[IP Tunnel|" + session->session_uuid + "] 网关UDP端口归属已更新 端口=" +
+            Logger::debug("[数据隧道|" + session->session_uuid + "] 网关UDP端口归属已更新 端口=" +
                           to_string(src_port) + " 归属=" + describe_scoped_virtual_ip(session));
         }
     }
@@ -1873,7 +1873,7 @@ private:
 
         const uint64_t now_ms = monotonic_millis();
         const string port_key = build_scoped_udp_port_key(sender_session->server_key, dst_port);
-        string resolution = "none";
+        string resolution = "未命中";
         shared_ptr<PacketTunnelSession> selected_session;
         size_t candidate_count = 0;
 
@@ -1898,7 +1898,7 @@ private:
                         session_it->second != sender_session &&
                         !is_local_or_server_side_session(session_it->second)) {
                         selected_session = session_it->second;
-                        resolution = "port_owner";
+                        resolution = "端口归属";
                     }
                 }
             }
@@ -1965,7 +1965,7 @@ private:
                                                  dst_port,
                                                  &target_session,
                                                  &resolution)) {
-            Logger::info("[IP Tunnel|" + sender_session->session_uuid +
+            Logger::info("[数据隧道|" + sender_session->session_uuid +
                          "] 丢弃未解析的网关UDP 来源=" +
                          ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
                          " 目标=" + ipv4_be_to_string(original_dst_ip_be) + ":" +
@@ -1978,7 +1978,7 @@ private:
         if (!rewrite_client_bound_udp_destination_ip(&rewritten_packet,
                                                      original_dst_ip_be,
                                                      target_session->virtual_ip_be)) {
-            Logger::warning("[IP Tunnel|" + sender_session->session_uuid +
+            Logger::warning("[数据隧道|" + sender_session->session_uuid +
                             "] 丢弃网关UDP，目的地址改写失败 来源=" +
                             ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
                             " 目标=" + ipv4_be_to_string(original_dst_ip_be) + ":" +
@@ -1987,7 +1987,7 @@ private:
             return true;
         }
 
-        Logger::info("[IP Tunnel|" + sender_session->session_uuid + "] 转发网关UDP 来源=" +
+        Logger::info("[数据隧道|" + sender_session->session_uuid + "] 转发网关UDP 来源=" +
                      ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
                      " 目标=" + ipv4_be_to_string(original_dst_ip_be) + ":" + to_string(dst_port) +
                      " -> 对端=" + describe_scoped_virtual_ip(target_session->server_key,
@@ -2000,7 +2000,7 @@ private:
                                       packet_tunnel::kFrameIpv4Packet,
                                       rewritten_packet.data(),
                                       rewritten_packet.size())) {
-            Logger::warning("[IP Tunnel|" + sender_session->session_uuid +
+            Logger::warning("[数据隧道|" + sender_session->session_uuid +
                             "] 转发改写后的网关UDP失败，目标=" +
                             describe_scoped_virtual_ip(target_session));
             target_session->active = false;
@@ -2035,7 +2035,7 @@ private:
             elapsed_ms = now_ms - session->established_ms;
         }
 
-        Logger::debug("[IP Tunnel|" + session->session_uuid + "] UDP " +
+        Logger::debug("[数据隧道|" + session->session_uuid + "] UDP " +
                       string(client_to_tun ? "客户端->TUN" : "TUN->客户端") +
                       " +" + to_string(elapsed_ms) + "ms 来源=" +
                       ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
@@ -2059,7 +2059,7 @@ private:
             return;
         }
 
-        Logger::info("[IP Tunnel|" + sender_session->session_uuid + "] 转发对等端UDP 来源=" +
+        Logger::info("[数据隧道|" + sender_session->session_uuid + "] 转发对等端UDP 来源=" +
                      ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
                      " 目标=" + ipv4_be_to_string(dst_ip_be) + ":" + to_string(dst_port) +
                      " 长度=" + to_string(payload_len) +
@@ -2081,15 +2081,15 @@ private:
     const char* peer_endpoint_state_name(PeerEndpointState state) {
         switch (state) {
         case PeerEndpointState::Unknown:
-            return "unknown";
+            return "未知";
         case PeerEndpointState::RelayOnly:
-            return "relay_only";
+            return "仅中转";
         case PeerEndpointState::OfferPending:
-            return "offer_pending";
+            return "待发送提议";
         case PeerEndpointState::Active:
-            return "active";
+            return "已激活";
         default:
-            return "unknown";
+            return "未知";
         }
     }
 
@@ -2107,11 +2107,11 @@ private:
                                   IPPoolManager::LeaseRecord* out_record = nullptr,
                                   string* error = nullptr) const {
         if (!session) {
-            if (error) *error = "null session";
+            if (error) *error = "空会话";
             return false;
         }
         if (session->session_uuid.empty()) {
-            if (error) *error = "missing session_uuid";
+            if (error) *error = "缺少会话UUID";
             return false;
         }
 
@@ -2168,7 +2168,7 @@ private:
             kPeerOfferTimeoutMs,
             kPeerActiveTimeoutMs);
         for (size_t i = 0; i < changed.size(); ++i) {
-            Logger::debug("[" + server_name + "|IP Tunnel] 对等协调状态切换 " +
+            Logger::debug("[" + server_name + "|数据隧道] 对等协调状态切换 " +
                           changed[i].peer_virtual_ip +
                           " -> " + peer_endpoint_state_name(changed[i].state) +
                           " 版本=" + to_string(changed[i].endpoint_version));
@@ -2190,12 +2190,12 @@ private:
                         : 0;
                 ss << peers[i].peer_virtual_ip
                    << "[" << peer_endpoint_state_name(peers[i].state)
-                   << " v=" << peers[i].endpoint_version
-                   << " obs=" << observed_age << "ms"
-                   << " state=" << state_age << "ms]";
+                   << " 版本=" << peers[i].endpoint_version
+                   << " 观测=" << observed_age << "ms"
+                   << " 状态持续=" << state_age << "ms]";
             }
-            Logger::debug("[" + server_name + "|IP Tunnel] 对等协调快照: " +
-                          (peers.empty() ? string("none") : ss.str()));
+            Logger::debug("[" + server_name + "|数据隧道] 对等协调快照: " +
+                          (peers.empty() ? string("无") : ss.str()));
         }
     }
 
@@ -2339,8 +2339,8 @@ private:
                 build_scoped_virtual_ip_key(peer_session->server_key, dst_ip_be);
             if (peer_coord_.GetState(sender_scope_key) == PeerEndpointState::Active &&
                 peer_coord_.GetState(target_scope_key) == PeerEndpointState::Active) {
-                Logger::debug("[IP Tunnel|" + sender_session->session_uuid +
-                              "] bypass 转发对等端UDP 来源=" +
+                Logger::debug("[数据隧道|" + sender_session->session_uuid +
+                              "] 跳过转发对等端UDP 来源=" +
                               ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
                               " 目标=" + ipv4_be_to_string(dst_ip_be) + ":" + to_string(dst_port) +
                               " 原因=对等直连已激活");
@@ -2362,7 +2362,7 @@ private:
                                       packet_tunnel::kFrameIpv4Packet,
                                       payload,
                                       payload_len)) {
-            Logger::warning("[IP Tunnel|" + sender_session->session_uuid +
+            Logger::warning("[数据隧道|" + sender_session->session_uuid +
                             "] 转发虚拟对等端数据包失败，目标=" +
                             describe_scoped_virtual_ip(target_session));
             target_session->active = false;
@@ -2526,7 +2526,7 @@ private:
             return;
         }
         if (is_peer_direct_excluded_session(session)) {
-            Logger::debug("[" + server_name + "|IP Tunnel] 跳过对等提议: 会话被排除在对等直连之外 " +
+            Logger::debug("[" + server_name + "|数据隧道] 跳过对等提议: 会话被排除在对等直连之外 " +
                           describe_scoped_virtual_ip(session));
             return;
         }
@@ -2534,7 +2534,7 @@ private:
         vector<PacketTunnelSessionRemoval> expired_sessions =
             cleanup_idle_packet_tunnel_sessions(monotonic_millis());
         for (size_t i = 0; i < expired_sessions.size(); ++i) {
-            Logger::info("[" + server_name + "|IP Tunnel] 丢弃无效的UDP会话: 虚拟IP=" +
+            Logger::info("[" + server_name + "|数据隧道] 丢弃无效的UDP会话: 虚拟IP=" +
                          ipv4_be_to_string(expired_sessions[i].session->virtual_ip_be) +
                          " 端点=" + expired_sessions[i].session->client_str +
                          " 原因=" + expired_sessions[i].reason);
@@ -2550,7 +2550,7 @@ private:
 
         string session_lease_error;
         if (!session_has_active_lease(session, nullptr, &session_lease_error)) {
-            Logger::debug("[" + server_name + "|IP Tunnel] 跳过无有效租约的对等提议: " +
+            Logger::debug("[" + server_name + "|数据隧道] 跳过无有效租约的对等提议: " +
                           local_scope_label + " 原因=" + session_lease_error);
             return;
         }
@@ -2585,7 +2585,7 @@ private:
         const vector<TcpDirectCandidate> local_candidates =
             build_udp_direct_candidates_for_session(session);
         if (local_candidates.empty()) {
-            Logger::warning("[" + server_name + "|IP Tunnel] failed to encode peer offer for " +
+            Logger::warning("[" + server_name + "|数据隧道] 编码UDP对等提议失败，对端=" +
                             local_scope_label);
             return;
         }
@@ -2618,7 +2618,7 @@ private:
                                              local_version,
                                              packet_tunnel::kPeerDisableReasonCooldown);
                 }
-                Logger::debug("[" + server_name + "|IP Tunnel] 跳过仅中转配对的对等提议 " +
+                Logger::debug("[" + server_name + "|数据隧道] 跳过仅中转配对的对等提议 " +
                               local_scope_label + " <-> " + peer_scope_label);
                 continue;
             }
@@ -2626,7 +2626,7 @@ private:
             const vector<TcpDirectCandidate> peer_candidates =
                 build_udp_direct_candidates_for_session(peer);
             if (peer_candidates.empty()) {
-                Logger::warning("[" + server_name + "|IP Tunnel] failed to encode peer offer for " +
+                Logger::warning("[" + server_name + "|数据隧道] 编码UDP对等提议失败，对端=" +
                                 peer_scope_label);
                 continue;
             }
@@ -2660,7 +2660,7 @@ private:
                     ++sent_peer_candidates;
                 }
             }
-            Logger::debug("[" + server_name + "|IP Tunnel] 通告UDP对等提议 " +
+            Logger::debug("[" + server_name + "|数据隧道] 通告UDP对等提议 " +
                           local_scope_label + " <-> " + peer_scope_label +
                           " 本地候选数=" + to_string(sent_local_candidates) +
                           " 对端候选数=" + to_string(sent_peer_candidates));
@@ -2674,10 +2674,10 @@ private:
             }
             ss << snapshot[i].peer_virtual_ip
                << "[" << peer_endpoint_state_name(snapshot[i].state)
-               << " v=" << snapshot[i].endpoint_version << "]";
+               << " 版本=" << snapshot[i].endpoint_version << "]";
         }
-        Logger::debug("[" + server_name + "|IP Tunnel] 对等协调快照: " +
-                      (snapshot.empty() ? string("none") : ss.str()));
+        Logger::debug("[" + server_name + "|数据隧道] 对等协调快照: " +
+                      (snapshot.empty() ? string("无") : ss.str()));
     }
 
     void announce_peer_offers_if_due(const shared_ptr<PacketTunnelSession>& session) {
@@ -2714,7 +2714,7 @@ private:
         const vector<TcpDirectCandidate> local_candidates =
             build_tcp_direct_candidates_for_session(session);
         if (local_candidates.empty()) {
-            Logger::warning("[" + server_name + "|IP Tunnel] failed to encode TCP peer offer for " +
+            Logger::warning("[" + server_name + "|数据隧道] 编码TCP对等提议失败，对端=" +
                             describe_scoped_virtual_ip(session));
             return;
         }
@@ -2781,7 +2781,7 @@ private:
                 }
             }
 
-            Logger::debug("[" + server_name + "|IP Tunnel] 通告TCP对等提议 " +
+            Logger::debug("[" + server_name + "|数据隧道] 通告TCP对等提议 " +
                           local_scope_key + " <-> " + peer_scope_key +
                           " 本地候选数=" + to_string(sent_local_candidates) +
                           " 对端候选数=" + to_string(sent_peer_candidates));
@@ -2795,9 +2795,9 @@ private:
             return false;
         }
         if (is_peer_direct_excluded_session(sender_session)) {
-            Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] suppress " +
+            Logger::debug("[数据隧道|" + sender_session->session_uuid + "] 忽略" +
                           packet_tunnel_frame_name(frame_type) +
-                          " from peer-direct excluded session " +
+                          "，来源会话已排除对等直连 " +
                           describe_scoped_virtual_ip(sender_session));
             return true;
         }
@@ -2819,9 +2819,9 @@ private:
             return false;
         }
         if (is_peer_direct_excluded_session(target_session)) {
-            Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] suppress " +
+            Logger::debug("[数据隧道|" + sender_session->session_uuid + "] 忽略" +
                           packet_tunnel_frame_name(frame_type) +
-                          " to peer-direct excluded target " +
+                          "，目标会话已排除对等直连 " +
                           describe_scoped_virtual_ip(target_session));
             return true;
         }
@@ -2843,9 +2843,9 @@ private:
                                          target_version,
                                          packet_tunnel::kPeerDisableReasonCooldown);
             }
-            Logger::debug("[IP Tunnel|" + sender_session->session_uuid +
-                          "] suppress " + packet_tunnel_frame_name(frame_type) +
-                          " for relay-only pair " + sender_scope_label + " -> " +
+            Logger::debug("[数据隧道|" + sender_session->session_uuid +
+                          "] 忽略" + packet_tunnel_frame_name(frame_type) +
+                          "，当前配对仅允许中转 " + sender_scope_label + " -> " +
                           target_scope_label);
             return true;
         }
@@ -2877,11 +2877,11 @@ private:
                                          PeerEndpointState::OfferPending);
         }
 
-        Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] relay " +
+        Logger::debug("[数据隧道|" + sender_session->session_uuid + "] 转发" +
                       packet_tunnel_frame_name(frame_type) + " " +
                       sender_scope_label + " -> " +
                       target_scope_label +
-                      " nonce=" + to_string(signal.nonce) +
+                      " 随机数=" + to_string(signal.nonce) +
                       " 版本=" + to_string(sender_version));
         {
             ostringstream ss;
@@ -2892,10 +2892,10 @@ private:
                 }
                 ss << snapshot[i].peer_virtual_ip
                    << "[" << peer_endpoint_state_name(snapshot[i].state)
-                   << " v=" << snapshot[i].endpoint_version << "]";
+                   << " 版本=" << snapshot[i].endpoint_version << "]";
             }
-            Logger::debug("[" + server_name + "|IP Tunnel] 对等协调快照: " +
-                          (snapshot.empty() ? string("none") : ss.str()));
+            Logger::debug("[" + server_name + "|数据隧道] 对等协调快照: " +
+                          (snapshot.empty() ? string("无") : ss.str()));
         }
         return true;
     }
@@ -2906,8 +2906,8 @@ private:
             return false;
         }
         if (is_peer_direct_excluded_session(sender_session)) {
-            Logger::debug("[IP Tunnel|" + sender_session->session_uuid +
-                          "] suppress peer_disable from peer-direct excluded session " +
+            Logger::debug("[数据隧道|" + sender_session->session_uuid +
+                          "] 忽略对等端禁用帧，来源会话已排除对等直连 " +
                           describe_scoped_virtual_ip(sender_session));
             return true;
         }
@@ -2929,8 +2929,8 @@ private:
             return false;
         }
         if (is_peer_direct_excluded_session(target_session)) {
-            Logger::debug("[IP Tunnel|" + sender_session->session_uuid +
-                          "] suppress peer_disable to peer-direct excluded target " +
+            Logger::debug("[数据隧道|" + sender_session->session_uuid +
+                          "] 忽略对等端禁用帧，目标会话已排除对等直连 " +
                           describe_scoped_virtual_ip(target_session));
             return true;
         }
@@ -2957,7 +2957,7 @@ private:
         }
 
         peer_coord_.ObservePeerFrame(sender_scope_key, sender_version, PeerEndpointState::RelayOnly);
-        Logger::debug("[IP Tunnel|" + sender_session->session_uuid + "] relay peer_disable " +
+        Logger::debug("[数据隧道|" + sender_session->session_uuid + "] 转发对等端禁用帧 " +
                       sender_scope_label + " -> " +
                       describe_scoped_virtual_ip(target_session) +
                       " 原因=" + to_string((int)disable.reason) +
@@ -2971,10 +2971,10 @@ private:
                 }
                 ss << snapshot[i].peer_virtual_ip
                    << "[" << peer_endpoint_state_name(snapshot[i].state)
-                   << " v=" << snapshot[i].endpoint_version << "]";
+                   << " 版本=" << snapshot[i].endpoint_version << "]";
             }
-            Logger::debug("[" + server_name + "|IP Tunnel] 对等协调快照: " +
-                          (snapshot.empty() ? string("none") : ss.str()));
+            Logger::debug("[" + server_name + "|数据隧道] 对等协调快照: " +
+                          (snapshot.empty() ? string("无") : ss.str()));
         }
         return true;
     }
@@ -2992,7 +2992,7 @@ private:
                 if (!running) {
                     break;
                 }
-                Logger::warning("[" + server_name + "|IP Tunnel] 读取TUN数据包失败: " + error);
+                Logger::warning("[" + server_name + "|数据隧道] 读取TUN数据包失败: " + error);
                 break;
             }
 
@@ -3033,7 +3033,7 @@ private:
             }
 
             if (!session) {
-                Logger::debug("[" + server_name + "|IP Tunnel] no session for dst virtual IP: " +
+                Logger::debug("[" + server_name + "|数据隧道] 未找到目标虚拟IP对应会话: " +
                               (scoped_server_key.empty()
                                    ? ipv4_be_to_string(dst_ip_be)
                                    : describe_scoped_virtual_ip(scoped_server_key, dst_ip_be)) +
@@ -3049,7 +3049,7 @@ private:
                 src_ip_be == gateway_ip_be &&
                 server_virtual_ip_be != gateway_ip_be) {
                 if (rewrite_client_bound_udp_source_ip(&packet, gateway_ip_be, server_virtual_ip_be)) {
-                    Logger::debug("[IP Tunnel|" + session->session_uuid + "] rewrite UDP reply src " +
+                    Logger::debug("[数据隧道|" + session->session_uuid + "] 已改写UDP回包源地址 " +
                                   ipv4_be_to_string(gateway_ip_be) + " -> " +
                                   ipv4_be_to_string(server_virtual_ip_be));
                     src_ip_be = server_virtual_ip_be;
@@ -3068,7 +3068,7 @@ private:
                         maybe_log_udp_flow_info(session, false, src_ip_be, dst_ip_be, src_port, dst_port, packet.size());
                     }
                 }
-                Logger::debug("[IP Tunnel|" + session->session_uuid + "] TUN->客户端 来源=" +
+                Logger::debug("[数据隧道|" + session->session_uuid + "] TUN->客户端 来源=" +
                               ipv4_be_to_string(src_ip_be) + " 目标=" + ipv4_be_to_string(dst_ip_be) +
                               " 协议=" + to_string((int)protocol) + extra +
                               " 长度=" + to_string(packet.size()));
@@ -3331,7 +3331,7 @@ public:
 
         string tun_error;
         if (tun_manager.Setup(tun_config, &tun_error)) {
-            string tun_log = "[" + server_name + "] IP Tunnel TUN已就绪: 接口=" + tun_manager.GetIfName() +
+            string tun_log = "[" + server_name + "] 数据隧道 TUN已就绪: 接口=" + tun_manager.GetIfName() +
                              " 子网=" + tun_config.subnet_cidr + " 网关=" + tun_config.gateway_ip;
             if (!tun_config.server_virtual_ip.empty()) {
                 tun_log += " 服务器IP=" + tun_config.server_virtual_ip;
@@ -3344,7 +3344,7 @@ public:
                 packet_tunnel_udp_loop();
             });
         } else {
-            Logger::warning("[" + server_name + "] IP Tunnel TUN init failed: " + tun_error);
+            Logger::warning("[" + server_name + "] 数据隧道 TUN初始化失败: " + tun_error);
         }
         Logger::info("[" + server_name + "] 服务器启动成功，监听端口: " + to_string(config.listen_port) + " (IPv4/IPv6双栈)");
         Logger::info("[" + server_name + "] 虚拟网段: " + tun_config.subnet_cidr +
@@ -3419,7 +3419,7 @@ private:
                     vector<PacketTunnelSessionRemoval> expired_sessions =
                         cleanup_idle_packet_tunnel_sessions(monotonic_millis());
                     for (size_t i = 0; i < expired_sessions.size(); ++i) {
-                        Logger::info("[" + server_name + "|IP Tunnel] 丢弃无效的UDP会话: 虚拟IP=" +
+                        Logger::info("[" + server_name + "|数据隧道] 丢弃无效的UDP会话: 虚拟IP=" +
                                      ipv4_be_to_string(expired_sessions[i].session->virtual_ip_be) +
                                      " 端点=" + expired_sessions[i].session->client_str +
                                      " 原因=" + expired_sessions[i].reason);
@@ -3427,7 +3427,7 @@ private:
                     vector<PacketTunnelSessionRemoval> expired_tcp_sessions =
                         cleanup_packet_tunnel_tcp_sessions(monotonic_millis());
                     for (size_t i = 0; i < expired_tcp_sessions.size(); ++i) {
-                        Logger::info("[" + server_name + "|IP Tunnel] 丢弃无效的TCP会话: 虚拟IP=" +
+                        Logger::info("[" + server_name + "|数据隧道] 丢弃无效的TCP会话: 虚拟IP=" +
                                      ipv4_be_to_string(expired_tcp_sessions[i].session->virtual_ip_be) +
                                      " 端点=" + expired_tcp_sessions[i].session->client_str +
                                      " 原因=" + expired_tcp_sessions[i].reason);
@@ -3438,7 +3438,7 @@ private:
                     continue;
                 }
                 if (errno != EBADF && errno != EINVAL) {
-                    Logger::warning("[" + server_name + "|IP Tunnel] recvfrom接收失败: " + string(strerror(errno)));
+                    Logger::warning("[" + server_name + "|数据隧道] 接收UDP数据报失败: " + string(strerror(errno)));
                 }
                 break;
             }
@@ -3492,7 +3492,7 @@ private:
                         ? client_id.substr(0, 16)
                         : client_id;
 
-                    Logger::info("[IP Tunnel|" + session_uuid + "] UDP握手: 客户端=" + client_str +
+                    Logger::info("[数据隧道|" + session_uuid + "] UDP握手: 客户端=" + client_str +
                                  ", 版本=" + to_string((int)version) +
                                  ", MTU=" + to_string(mtu) +
                                  ", 虚拟IP=" + virtual_ip +
@@ -3513,7 +3513,7 @@ private:
                             resolved_server_key = active_lease.server_key;
                         }
                     } else {
-                        lease_error = "missing session_uuid";
+                        lease_error = "缺少会话UUID";
                     }
 
                     uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
@@ -3523,28 +3523,28 @@ private:
                         ack[1] = packet_tunnel::kStatusUnsupportedVersion;
                     } else if (!tun_manager.IsActive()) {
                         ack[1] = packet_tunnel::kStatusInvalidRequest;
-                        lease_error = "tun_manager is not active";
+                        lease_error = "TUN管理器未激活";
                     } else if (!has_active_lease) {
                         ack[1] = packet_tunnel::kStatusInvalidRequest;
                     } else if (resolved_server_key.empty()) {
                         ack[1] = packet_tunnel::kStatusInvalidRequest;
-                        lease_error = "lease server_key is missing";
+                        lease_error = "租约缺少服务器标识";
                     } else if (active_lease.virtual_ip != virtual_ip) {
                         ack[1] = packet_tunnel::kStatusInvalidRequest;
                         lease_error = "租约虚拟IP不匹配";
                     } else if (active_lease.client_id.empty()) {
                         ack[1] = packet_tunnel::kStatusInvalidRequest;
-                        lease_error = "lease client_id is missing";
+                        lease_error = "租约缺少客户端ID";
                     } else if (client_id.empty()) {
                         ack[1] = packet_tunnel::kStatusInvalidRequest;
-                        lease_error = "missing client_id in udp handshake";
+                        lease_error = "UDP握手中缺少客户端ID";
                     } else if (active_lease.client_id != client_id) {
                         string expected_client_id = active_lease.client_id.size() > 16
                             ? active_lease.client_id.substr(0, 16)
                             : active_lease.client_id;
                         ack[1] = packet_tunnel::kStatusInvalidRequest;
-                        lease_error = "lease client_id mismatch: expected=" + expected_client_id +
-                                      " actual=" + client_id_short;
+                        lease_error = "租约客户端ID不匹配: 期望=" + expected_client_id +
+                                      " 实际=" + client_id_short;
                     }
                     *(uint16_t*)(ack + 2) = htons(mtu);
                     memcpy(ack + 4, &virtual_ip_be, sizeof(virtual_ip_be));
@@ -3552,12 +3552,12 @@ private:
                     int ack_sent = sendto(udp_fd, (const char*)ack, sizeof(ack), MSG_NOSIGNAL,
                                           (const sockaddr*)&client_addr, client_addr_len);
                     if (ack_sent != (int)sizeof(ack)) {
-                        Logger::warning("[IP Tunnel|" + session_uuid + "] send UDP handshake ack failed");
+                        Logger::warning("[数据隧道|" + session_uuid + "] 发送UDP握手确认失败");
                         continue;
                     }
 
                     if (ack[1] != packet_tunnel::kStatusOk) {
-                        Logger::warning("[IP Tunnel|" + session_uuid + "] UDP握手被拒绝: 状态=" +
+                        Logger::warning("[数据隧道|" + session_uuid + "] UDP握手被拒绝: 状态=" +
                                         to_string((int)ack[1]) +
                                         (lease_error.empty() ? "" : ", 原因=" + lease_error));
                         continue;
@@ -3618,17 +3618,17 @@ private:
                     }
 
                     if (replaced_by_virtual_ip && replaced_by_virtual_ip != session) {
-                        Logger::info("[" + server_name + "|IP Tunnel] 按虚拟IP替换会话: 旧客户端=" +
+                        Logger::info("[" + server_name + "|数据隧道] 按虚拟IP替换会话: 旧客户端=" +
                                      replaced_by_virtual_ip->client_str + " 虚拟IP=" +
                                      describe_scoped_virtual_ip(resolved_server_key, virtual_ip_be));
                     }
                     if (replaced_by_endpoint && replaced_by_endpoint != replaced_by_virtual_ip) {
-                        Logger::info("[" + server_name + "|IP Tunnel] 按端点替换会话: 端点=" +
+                        Logger::info("[" + server_name + "|数据隧道] 按端点替换会话: 端点=" +
                                      client_str + " 旧虚拟IP=" +
                                      ipv4_be_to_string(replaced_by_endpoint->virtual_ip_be));
                     }
 
-                    Logger::info("[IP Tunnel|" + session_uuid + "] UDP 会话已建立: 客户端=" +
+                    Logger::info("[数据隧道|" + session_uuid + "] UDP会话已建立: 客户端=" +
                                  client_str + ", 虚拟IP=" +
                                  describe_scoped_virtual_ip(resolved_server_key, virtual_ip_be) +
                                  ", 直连=" +
@@ -3686,13 +3686,13 @@ private:
                 if (!parse_udp_direct_candidate_advertise_frame(payload,
                                                                 payload_len,
                                                                 &candidate)) {
-                    Logger::warning("[IP Tunnel|" + session->session_uuid + "] 无效的" +
+                    Logger::warning("[数据隧道|" + session->session_uuid + "] 无效的" +
                                     packet_tunnel_frame_name(frame_type) +
                                     " 负载长度=" + to_string(payload_len));
                     continue;
                 }
                 append_unique_tcp_direct_candidate(&session->udp_direct_candidates, candidate);
-                Logger::info("[IP Tunnel|" + session->session_uuid + "] UDP直连候选通告: 虚拟IP=" +
+                Logger::info("[数据隧道|" + session->session_uuid + "] UDP直连候选通告: 虚拟IP=" +
                              describe_scoped_virtual_ip(session->server_key, session->virtual_ip_be) +
                              " 端点=" + tcp_direct_candidate_to_string(candidate) +
                              " 候选数=" + to_string(session->udp_direct_candidates.size()));
@@ -3704,7 +3704,7 @@ private:
                 if (frame_type == packet_tunnel::kFramePeerOffer) {
                     ParsedPeerOfferFrame offer = {};
                     if (!parse_peer_offer_frame(payload, payload_len, &offer)) {
-                        Logger::warning("[IP Tunnel|" + session->session_uuid + "] 无效的" +
+                        Logger::warning("[数据隧道|" + session->session_uuid + "] 无效的" +
                                         packet_tunnel_frame_name(frame_type) +
                                         " 负载长度=" + to_string(payload_len));
                         continue;
@@ -3713,7 +3713,7 @@ private:
                                                                               offer.peer_virtual_ip_be),
                                                  offer.endpoint_version,
                                                  PeerEndpointState::OfferPending);
-                    Logger::debug("[IP Tunnel|" + session->session_uuid + "] 对等端控制 " +
+                    Logger::debug("[数据隧道|" + session->session_uuid + "] 对等端控制 " +
                                   packet_tunnel_frame_name(frame_type) +
                                   ": 对端=" + ipv4_be_to_string(offer.peer_virtual_ip_be) +
                                   " 版本=" + to_string(offer.endpoint_version) +
@@ -3725,7 +3725,7 @@ private:
                 if (frame_type == packet_tunnel::kFramePeerDisable) {
                     ParsedPeerDisableFrame disable = {};
                     if (!parse_peer_disable_frame(payload, payload_len, &disable)) {
-                        Logger::warning("[IP Tunnel|" + session->session_uuid + "] 无效的" +
+                        Logger::warning("[数据隧道|" + session->session_uuid + "] 无效的" +
                                         packet_tunnel_frame_name(frame_type) +
                                         " 负载长度=" + to_string(payload_len));
                         continue;
@@ -3734,13 +3734,13 @@ private:
                                                                               disable.peer_virtual_ip_be),
                                                  disable.endpoint_version,
                                                  PeerEndpointState::RelayOnly);
-                    Logger::debug("[IP Tunnel|" + session->session_uuid + "] 对等端控制 " +
+                    Logger::debug("[数据隧道|" + session->session_uuid + "] 对等端控制 " +
                                   packet_tunnel_frame_name(frame_type) +
                                   ": 对端=" + ipv4_be_to_string(disable.peer_virtual_ip_be) +
                                   " 版本=" + to_string(disable.endpoint_version) +
                                   " 原因=" + to_string((int)disable.reason));
                     if (!route_peer_disable_frame(session, disable)) {
-                        Logger::warning("[IP Tunnel|" + session->session_uuid + "] 转发对等端禁用帧失败，目标对端=" +
+                        Logger::warning("[数据隧道|" + session->session_uuid + "] 转发对等端禁用帧失败，目标对端=" +
                                         ipv4_be_to_string(disable.peer_virtual_ip_be));
                     }
                     continue;
@@ -3748,7 +3748,7 @@ private:
 
                 ParsedPeerSignalFrame signal = {};
                 if (!parse_peer_signal_frame(payload, payload_len, &signal)) {
-                    Logger::warning("[IP Tunnel|" + session->session_uuid + "] 无效的" +
+                    Logger::warning("[数据隧道|" + session->session_uuid + "] 无效的" +
                                     packet_tunnel_frame_name(frame_type) +
                                     " 负载长度=" + to_string(payload_len));
                     continue;
@@ -3763,7 +3763,7 @@ private:
                                                  signal.endpoint_version,
                                                  PeerEndpointState::OfferPending);
                 }
-                Logger::debug("[IP Tunnel|" + session->session_uuid + "] 对等端控制 " +
+                Logger::debug("[数据隧道|" + session->session_uuid + "] 对等端控制 " +
                               packet_tunnel_frame_name(frame_type) +
                               ": 对端=" + ipv4_be_to_string(signal.peer_virtual_ip_be) +
                               " 版本=" + to_string(signal.endpoint_version) +
@@ -3772,7 +3772,7 @@ private:
                      frame_type == packet_tunnel::kFramePeerAck ||
                      frame_type == packet_tunnel::kFramePeerKeepalive) &&
                     !route_peer_signal_frame(session, frame_type, signal)) {
-                    Logger::warning("[IP Tunnel|" + session->session_uuid + "] 转发失败 " +
+                    Logger::warning("[数据隧道|" + session->session_uuid + "] 转发失败 " +
                                     packet_tunnel_frame_name(frame_type) +
                                     " 目标对端=" + ipv4_be_to_string(signal.peer_virtual_ip_be));
                 }
@@ -3801,7 +3801,7 @@ private:
             memcpy(&dst_ip_be, payload + 16, sizeof(dst_ip_be));
 
             if (src_ip_be != session->virtual_ip_be) {
-                Logger::warning("[IP Tunnel|" + session->session_uuid + "] 源IP不匹配: 来源=" +
+                Logger::warning("[数据隧道|" + session->session_uuid + "] 源IP不匹配: 来源=" +
                                 ipv4_be_to_string(src_ip_be) + ", 租约=" +
                                 ipv4_be_to_string(session->virtual_ip_be));
                 continue;
@@ -3828,7 +3828,7 @@ private:
                 route_to_local_node = true;
             }
             if (!route_to_local_gateway && !route_to_local_node) {
-                Logger::debug("[IP Tunnel|" + session->session_uuid + "] 目标没有对端或本地路由: 目标=" +
+                Logger::debug("[数据隧道|" + session->session_uuid + "] 目标没有对端或本地路由: 目标=" +
                               describe_scoped_virtual_ip(session->server_key, dst_ip_be));
                 continue;
             }
@@ -3848,13 +3848,13 @@ private:
 
             string tun_error;
             if (!tun_manager.WritePacket(payload, payload_len, &tun_error)) {
-                Logger::warning("[IP Tunnel|" + session->session_uuid + "] 写入TUN失败: " + tun_error);
+                Logger::warning("[数据隧道|" + session->session_uuid + "] 写入TUN失败: " + tun_error);
                 session->active = false;
             } else {
                 const uint64_t process_elapsed_ms = monotonic_millis() - loop_start_ms;
                 if (process_elapsed_ms >= kSlowPacketTunnelUdpProcessWarnMs) {
-                    Logger::warning("[IP Tunnel|" + session->session_uuid +
-                                    "] slow client->TUN processing elapsed_ms=" +
+                    Logger::warning("[数据隧道|" + session->session_uuid +
+                                    "] 客户端->TUN处理偏慢 耗时毫秒=" +
                                     to_string(process_elapsed_ms) +
                                     " 来源=" + ipv4_be_to_string(src_ip_be) +
                                     " 目标=" + ipv4_be_to_string(dst_ip_be) +
@@ -3960,7 +3960,7 @@ private:
             // ===== 新数据面: 识别IP Tunnel专用连接 =====
             const uint32_t PACKET_TUNNEL_MAGIC = packet_tunnel::kHandshakeConnId;
             if (conn_id == PACKET_TUNNEL_MAGIC) {
-                Logger::debug("[IP Tunnel|" + session_uuid + "] 已识别为IP Tunnel专用连接: 客户端=" + client_str);
+                Logger::debug("[数据隧道|" + session_uuid + "] 已识别为数据隧道专用连接: 客户端=" + client_str);
                 handle_packet_tunnel(client_fd, client_str, session_uuid);
                 return;
             }
@@ -4008,14 +4008,14 @@ private:
             bool tail_loaded = false;
             uint8_t next_handshake_byte = 0;
             if (!recv_all_exact(client_fd, &next_handshake_byte, 1)) {
-                Logger::error("[IP Tunnel|" + session_uuid + "] 读取TCP握手扩展头失败");
+                Logger::error("[数据隧道|" + session_uuid + "] 读取TCP握手扩展头失败");
                 close(client_fd);
                 return;
             }
             if (next_handshake_byte == packet_tunnel::kProtocolVersion) {
                 tail[0] = next_handshake_byte;
                 if (!recv_all_exact(client_fd, tail + 1, sizeof(tail) - 1)) {
-                    Logger::error("[IP Tunnel|" + session_uuid + "] 读取旧版TCP握手尾部失败");
+                    Logger::error("[数据隧道|" + session_uuid + "] 读取旧版TCP握手尾部失败");
                     close(client_fd);
                     return;
                 }
@@ -4027,7 +4027,7 @@ private:
                     if (!recv_all_exact(client_fd,
                                         reinterpret_cast<uint8_t*>(client_id_buf.data()),
                                         client_id_len)) {
-                        Logger::error("[IP Tunnel|" + session_uuid + "] 读取TCP握手client_id失败");
+                        Logger::error("[数据隧道|" + session_uuid + "] 读取TCP握手客户端ID失败");
                         close(client_fd);
                         return;
                     }
@@ -4036,7 +4036,7 @@ private:
                 tail_loaded = recv_all_exact(client_fd, tail, sizeof(tail));
             }
             if (!tail_loaded) {
-                Logger::error("[IP Tunnel|" + session_uuid + "] 接收握手尾部失败");
+                Logger::error("[数据隧道|" + session_uuid + "] 接收握手尾部失败");
                 close(client_fd);
                 return;
             }
@@ -4049,7 +4049,7 @@ private:
             string virtual_ip = ipv4_be_to_string(virtual_ip_be);
             const string client_id_short =
                 client_id.size() > 16 ? client_id.substr(0, 16) : client_id;
-            Logger::debug("[IP Tunnel|" + session_uuid + "] 握手参数: 版本=" + to_string((int)version) +
+            Logger::debug("[数据隧道|" + session_uuid + "] 握手参数: 版本=" + to_string((int)version) +
                          ", MTU=" + to_string(mtu) + ", 虚拟IP=" + virtual_ip +
                          ", 标志=" + to_string((int)flags) +
                          (client_id_short.empty() ? "" : ", 客户端标识=" + client_id_short));
@@ -4066,7 +4066,7 @@ private:
                     resolved_server_key = active_lease.server_key;
                 }
             } else {
-                lease_error = "missing session_uuid";
+                lease_error = "缺少会话UUID";
             }
 
             uint8_t ack[packet_tunnel::kHandshakeAckSize] = {};
@@ -4076,12 +4076,12 @@ private:
                 ack[1] = packet_tunnel::kStatusUnsupportedVersion;
             } else if (!tun_manager.IsActive()) {
                 ack[1] = packet_tunnel::kStatusInvalidRequest;
-                lease_error = "tun_manager is not active";
+                lease_error = "TUN管理器未激活";
             } else if (!has_active_lease) {
                 ack[1] = packet_tunnel::kStatusInvalidRequest;
             } else if (resolved_server_key.empty()) {
                 ack[1] = packet_tunnel::kStatusInvalidRequest;
-                lease_error = "lease server_key is missing";
+                lease_error = "租约缺少服务器标识";
             } else if (active_lease.virtual_ip != virtual_ip) {
                 ack[1] = packet_tunnel::kStatusInvalidRequest;
                 lease_error = "租约虚拟IP不匹配";
@@ -4093,7 +4093,7 @@ private:
             while (ack_sent < sizeof(ack)) {
                 int n = send(client_fd, (const char*)ack + ack_sent, sizeof(ack) - ack_sent, MSG_NOSIGNAL);
                 if (n <= 0) {
-                    Logger::error("[IP Tunnel|" + session_uuid + "] 发送握手确认失败");
+                    Logger::error("[数据隧道|" + session_uuid + "] 发送握手确认失败");
                     close(client_fd);
                     return;
                 }
@@ -4101,7 +4101,7 @@ private:
             }
 
             if (ack[1] != packet_tunnel::kStatusOk) {
-                Logger::warning("[IP Tunnel|" + session_uuid + "] 握手被拒绝: 状态=" +
+                Logger::warning("[数据隧道|" + session_uuid + "] 握手被拒绝: 状态=" +
                                 to_string((int)ack[1]) +
                                 (lease_error.empty() ? "" : ", 原因=" + lease_error));
                 close(client_fd);
@@ -4137,14 +4137,14 @@ private:
 
             if (replaced_session && replaced_session->client_fd != client_fd) {
                 shutdown(replaced_session->client_fd, SHUT_RDWR);
-                Logger::warning("[IP Tunnel|" + session_uuid + "] 替换旧会话: 虚拟IP=" +
+                Logger::warning("[数据隧道|" + session_uuid + "] 替换旧会话: 虚拟IP=" +
                                 describe_scoped_virtual_ip(resolved_server_key, virtual_ip_be));
             }
 
-            Logger::debug("[IP Tunnel|" + session_uuid + "] 专用会话已建立: 客户端=" + client_str +
+            Logger::debug("[数据隧道|" + session_uuid + "] 专用会话已建立: 客户端=" + client_str +
                          ", 虚拟IP=" + describe_scoped_virtual_ip(resolved_server_key, virtual_ip_be));
 
-            Logger::info("[IP Tunnel|" + session_uuid + "] TCP 会话已建立: 客户端=" + client_str +
+            Logger::info("[数据隧道|" + session_uuid + "] TCP会话已建立: 客户端=" + client_str +
                          ", 虚拟IP=" + describe_scoped_virtual_ip(resolved_server_key, virtual_ip_be) +
                          ", 直连=" +
                          string(session->allow_peer_direct ? "已启用" :
@@ -4155,11 +4155,11 @@ private:
                 uint8_t header[packet_tunnel::kFrameHeaderSize] = {};
                 int n = recv(client_fd, header, sizeof(header), MSG_WAITALL);
                 if (n == 0) {
-                    Logger::debug("[IP Tunnel|" + session_uuid + "] 客户端已正常断开");
+                    Logger::debug("[数据隧道|" + session_uuid + "] 客户端已正常断开");
                     break;
                 }
                 if (n != (int)sizeof(header)) {
-                    Logger::warning("[IP Tunnel|" + session_uuid + "] 读取帧头失败");
+                    Logger::warning("[数据隧道|" + session_uuid + "] 读取帧头失败");
                     break;
                 }
 
@@ -4167,14 +4167,14 @@ private:
                 uint16_t payload_len = ntohs(*(uint16_t*)(header + 1));
                 vector<uint8_t> payload(payload_len);
                 if (payload_len > 0 && !recv_all_exact(client_fd, payload.data(), payload.size())) {
-                    Logger::warning("[IP Tunnel|" + session_uuid + "] 读取帧负载失败");
+                    Logger::warning("[数据隧道|" + session_uuid + "] 读取帧负载失败");
                     break;
                 }
 
                 touch_packet_tunnel_session(session);
                 if (frame_type == packet_tunnel::kFrameHeartbeat && payload_len == 0) {
                     if (!send_packet_tunnel_frame(session, packet_tunnel::kFrameHeartbeatAck, nullptr, 0)) {
-                        Logger::warning("[IP Tunnel|" + session_uuid + "] 发送心跳确认失败");
+                        Logger::warning("[数据隧道|" + session_uuid + "] 发送心跳确认失败");
                         break;
                     }
                     continue;
@@ -4183,7 +4183,7 @@ private:
                 if (frame_type == packet_tunnel::kFrameTcpDirectAdvertise) {
                     ParsedTcpDirectAdvertiseFrame advertise = {};
                     if (!parse_tcp_direct_advertise_frame(payload.data(), payload_len, &advertise)) {
-                        Logger::warning("[IP Tunnel|" + session_uuid + "] 无效的" +
+                        Logger::warning("[数据隧道|" + session_uuid + "] 无效的" +
                                         packet_tunnel_frame_name(frame_type) +
                                         " 负载长度=" + to_string(payload_len));
                         continue;
@@ -4194,7 +4194,7 @@ private:
                     if (previous_port != advertise.listen_port) {
                         session->tcp_direct_candidates.clear();
                     }
-                    Logger::info("[IP Tunnel|" + session_uuid + "] TCP直连监听通告: 虚拟IP=" +
+                    Logger::info("[数据隧道|" + session_uuid + "] TCP直连监听通告: 虚拟IP=" +
                                  describe_scoped_virtual_ip(session->server_key, session->virtual_ip_be) +
                                  " 端口=" + to_string(advertise.listen_port));
                     if (advertise.listen_port != 0 &&
@@ -4209,13 +4209,13 @@ private:
                     if (!parse_tcp_direct_candidate_advertise_frame(payload.data(),
                                                                     payload_len,
                                                                     &candidate)) {
-                        Logger::warning("[IP Tunnel|" + session_uuid + "] 无效的" +
+                        Logger::warning("[数据隧道|" + session_uuid + "] 无效的" +
                                         packet_tunnel_frame_name(frame_type) +
                                         " 负载长度=" + to_string(payload_len));
                         continue;
                     }
                     append_unique_tcp_direct_candidate(&session->tcp_direct_candidates, candidate);
-                    Logger::info("[IP Tunnel|" + session_uuid + "] TCP直连候选通告: 虚拟IP=" +
+                    Logger::info("[数据隧道|" + session_uuid + "] TCP直连候选通告: 虚拟IP=" +
                                  describe_scoped_virtual_ip(session->server_key, session->virtual_ip_be) +
                                  " 端点=" + tcp_direct_candidate_to_string(candidate) +
                                  " 候选数=" + to_string(session->tcp_direct_candidates.size()));
@@ -4229,7 +4229,7 @@ private:
                     if (frame_type == packet_tunnel::kFramePeerOffer) {
                         ParsedPeerOfferFrame offer = {};
                         if (!parse_peer_offer_frame(payload.data(), payload_len, &offer)) {
-                            Logger::warning("[IP Tunnel|" + session_uuid + "] 无效的" +
+                            Logger::warning("[数据隧道|" + session_uuid + "] 无效的" +
                                             packet_tunnel_frame_name(frame_type) +
                                             " 负载长度=" + to_string(payload_len));
                             continue;
@@ -4238,7 +4238,7 @@ private:
                                                                                   offer.peer_virtual_ip_be),
                                                      offer.endpoint_version,
                                                      PeerEndpointState::OfferPending);
-                        Logger::debug("[IP Tunnel|" + session_uuid + "] 对等端控制 " +
+                        Logger::debug("[数据隧道|" + session_uuid + "] 对等端控制 " +
                                       packet_tunnel_frame_name(frame_type) +
                                       ": 对端=" + ipv4_be_to_string(offer.peer_virtual_ip_be) +
                                       " 版本=" + to_string(offer.endpoint_version) +
@@ -4250,7 +4250,7 @@ private:
                     if (frame_type == packet_tunnel::kFramePeerDisable) {
                         ParsedPeerDisableFrame disable = {};
                         if (!parse_peer_disable_frame(payload.data(), payload_len, &disable)) {
-                            Logger::warning("[IP Tunnel|" + session_uuid + "] 无效的" +
+                            Logger::warning("[数据隧道|" + session_uuid + "] 无效的" +
                                             packet_tunnel_frame_name(frame_type) +
                                             " 负载长度=" + to_string(payload_len));
                             continue;
@@ -4259,13 +4259,13 @@ private:
                                                                                   disable.peer_virtual_ip_be),
                                                      disable.endpoint_version,
                                                      PeerEndpointState::RelayOnly);
-                        Logger::debug("[IP Tunnel|" + session_uuid + "] 对等端控制 " +
+                        Logger::debug("[数据隧道|" + session_uuid + "] 对等端控制 " +
                                       packet_tunnel_frame_name(frame_type) +
                                       ": 对端=" + ipv4_be_to_string(disable.peer_virtual_ip_be) +
                                       " 版本=" + to_string(disable.endpoint_version) +
                                       " 原因=" + to_string((int)disable.reason));
                         if (!route_peer_disable_frame(session, disable)) {
-                            Logger::warning("[IP Tunnel|" + session_uuid + "] 转发对等端禁用帧失败，目标对端=" +
+                            Logger::warning("[数据隧道|" + session_uuid + "] 转发对等端禁用帧失败，目标对端=" +
                                             ipv4_be_to_string(disable.peer_virtual_ip_be));
                         }
                         continue;
@@ -4273,7 +4273,7 @@ private:
 
                     ParsedPeerSignalFrame signal = {};
                     if (!parse_peer_signal_frame(payload.data(), payload_len, &signal)) {
-                        Logger::warning("[IP Tunnel|" + session_uuid + "] 无效的" +
+                        Logger::warning("[数据隧道|" + session_uuid + "] 无效的" +
                                         packet_tunnel_frame_name(frame_type) +
                                         " 负载长度=" + to_string(payload_len));
                         continue;
@@ -4288,7 +4288,7 @@ private:
                                                      signal.endpoint_version,
                                                      PeerEndpointState::OfferPending);
                     }
-                    Logger::debug("[IP Tunnel|" + session_uuid + "] 对等端控制 " +
+                    Logger::debug("[数据隧道|" + session_uuid + "] 对等端控制 " +
                                   packet_tunnel_frame_name(frame_type) +
                                   ": 对端=" + ipv4_be_to_string(signal.peer_virtual_ip_be) +
                                   " 版本=" + to_string(signal.endpoint_version) +
@@ -4297,7 +4297,7 @@ private:
                          frame_type == packet_tunnel::kFramePeerAck ||
                          frame_type == packet_tunnel::kFramePeerKeepalive) &&
                         !route_peer_signal_frame(session, frame_type, signal)) {
-                        Logger::warning("[IP Tunnel|" + session_uuid + "] 转发失败 " +
+                        Logger::warning("[数据隧道|" + session_uuid + "] 转发失败 " +
                                         packet_tunnel_frame_name(frame_type) +
                                         " 目标对端=" + ipv4_be_to_string(signal.peer_virtual_ip_be));
                     }
@@ -4306,13 +4306,13 @@ private:
 
                 if (frame_type == packet_tunnel::kFrameIpv4Packet) {
                     if (payload_len < 20) {
-                        Logger::warning("[IP Tunnel|" + session_uuid + "] IPv4帧过短: 长度=" + to_string(payload_len));
+                        Logger::warning("[数据隧道|" + session_uuid + "] IPv4帧过短: 长度=" + to_string(payload_len));
                         continue;
                     }
 
                     uint8_t ip_version = (payload[0] >> 4) & 0x0F;
                     if (ip_version != 4) {
-                        Logger::warning("[IP Tunnel|" + session_uuid + "] 非IPv4帧，已忽略: 版本=" + to_string((int)ip_version));
+                        Logger::warning("[数据隧道|" + session_uuid + "] 非IPv4帧，已忽略: 版本=" + to_string((int)ip_version));
                         continue;
                     }
 
@@ -4322,7 +4322,7 @@ private:
                     memcpy(&dst_ip_be, &payload[16], sizeof(dst_ip_be));
 
                     if (src_ip_be != virtual_ip_be) {
-                        Logger::warning("[IP Tunnel|" + session_uuid + "] 源IP不匹配: 来源=" +
+                        Logger::warning("[数据隧道|" + session_uuid + "] 源IP不匹配: 来源=" +
                                         ipv4_be_to_string(src_ip_be) + ", 租约=" + virtual_ip);
                         continue;
                     }
@@ -4332,7 +4332,7 @@ private:
                                                      ipv4_in_subnet_be(dst_ip_be, virtual_network_ip_be, virtual_subnet_mask_be);
 
                     if (!dst_is_game_server && !dst_is_virtual_peer) {
-                        Logger::debug("[IP Tunnel|" + session_uuid + "] 忽略非隧道路由: 目标=" +
+                        Logger::debug("[数据隧道|" + session_uuid + "] 忽略非隧道路由: 目标=" +
                                       ipv4_be_to_string(dst_ip_be));
                         continue;
                     }
@@ -4351,7 +4351,7 @@ private:
                         route_to_local_node = true;
                     }
                     if (!route_to_local_gateway && !route_to_local_node) {
-                        Logger::debug("[IP Tunnel|" + session_uuid + "] 目标没有对端或本地路由: 目标=" +
+                        Logger::debug("[数据隧道|" + session_uuid + "] 目标没有对端或本地路由: 目标=" +
                                       describe_scoped_virtual_ip(session->server_key, dst_ip_be));
                         continue;
                     }
@@ -4372,7 +4372,7 @@ private:
                                 extra = " udp=" + to_string(src_port) + "->" + to_string(dst_port);
                             }
                         }
-                        Logger::debug("[IP Tunnel|" + session_uuid + "] 客户端->TUN 来源=" +
+                        Logger::debug("[数据隧道|" + session_uuid + "] 客户端->TUN 来源=" +
                                       ipv4_be_to_string(src_ip_be) + " 目标=" + ipv4_be_to_string(dst_ip_be) +
                                       " 协议=" + to_string((int)protocol) + extra +
                                       " 长度=" + to_string(payload_len));
@@ -4380,19 +4380,19 @@ private:
 
                     string tun_error;
                     if (!tun_manager.WritePacket(payload.data(), payload.size(), &tun_error)) {
-                        Logger::warning("[IP Tunnel|" + session_uuid + "] 写入TUN失败: " + tun_error);
+                        Logger::warning("[数据隧道|" + session_uuid + "] 写入TUN失败: " + tun_error);
                         break;
                     }
 
-                    Logger::debug("[IP Tunnel|" + session_uuid + "] 已写入TUN IPv4包: 长度=" + to_string(payload_len));
+                    Logger::debug("[数据隧道|" + session_uuid + "] 已写入TUN IPv4包: 长度=" + to_string(payload_len));
                     continue;
                 }
 
-                Logger::warning("[IP Tunnel|" + session_uuid + "] 未知帧类型: " + to_string((int)frame_type) +
+                Logger::warning("[数据隧道|" + session_uuid + "] 未知帧类型: " + to_string((int)frame_type) +
                                 ", 长度=" + to_string(payload_len));
             }
         } catch (exception& e) {
-            Logger::error("[IP Tunnel|" + session_uuid + "] 异常: " + string(e.what()));
+            Logger::error("[数据隧道|" + session_uuid + "] 异常: " + string(e.what()));
         }
 
         if (session) {
