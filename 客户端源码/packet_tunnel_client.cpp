@@ -130,11 +130,11 @@ void MaybeLogDnfUdpSignature(const std::string& direction,
         return;
     }
 
-    PacketTunnelDebugLog("dnf udp signature dir=" + direction +
-                         " src=" + src_virtual_ip + ":" + std::to_string(src_port) +
-                         " dst=" + dst_virtual_ip + ":" + std::to_string(dst_port) +
-                         " payload_len=" + std::to_string(udp_payload_len) +
-                         " hex=" + HexPrefix(udp_payload, udp_payload_len, 24));
+    PacketTunnelDebugLog("DNF UDP特征 方向=" + direction +
+                         " 来源=" + src_virtual_ip + ":" + std::to_string(src_port) +
+                         " 目标=" + dst_virtual_ip + ":" + std::to_string(dst_port) +
+                         " 负载长度=" + std::to_string(udp_payload_len) +
+                         " 十六进制前缀=" + HexPrefix(udp_payload, udp_payload_len, 24));
 }
 
 uint16_t ComputeIpv4HeaderChecksum(const uint8_t* header, size_t header_len) {
@@ -784,17 +784,17 @@ std::string BuildPeerRouteSnapshotSummary(const std::vector<PeerRouteStatus>& pe
                 : 0;
         ss << peers[i].peer_virtual_ip
            << "[" << PeerRouteStateName(peers[i].state)
-           << " v=" << peers[i].endpoint_version
-           << " ready=" << (peers[i].direct_ready ? "y" : "n")
-           << " eligible=" << (peers[i].direct_eligible ? "y" : "n")
-           << " active=" << (peers[i].active_direct ? "y" : "n")
-           << " obs=" << observed_age << "ms"
-           << " direct=" << ((peers[i].last_direct_data_ms != 0 && now_tick > peers[i].last_direct_data_ms)
-                                ? (now_tick - peers[i].last_direct_data_ms)
-                                : 0) << "ms"
-           << " sample=" << peers[i].direct_sample_count
-           << " fail=" << peers[i].active_failures << "/" << peers[i].probe_failures
-           << " state=" << state_age << "ms]";
+           << " 版本=" << peers[i].endpoint_version
+           << " 就绪=" << (peers[i].direct_ready ? "是" : "否")
+           << " 可直连=" << (peers[i].direct_eligible ? "是" : "否")
+           << " 活跃直连=" << (peers[i].active_direct ? "是" : "否")
+           << " 观测前=" << observed_age << "ms"
+           << " 直连数据前=" << ((peers[i].last_direct_data_ms != 0 && now_tick > peers[i].last_direct_data_ms)
+                                    ? (now_tick - peers[i].last_direct_data_ms)
+                                    : 0) << "ms"
+           << " 样本数=" << peers[i].direct_sample_count
+           << " 失败=" << peers[i].active_failures << "/" << peers[i].probe_failures
+           << " 状态前=" << state_age << "ms]";
     }
     return ss.str();
 }
@@ -819,19 +819,19 @@ std::string DescribeSinglePeerRoute(const std::vector<PeerRouteStatus>& peers,
         std::ostringstream ss;
         ss << peers[i].peer_virtual_ip
            << "[" << PeerRouteStateName(peers[i].state)
-           << " v=" << peers[i].endpoint_version
-           << " family=" << static_cast<int>(peers[i].endpoint_family)
-           << " port=" << peers[i].endpoint_port
-           << " ready=" << (peers[i].direct_ready ? "y" : "n")
-           << " eligible=" << (peers[i].direct_eligible ? "y" : "n")
-           << " active=" << (peers[i].active_direct ? "y" : "n")
-           << " obs=" << observed_age << "ms"
-           << " direct=" << ((peers[i].last_direct_data_ms != 0 && now_tick > peers[i].last_direct_data_ms)
-                                ? (now_tick - peers[i].last_direct_data_ms)
-                                : 0) << "ms"
-           << " sample=" << peers[i].direct_sample_count
-           << " fail=" << peers[i].active_failures << "/" << peers[i].probe_failures
-           << " state=" << state_age << "ms]";
+           << " 版本=" << peers[i].endpoint_version
+           << " 协议族=" << static_cast<int>(peers[i].endpoint_family)
+           << " 端口=" << peers[i].endpoint_port
+           << " 就绪=" << (peers[i].direct_ready ? "是" : "否")
+           << " 可直连=" << (peers[i].direct_eligible ? "是" : "否")
+           << " 活跃直连=" << (peers[i].active_direct ? "是" : "否")
+           << " 观测前=" << observed_age << "ms"
+           << " 直连数据前=" << ((peers[i].last_direct_data_ms != 0 && now_tick > peers[i].last_direct_data_ms)
+                                    ? (now_tick - peers[i].last_direct_data_ms)
+                                    : 0) << "ms"
+           << " 样本数=" << peers[i].direct_sample_count
+           << " 失败=" << peers[i].active_failures << "/" << peers[i].probe_failures
+           << " 状态前=" << state_age << "ms]";
         return ss.str();
     }
 
@@ -884,9 +884,9 @@ bool TryDescribeUdpPacket(const uint8_t* packet, size_t packet_len, std::string*
     uint16_t src_port = ntohs(*(const uint16_t*)(packet + ip_header_len));
     uint16_t dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
     std::ostringstream ss;
-    ss << "src=" << Ipv4ToString(packet + 12) << ":" << src_port
-       << " dst=" << Ipv4ToString(packet + 16) << ":" << dst_port
-       << " len=" << packet_len;
+    ss << "来源=" << Ipv4ToString(packet + 12) << ":" << src_port
+       << " 目标=" << Ipv4ToString(packet + 16) << ":" << dst_port
+       << " 长度=" << packet_len;
     *out_desc = ss.str();
     return true;
 }
@@ -928,8 +928,8 @@ std::string BuildMirroredGatewayUdpSignature(const uint8_t* packet, size_t packe
     std::ostringstream ss;
     ss << Ipv4ToString(packet + 12) << ":" << src_port
        << ">" << dst_port
-       << "/len=" << udp_payload_len
-       << "/hash=" << HashBytesFnv1a32(udp_payload, udp_payload_len);
+       << "/长度=" << udp_payload_len
+       << "/哈希=" << HashBytesFnv1a32(udp_payload, udp_payload_len);
     return ss.str();
 }
 
@@ -1278,33 +1278,33 @@ struct ParsedPeerDisable {
 std::string PacketTunnelFrameName(uint8_t frame_type) {
     switch (frame_type) {
     case packet_tunnel::kFrameHeartbeat:
-        return "heartbeat";
+        return "心跳";
     case packet_tunnel::kFrameHeartbeatAck:
-        return "heartbeat_ack";
+        return "心跳确认";
     case packet_tunnel::kFrameIpv4Packet:
-        return "ipv4_packet";
+        return "IPv4数据包";
     case packet_tunnel::kFramePeerOffer:
-        return "peer_offer";
+        return "对等提议";
     case packet_tunnel::kFramePeerHello:
-        return "peer_hello";
+        return "对等问候";
     case packet_tunnel::kFramePeerAck:
-        return "peer_ack";
+        return "对等确认";
     case packet_tunnel::kFramePeerKeepalive:
-        return "peer_keepalive";
+        return "对等保活";
     case packet_tunnel::kFramePeerDisable:
-        return "peer_disable";
+        return "对等端禁用";
     case packet_tunnel::kFrameTcpPeerOffer:
-        return "tcp_peer_offer";
+        return "TCP对等提议";
     case packet_tunnel::kFrameTcpDirectAdvertise:
-        return "tcp_direct_advertise";
+        return "TCP直连通告";
     case packet_tunnel::kFrameTcpDirectOpen:
-        return "tcp_direct_open";
+        return "TCP直连打开";
     case packet_tunnel::kFrameTcpDirectCandidateAdvertise:
-        return "tcp_direct_candidate_advertise";
+        return "TCP直连候选通告";
     case packet_tunnel::kFrameUdpDirectCandidateAdvertise:
-        return "udp_direct_candidate_advertise";
+        return "UDP直连候选通告";
     default:
-        return "unknown";
+        return "未知";
     }
 }
 
@@ -2027,7 +2027,7 @@ bool QueryRelayEndpointsViaSingleDnsServer(const std::string& host_name,
                                         &bind_addr,
                                         &bind_addr_len,
                                         &bind_adapter_name)) {
-        PacketTunnelDebugLog("physical dns bind address not found: server=" +
+        PacketTunnelDebugLog("物理DNS绑定地址未找到: 服务器=" +
                              SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
                              " if=" + std::to_string(dns_server.interface_index));
         return false;
@@ -2035,7 +2035,7 @@ bool QueryRelayEndpointsViaSingleDnsServer(const std::string& host_name,
 
     SOCKET sock = socket(dns_server.server_addr.ss_family, SOCK_DGRAM, IPPROTO_UDP);
     if (sock == INVALID_SOCKET) {
-        PacketTunnelDebugLog("physical dns socket create failed: server=" +
+        PacketTunnelDebugLog("物理DNS套接字创建失败: 服务器=" +
                              SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
                              " wsa=" + std::to_string(WSAGetLastError()));
         return false;
@@ -2060,7 +2060,7 @@ bool QueryRelayEndpointsViaSingleDnsServer(const std::string& host_name,
     bool success = false;
     do {
         if (bind(sock, reinterpret_cast<const sockaddr*>(&bind_addr), bind_addr_len) != 0) {
-            PacketTunnelDebugLog("physical dns bind failed: server=" +
+            PacketTunnelDebugLog("物理DNS绑定失败: 服务器=" +
                                  SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
                                  " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
                                  " wsa=" + std::to_string(WSAGetLastError()));
@@ -2070,7 +2070,7 @@ bool QueryRelayEndpointsViaSingleDnsServer(const std::string& host_name,
         if (connect(sock,
                     reinterpret_cast<const sockaddr*>(&dns_server.server_addr),
                     dns_server.server_addr_len) != 0) {
-            PacketTunnelDebugLog("physical dns connect failed: server=" +
+            PacketTunnelDebugLog("物理DNS连接失败: 服务器=" +
                                  SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
                                  " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
                                  " wsa=" + std::to_string(WSAGetLastError()));
@@ -2098,7 +2098,7 @@ bool QueryRelayEndpointsViaSingleDnsServer(const std::string& host_name,
                               static_cast<int>(query.size()),
                               0);
         if (sent != static_cast<int>(query.size())) {
-            PacketTunnelDebugLog("physical dns send failed: server=" +
+            PacketTunnelDebugLog("物理DNS发送失败: 服务器=" +
                                  SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
                                  " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
                                  " type=" + DnsRecordTypeName(query_type) +
@@ -2109,7 +2109,7 @@ bool QueryRelayEndpointsViaSingleDnsServer(const std::string& host_name,
         uint8_t response[2048] = {};
         const int received = recv(sock, reinterpret_cast<char*>(response), sizeof(response), 0);
         if (received <= 0) {
-            PacketTunnelDebugLog("physical dns recv failed: server=" +
+            PacketTunnelDebugLog("物理DNS接收失败: 服务器=" +
                                  SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
                                  " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
                                  " type=" + DnsRecordTypeName(query_type) +
@@ -2125,15 +2125,15 @@ bool QueryRelayEndpointsViaSingleDnsServer(const std::string& host_name,
                                      next_order,
                                      out_candidates,
                                      &added)) {
-            PacketTunnelDebugLog("physical dns parse failed: server=" +
+            PacketTunnelDebugLog("物理DNS解析失败: 服务器=" +
                                  SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
                                  " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
                                  " type=" + DnsRecordTypeName(query_type) +
-                                 " bytes=" + std::to_string(received));
+                                 " 字节数=" + std::to_string(received));
             break;
         }
 
-        PacketTunnelDebugLog("physical dns query result: server=" +
+        PacketTunnelDebugLog("物理DNS查询结果: 服务器=" +
                              SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
                              " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
                              " type=" + DnsRecordTypeName(query_type) +
@@ -2497,43 +2497,43 @@ bool PacketTunnelClient::Start(std::wstring* error_msg) {
     if (peer_link_manager_ != NULL) {
         peer_link_manager_->SetLocalVirtualIp(virtual_ip_);
     }
-    PacketTunnelDebugLog("packet tunnel start: server=" + tunnel_server_ip_ +
+    PacketTunnelDebugLog("数据隧道启动: 服务器=" + tunnel_server_ip_ +
                          ":" + std::to_string(tunnel_port_) +
-                         " virtual_ip=" + virtual_ip_ +
-                         " server_virtual_ip=" + server_virtual_ip_);
+                         " 虚拟IP=" + virtual_ip_ +
+                         " 服务器虚拟IP=" + server_virtual_ip_);
 
     if (!ConnectSocket(error_msg)) {
         if (error_msg != NULL) {
-            PacketTunnelDebugLog("connect failed: " + WideToUtf8(*error_msg));
+            PacketTunnelDebugLog("连接失败: " + WideToUtf8(*error_msg));
         }
         return false;
     }
     if (!SendHandshake(error_msg)) {
         if (error_msg != NULL) {
-            PacketTunnelDebugLog("handshake send failed: " + WideToUtf8(*error_msg));
+            PacketTunnelDebugLog("发送握手失败: " + WideToUtf8(*error_msg));
         }
         Stop();
         return false;
     }
     if (!ReceiveHandshakeAck(error_msg)) {
         if (error_msg != NULL) {
-            PacketTunnelDebugLog("handshake ack failed: " + WideToUtf8(*error_msg));
+            PacketTunnelDebugLog("握手确认失败: " + WideToUtf8(*error_msg));
         }
         Stop();
         return false;
     }
     std::wstring udp_candidate_error;
     if (!SendUdpDirectCandidateAdvertises(&udp_candidate_error) && !udp_candidate_error.empty()) {
-        PacketTunnelWarnLog("udp direct candidate advertise failed: " +
+        PacketTunnelWarnLog("上报UDP直连候选失败: " +
                             WideToUtf8(udp_candidate_error));
     }
     std::wstring tcp_direct_listener_error;
     if (!StartTcpDirectListener(&tcp_direct_listener_error)) {
         if (!tcp_direct_listener_error.empty()) {
-            PacketTunnelWarnLog("tcp direct listener unavailable, keep relay paths: " +
+            PacketTunnelWarnLog("TCP直连监听不可用，继续保留中转路径: " +
                                 WideToUtf8(tcp_direct_listener_error));
         } else {
-            PacketTunnelWarnLog("tcp direct listener unavailable, keep relay paths");
+            PacketTunnelWarnLog("TCP直连监听不可用，继续保留中转路径");
         }
     }
     std::wstring tcp_error;
@@ -2546,15 +2546,15 @@ bool PacketTunnelClient::Start(std::wstring* error_msg) {
         }
         tcp_connected_ = false;
         if (!tcp_error.empty()) {
-            PacketTunnelWarnLog("tcp relay carrier unavailable, fallback to udp relay: " +
+            PacketTunnelWarnLog("TCP中转载体不可用，回退到UDP中转: " +
                                 WideToUtf8(tcp_error));
         } else {
-            PacketTunnelWarnLog("tcp relay carrier unavailable, fallback to udp relay");
+            PacketTunnelWarnLog("TCP中转载体不可用，回退到UDP中转");
         }
     } else {
         std::wstring advertise_error;
         if (!SendTcpDirectAdvertise(&advertise_error) && !advertise_error.empty()) {
-            PacketTunnelWarnLog("tcp direct advertise failed: " + WideToUtf8(advertise_error));
+            PacketTunnelWarnLog("上报TCP直连监听信息失败: " + WideToUtf8(advertise_error));
         }
     }
     if (!StartThreads(error_msg)) {
@@ -2563,7 +2563,7 @@ bool PacketTunnelClient::Start(std::wstring* error_msg) {
     }
 
     connected_ = true;
-    PacketTunnelDebugLog("packet tunnel ready");
+    PacketTunnelDebugLog("数据隧道已就绪");
     return true;
 }
 
@@ -2628,7 +2628,7 @@ void PacketTunnelClient::Stop() {
     mirrored_gateway_udp_signature_tick_.clear();
     peer_udp_port_owners_.clear();
 
-    PacketTunnelDebugLog("packet tunnel stopped");
+    PacketTunnelDebugLog("数据隧道已停止");
 }
 
 bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
@@ -2650,8 +2650,8 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         freeaddrinfo(result);
         result = NULL;
     } else {
-        PacketTunnelDebugLog("system dns resolve failed for relay host " + tunnel_server_ip_ +
-                             " status=" + std::to_string(ret));
+        PacketTunnelDebugLog("系统DNS解析中转主机失败 " + tunnel_server_ip_ +
+                             " 状态=" + std::to_string(ret));
     }
 
     if (!IsNumericHostLiteral(tunnel_server_ip_) &&
@@ -2659,16 +2659,16 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         std::vector<PhysicalDnsServer> physical_dns_servers;
         CollectPhysicalDnsServers(&physical_dns_servers);
         if (!physical_dns_servers.empty()) {
-            PacketTunnelDebugLog("relay endpoint physical dns servers: " +
+            PacketTunnelDebugLog("中转端点物理DNS服务器: " +
                                  BuildPhysicalDnsServerSummary(physical_dns_servers));
             if (QueryRelayEndpointsViaPhysicalDns(tunnel_server_ip_,
                                                   tunnel_port_,
                                                   physical_dns_servers,
                                                   &relay_candidates)) {
-                PacketTunnelDebugLog("relay endpoint candidates after physical dns: " +
+                PacketTunnelDebugLog("物理DNS后的中转端点候选: " +
                                      BuildRelayEndpointCandidateSummary(relay_candidates));
             } else {
-                PacketTunnelDebugLog("relay endpoint physical dns returned no additional endpoint");
+                PacketTunnelDebugLog("物理DNS未返回额外中转端点");
             }
         }
     }
@@ -2684,7 +2684,7 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         return false;
     }
 
-    PacketTunnelInfoLog("relay endpoint candidates: " +
+    PacketTunnelInfoLog("中转端点候选: " +
                         BuildRelayEndpointCandidateSummary(relay_candidates));
 
     auto configure_socket = [&](SOCKET sock, int family) {
@@ -2750,7 +2750,7 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
                             preferred_adapter) {
                             has_local_bind_hint = true;
                         } else {
-                            PacketTunnelDebugLog("udp socket local bind rejected: " +
+                            PacketTunnelDebugLog("UDP套接字本地绑定被拒绝: " +
                                                  SockaddrToString(local_bind_addr, local_bind_addr_len) +
                                                  (bind_adapter_name.empty()
                                                       ? std::string()
@@ -2776,17 +2776,17 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
                                             &local_bind_addr_len,
                                             &bind_adapter_name)) {
                 has_local_bind_hint = true;
-                PacketTunnelDebugLog("udp socket route hint override: " +
+                PacketTunnelDebugLog("UDP套接字路由提示已覆盖: " +
                                      SockaddrToString(local_bind_addr, local_bind_addr_len) +
                                      " adapter=" + bind_adapter_name);
             } else if (!has_local_bind_hint) {
-                PacketTunnelDebugLog("udp socket route hint not found for family=" +
+                PacketTunnelDebugLog("UDP套接字未找到路由提示: 协议族=" +
                                      std::to_string(preferred_family));
             }
 
             // Keep the public relay socket on a wildcard bind so peer-direct packets can
             // arrive on whichever adapter/NAT path the OS selects at runtime.
-            PacketTunnelDebugLog("udp socket using wildcard local bind for public relay candidate");
+            PacketTunnelDebugLog("UDP套接字对公网中转候选使用通配本地绑定");
         }
 
         sock_ = sock;
@@ -2795,16 +2795,16 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         server_endpoint_.addr_len = endpoint_addr_len;
         server_endpoint_.valid = true;
         if (ipv4_direct_test_override) {
-            PacketTunnelInfoLog("peer direct test override enabled for non-public IPv4 relay " +
+            PacketTunnelInfoLog("已为非公网IPv4中转启用对等直连测试覆盖 " +
                                 SockaddrToString(endpoint_addr, endpoint_addr_len));
         } else if (!peer_direct_allowed_) {
-            PacketTunnelDebugLog("peer direct disabled: relay target is non-public " +
+            PacketTunnelDebugLog("已禁用对等直连: 中转目标不是公网地址 " +
                                  SockaddrToString(endpoint_addr, endpoint_addr_len));
         }
-        PacketTunnelDebugLog("udp socket ready for relay server " + tunnel_server_ip_ +
+        PacketTunnelDebugLog("到中转服务器的UDP套接字已就绪 " + tunnel_server_ip_ +
                              ":" + std::to_string(tunnel_port_) +
-                             " scope=" + RelayEndpointScopeName(candidate) +
-                             " family=" + std::to_string(socket_family_) +
+                             " 作用域=" + RelayEndpointScopeName(candidate) +
+                             " 协议族=" + std::to_string(socket_family_) +
                              ((public_relay_target && has_local_bind_hint)
                                   ? (" local_hint=" + SockaddrToString(local_bind_addr, local_bind_addr_len))
                                   : std::string("")));
@@ -2821,7 +2821,7 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
 
     if (!connected) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel connect failed: " + Utf8ToWide(tunnel_server_ip_) +
+            *error_msg = L"IP Tunnel 连接失败: " + Utf8ToWide(tunnel_server_ip_) +
                          L":" + Utf8ToWide(std::to_string(tunnel_port_));
         }
         return false;
@@ -2837,7 +2837,7 @@ bool PacketTunnelClient::ConnectTcpSocket(std::wstring* error_msg) {
     }
     if (!server_endpoint_.valid) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel TCP relay endpoint is invalid";
+            *error_msg = L"IP Tunnel TCP中转载体端点无效";
         }
         return false;
     }
@@ -2877,7 +2877,7 @@ bool PacketTunnelClient::ConnectTcpSocket(std::wstring* error_msg) {
 
     tcp_sock_ = sock;
     tcp_connected_ = true;
-    PacketTunnelInfoLog("tcp relay carrier connected to " +
+    PacketTunnelInfoLog("TCP中转载体已连接到 " +
                         SockaddrToString(server_endpoint_.addr, server_endpoint_.addr_len));
     return true;
 }
@@ -2887,7 +2887,7 @@ bool PacketTunnelClient::BuildHandshakePayload(bool relay_only,
                                                std::wstring* error_msg) const {
     if (handshake == NULL) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel handshake buffer is null";
+            *error_msg = L"IP Tunnel 握手缓冲区为空";
         }
         return false;
     }
@@ -2895,13 +2895,13 @@ bool PacketTunnelClient::BuildHandshakePayload(bool relay_only,
     uint8_t session_uuid_len = static_cast<uint8_t>(session_uuid_.size());
     if (client_id_.empty()) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel client_id is empty";
+            *error_msg = L"IP Tunnel 客户端ID为空";
         }
         return false;
     }
     if (client_id_.size() > 255) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel client_id is too long";
+            *error_msg = L"IP Tunnel 客户端ID过长";
         }
         return false;
     }
@@ -2944,17 +2944,17 @@ bool PacketTunnelClient::SendHandshake(std::wstring* error_msg) {
         return false;
     }
 
-    PacketTunnelDebugLog("sending handshake: session=" + session_uuid_ +
-                         " client_id=" + client_id_.substr(0, std::min<size_t>(client_id_.size(), 16)) +
-                         " mtu=" + std::to_string(mtu_) +
-                         " virtual_ip=" + virtual_ip_);
+    PacketTunnelDebugLog("正在发送握手: 会话=" + session_uuid_ +
+                         " 客户端ID=" + client_id_.substr(0, std::min<size_t>(client_id_.size(), 16)) +
+                         " MTU=" + std::to_string(mtu_) +
+                         " 虚拟IP=" + virtual_ip_);
     return SendDatagramToEndpoint(server_endpoint_, handshake.data(), handshake.size(), error_msg);
 }
 
 bool PacketTunnelClient::SendTcpHandshake(std::wstring* error_msg) {
     if (!tcp_connected_ || tcp_sock_ == INVALID_SOCKET) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel TCP relay is not connected";
+            *error_msg = L"IP Tunnel TCP中转载体尚未连接";
         }
         return false;
     }
@@ -2985,12 +2985,12 @@ bool PacketTunnelClient::SendTcpHandshake(std::wstring* error_msg) {
 
     if (!ok) {
         if (error_msg != NULL) {
-            *error_msg = BuildSocketError(L"IP Tunnel TCP handshake send failed", last_error);
+            *error_msg = BuildSocketError(L"IP Tunnel 发送TCP中转载体握手失败", last_error);
         }
         return false;
     }
 
-    PacketTunnelInfoLog("tcp relay carrier handshake sent");
+    PacketTunnelInfoLog("已发送TCP中转载体握手");
     return true;
 }
 
@@ -3104,7 +3104,7 @@ bool PacketTunnelClient::SendUdpDirectCandidateAdvertises(std::wstring* error_ms
         }
     }
 
-    PacketTunnelInfoLog("udp direct local candidates advertised count=" +
+    PacketTunnelInfoLog("UDP直连本地候选已上报，数量=" +
                         std::to_string(candidate_count));
     return true;
 }
@@ -3168,19 +3168,19 @@ bool PacketTunnelClient::ReceiveHandshakeAck(std::wstring* error_msg) {
 
         if (ack[1] != packet_tunnel::kStatusOk) {
             if (error_msg != NULL) {
-                *error_msg = L"IP Tunnel ack rejected, status=" + Utf8ToWide(std::to_string((int)ack[1]));
+                *error_msg = L"IP Tunnel 握手确认被拒绝, 状态=" + Utf8ToWide(std::to_string((int)ack[1]));
             }
             return false;
         }
 
         last_receive_tick_ = GetTickCount64();
         MarkNetworkActivity();
-        PacketTunnelDebugLog("received handshake ack: mtu=" + std::to_string(mtu_) +
-                             " virtual_ip=" + virtual_ip_);
+        PacketTunnelDebugLog("已收到握手确认: MTU=" + std::to_string(mtu_) +
+                             " 虚拟IP=" + virtual_ip_);
         return true;
     }
     if (error_msg != NULL) {
-        *error_msg = L"IP Tunnel handshake interrupted";
+        *error_msg = L"IP Tunnel 握手已中断";
     }
     return false;
 }
@@ -3193,19 +3193,19 @@ bool PacketTunnelClient::ReceiveTcpHandshakeAck(std::wstring* error_msg) {
 
     if (ack[0] != packet_tunnel::kProtocolVersion) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel TCP ack version mismatch";
+            *error_msg = L"IP Tunnel TCP握手确认协议版本不匹配";
         }
         return false;
     }
     if (ack[1] != packet_tunnel::kStatusOk) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel TCP ack rejected, status=" +
+            *error_msg = L"IP Tunnel TCP握手确认被拒绝, 状态=" +
                          Utf8ToWide(std::to_string((int)ack[1]));
         }
         return false;
     }
 
-    PacketTunnelInfoLog("tcp relay carrier handshake acknowledged");
+    PacketTunnelInfoLog("TCP中转载体握手已确认");
     return true;
 }
 
@@ -3284,27 +3284,27 @@ bool PacketTunnelClient::StartTcpDirectListener(std::wstring* error_msg) {
     if (!try_listen_family(preferred_family, &listen_sock, &listen_port) &&
         !try_listen_family(fallback_family, &listen_sock, &listen_port)) {
         if (error_msg != NULL) {
-            *error_msg = BuildSocketError(L"IP Tunnel TCP direct listen failed", WSAGetLastError());
+            *error_msg = BuildSocketError(L"IP Tunnel TCP直连监听失败", WSAGetLastError());
         }
         return false;
     }
 
     tcp_direct_listen_sock_ = listen_sock;
     tcp_direct_listen_port_ = listen_port;
-    PacketTunnelInfoLog("tcp direct listener ready port=" + std::to_string(tcp_direct_listen_port_));
+    PacketTunnelInfoLog("TCP直连监听已就绪，端口=" + std::to_string(tcp_direct_listen_port_));
     return true;
 }
 
 bool PacketTunnelClient::SendTcpDirectAdvertise(std::wstring* error_msg) {
     if (!tcp_connected_ || tcp_sock_ == INVALID_SOCKET) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel TCP relay is not connected";
+            *error_msg = L"IP Tunnel TCP中转载体尚未连接";
         }
         return false;
     }
     if (tcp_direct_listen_port_ == 0) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel TCP direct listener is not available";
+            *error_msg = L"IP Tunnel TCP直连监听不可用";
         }
         return false;
     }
@@ -3318,7 +3318,7 @@ bool PacketTunnelClient::SendTcpDirectAdvertise(std::wstring* error_msg) {
         return false;
     }
 
-    PacketTunnelInfoLog("tcp direct advertised listen_port=" +
+    PacketTunnelInfoLog("已上报TCP直连监听端口=" +
                         std::to_string(tcp_direct_listen_port_));
 
     ULONG buffer_size = 16 * 1024;
@@ -3395,7 +3395,7 @@ bool PacketTunnelClient::SendTcpDirectAdvertise(std::wstring* error_msg) {
         }
     }
 
-    PacketTunnelInfoLog("tcp direct local candidates advertised count=" +
+    PacketTunnelInfoLog("TCP直连本地候选已上报，数量=" +
                         std::to_string(candidate_count));
     return true;
 }
@@ -3405,7 +3405,7 @@ bool PacketTunnelClient::SendTcpDirectCandidateAdvertise(
     std::wstring* error_msg) {
     if (!tcp_connected_ || tcp_sock_ == INVALID_SOCKET) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel TCP relay is not connected";
+            *error_msg = L"IP Tunnel TCP中转载体尚未连接";
         }
         return false;
     }
@@ -3413,7 +3413,7 @@ bool PacketTunnelClient::SendTcpDirectCandidateAdvertise(
         (candidate.endpoint_family != packet_tunnel::kPeerEndpointFamilyIpv4 &&
          candidate.endpoint_family != packet_tunnel::kPeerEndpointFamilyIpv6)) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel TCP direct candidate is invalid";
+            *error_msg = L"IP Tunnel TCP直连候选无效";
         }
         return false;
     }
@@ -3433,7 +3433,7 @@ bool PacketTunnelClient::SendTcpDirectCandidateAdvertise(
 bool PacketTunnelClient::StartThreads(std::wstring* error_msg) {
     if (wintun_manager_ == NULL) {
         if (error_msg != NULL) {
-            *error_msg = L"Wintun manager is null";
+            *error_msg = L"Wintun 管理器为空";
         }
         return false;
     }
@@ -3549,10 +3549,10 @@ void PacketTunnelClient::MarkWatchedTcpEnqueue(const uint8_t* packet,
     std::ostringstream flow_ss;
     flow_ss << trace.client_ip << ":" << trace.client_port
             << " -> " << trace.server_ip << ":" << trace.server_port;
-    PacketTunnelDebugLog("tcp service trace server_emit_wait flow=" + flow_ss.str() +
-                         " origin=" + ((origin != NULL) ? origin : "socket-recv") +
-                         " wait=" + std::to_string(emit_wait) + "ms" +
-                         " bytes=" + std::to_string(info.payload_len));
+    PacketTunnelDebugLog("TCP业务跟踪 服务端发包等待 流=" + flow_ss.str() +
+                         " 来源=" + ((origin != NULL) ? origin : "socket-recv") +
+                         " 等待=" + std::to_string(emit_wait) + "ms" +
+                         " 字节数=" + std::to_string(info.payload_len));
 }
 
 void PacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
@@ -3586,16 +3586,16 @@ void PacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
 
     if (info.from_client && info.syn && !info.ack && trace.syn_ms == 0) {
         trace.syn_ms = tick;
-        PacketTunnelDebugLog("tcp service trace syn flow=" + flow +
-                             " origin=" + origin +
-                             " port=" + std::to_string(trace.server_port));
+        PacketTunnelDebugLog("TCP业务跟踪 SYN 流=" + flow +
+                             " 来源=" + origin +
+                             " 端口=" + std::to_string(trace.server_port));
     }
 
     if (!info.from_client && info.syn && info.ack && trace.synack_ms == 0) {
         trace.synack_ms = tick;
-        PacketTunnelDebugLog("tcp service trace synack flow=" + flow +
-                             " origin=" + origin +
-                             " since_syn=" + FormatWatchedTcpElapsed(trace.syn_ms, tick) + "ms");
+        PacketTunnelDebugLog("TCP业务跟踪 SYNACK 流=" + flow +
+                             " 来源=" + origin +
+                             " 自SYN起=" + FormatWatchedTcpElapsed(trace.syn_ms, tick) + "ms");
     }
 
     if (info.from_client &&
@@ -3607,10 +3607,10 @@ void PacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
         trace.synack_ms != 0 &&
         trace.established_ms == 0) {
         trace.established_ms = tick;
-        PacketTunnelDebugLog("tcp service trace established flow=" + flow +
-                             " origin=" + origin +
-                             " since_syn=" + FormatWatchedTcpElapsed(trace.syn_ms, tick) + "ms" +
-                             " since_synack=" + FormatWatchedTcpElapsed(trace.synack_ms, tick) + "ms");
+        PacketTunnelDebugLog("TCP业务跟踪 已建立 流=" + flow +
+                             " 来源=" + origin +
+                             " 自SYN起=" + FormatWatchedTcpElapsed(trace.syn_ms, tick) + "ms" +
+                             " 自SYNACK起=" + FormatWatchedTcpElapsed(trace.synack_ms, tick) + "ms");
     }
 
     if (info.from_client &&
@@ -3624,9 +3624,9 @@ void PacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
             tick >= trace.last_server_payload_ms) {
             const unsigned long long ack_delay = tick - trace.last_server_payload_ms;
             if (ack_delay >= 80) {
-                PacketTunnelDebugLog("tcp service trace client_ack_delay flow=" + flow +
-                                     " origin=" + origin +
-                                     " delay=" + std::to_string(ack_delay) + "ms");
+                PacketTunnelDebugLog("TCP业务跟踪 客户端确认延迟 流=" + flow +
+                                     " 来源=" + origin +
+                                     " 延迟=" + std::to_string(ack_delay) + "ms");
             }
         }
         trace.last_client_ack_only_ms = tick;
@@ -3639,11 +3639,11 @@ void PacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
             trace.pending_request_ms = tick;
             if (trace.first_client_payload_ms == 0) {
                 trace.first_client_payload_ms = tick;
-                PacketTunnelDebugLog("tcp service trace first_client_payload flow=" + flow +
-                                     " origin=" + origin +
-                                     " bytes=" + std::to_string(info.payload_len) +
-                                     " since_syn=" + FormatWatchedTcpElapsed(trace.syn_ms, tick) + "ms" +
-                                     " since_established=" +
+                PacketTunnelDebugLog("TCP业务跟踪 客户端首个负载 流=" + flow +
+                                     " 来源=" + origin +
+                                     " 字节数=" + std::to_string(info.payload_len) +
+                                     " 自SYN起=" + FormatWatchedTcpElapsed(trace.syn_ms, tick) + "ms" +
+                                     " 自建立起=" +
                                      FormatWatchedTcpElapsed(trace.established_ms, tick) + "ms");
             }
         } else {
@@ -3652,28 +3652,28 @@ void PacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
                 tick >= trace.pending_server_enqueue_ms) {
                 const unsigned long long queue_lag = tick - trace.pending_server_enqueue_ms;
                 if (queue_lag >= 20) {
-                    PacketTunnelDebugLog("tcp service trace server_send_lag flow=" + flow +
-                                         " origin=" + origin +
-                                         " lag=" + std::to_string(queue_lag) + "ms" +
-                                         " bytes=" + std::to_string(info.payload_len));
+                    PacketTunnelDebugLog("TCP业务跟踪 服务端发送滞后 流=" + flow +
+                                         " 来源=" + origin +
+                                         " 滞后=" + std::to_string(queue_lag) + "ms" +
+                                         " 字节数=" + std::to_string(info.payload_len));
                 }
                 trace.pending_server_enqueue_ms = 0;
             }
             if (trace.first_server_payload_ms == 0) {
                 trace.first_server_payload_ms = tick;
-                PacketTunnelDebugLog("tcp service trace first_server_payload flow=" + flow +
-                                     " origin=" + origin +
-                                     " bytes=" + std::to_string(info.payload_len) +
-                                     " since_syn=" + FormatWatchedTcpElapsed(trace.syn_ms, tick) + "ms" +
-                                     " since_client_payload=" +
+                PacketTunnelDebugLog("TCP业务跟踪 服务端首个负载 流=" + flow +
+                                     " 来源=" + origin +
+                                     " 字节数=" + std::to_string(info.payload_len) +
+                                     " 自SYN起=" + FormatWatchedTcpElapsed(trace.syn_ms, tick) + "ms" +
+                                     " 自客户端首个负载起=" +
                                      FormatWatchedTcpElapsed(trace.first_client_payload_ms, tick) + "ms");
             } else if (trace.pending_request_ms != 0 &&
                        tick >= trace.pending_request_ms &&
                        (tick - trace.pending_request_ms) >= kWatchedTcpServerWaitLogMs) {
-                PacketTunnelDebugLog("tcp service trace server_reply_wait flow=" + flow +
-                                     " origin=" + origin +
-                                     " wait=" + std::to_string(tick - trace.pending_request_ms) + "ms" +
-                                     " bytes=" + std::to_string(info.payload_len));
+                PacketTunnelDebugLog("TCP业务跟踪 等待服务端回复 流=" + flow +
+                                     " 来源=" + origin +
+                                     " 等待=" + std::to_string(tick - trace.pending_request_ms) + "ms" +
+                                     " 字节数=" + std::to_string(info.payload_len));
             }
             trace.last_server_payload_ms = tick;
             trace.pending_request_ms = 0;
@@ -3684,14 +3684,14 @@ void PacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
         trace.close_logged = true;
         trace.closed_ms = tick;
         std::ostringstream close_ss;
-        close_ss << "tcp service trace close flow=" << flow
-                 << " origin=" << origin
-                 << " flags=" << DescribeWatchedTcpFlags(info.flags)
-                 << " lifetime=" << FormatWatchedTcpElapsed(trace.created_ms, tick) << "ms"
-                 << " client_payloads=" << trace.client_payload_count
-                 << " server_payloads=" << trace.server_payload_count;
+        close_ss << "TCP业务跟踪 关闭 流=" << flow
+                 << " 来源=" << origin
+                 << " 标志=" << DescribeWatchedTcpFlags(info.flags)
+                 << " 存活=" << FormatWatchedTcpElapsed(trace.created_ms, tick) << "ms"
+                 << " 客户端负载数=" << trace.client_payload_count
+                 << " 服务端负载数=" << trace.server_payload_count;
         if (trace.pending_request_ms != 0 && tick >= trace.pending_request_ms) {
-            close_ss << " pending_wait=" << (tick - trace.pending_request_ms) << "ms";
+            close_ss << " 挂起等待=" << (tick - trace.pending_request_ms) << "ms";
         }
         PacketTunnelDebugLog(close_ss.str());
     }
@@ -3757,25 +3757,25 @@ void PacketTunnelClient::WintunWriteLoop() {
             queue_wait_elapsed >= kSlowWintunQueueWarnMs ||
             wintun_write_elapsed >= kSlowWintunWriteWarnMs ||
             total_elapsed >= kSlowPacketProcessWarnMs) {
-            PacketTunnelWarnLog(std::string("slow/failed queued tunnel->wintun write queue_ms=") +
+            PacketTunnelWarnLog(std::string("Wintun队列写入缓慢或失败 排队毫秒=") +
                                 std::to_string(queue_wait_elapsed) +
-                                " write_ms=" + std::to_string(wintun_write_elapsed) +
-                                " total_ms=" + std::to_string(total_elapsed) +
-                                " business_pending=" + std::to_string(pending_business_packets) +
-                                " prio_pending=" + std::to_string(pending_priority_packets) +
-                                " normal_pending=" + std::to_string(pending_normal_packets) +
-                                " dir=" +
-                                (queued_packet.from_known_peer ? "peer->wintun" : "tunnel->wintun") +
-                                " priority=" +
+                                " 写入毫秒=" + std::to_string(wintun_write_elapsed) +
+                                " 总耗时毫秒=" + std::to_string(total_elapsed) +
+                                " 业务队列待处理=" + std::to_string(pending_business_packets) +
+                                " 高优先级队列待处理=" + std::to_string(pending_priority_packets) +
+                                " 普通队列待处理=" + std::to_string(pending_normal_packets) +
+                                " 方向=" +
+                                (queued_packet.from_known_peer ? "对端->Wintun" : "中转->Wintun") +
+                                " 优先级=" +
                                 std::string(queued_packet.business_priority
-                                                ? "business_tcp"
-                                                : (queued_packet.high_priority ? "tcp" : "normal")) +
-                                " src=" + queued_packet.inner_src_virtual_ip + ":" +
+                                                ? "业务TCP"
+                                                : (queued_packet.high_priority ? "TCP" : "普通")) +
+                                " 来源=" + queued_packet.inner_src_virtual_ip + ":" +
                                 std::to_string(queued_packet.inner_src_port) +
-                                " dst=" + queued_packet.inner_dst_virtual_ip + ":" +
+                                " 目标=" + queued_packet.inner_dst_virtual_ip + ":" +
                                 std::to_string(queued_packet.inner_dst_port) +
-                                " len=" + std::to_string(queued_packet.payload.size()) +
-                                (wintun_write_ok ? "" : (" error=" + WideToUtf8(wintun_write_error))));
+                                " 长度=" + std::to_string(queued_packet.payload.size()) +
+                                (wintun_write_ok ? "" : (" 错误=" + WideToUtf8(wintun_write_error))));
         }
         if (!wintun_write_ok) {
             connected_ = false;
@@ -3870,7 +3870,7 @@ void PacketTunnelClient::SocketReadLoop() {
                                         &err);
         if (received < 0) {
             if (!err.empty()) {
-                PacketTunnelDebugLog("socket read loop stopped: " + WideToUtf8(err));
+                PacketTunnelDebugLog("套接字读取循环已停止: " + WideToUtf8(err));
             }
             break;
         }
@@ -3983,16 +3983,16 @@ void PacketTunnelClient::SocketReadLoop() {
                     probe_type == kPeerDirectProbeRequest
                         ? "request"
                         : (probe_type == kPeerDirectProbeResponse ? "response" : "none");
-                PT_DEBUG("recv non-server ipv4 source=" +
+                PT_DEBUG("收到非服务端IPv4 来源=" +
                          SockaddrToString(source_addr, source_addr_len) +
-                         " known_peer=" + (from_known_peer ? "yes" : "no") +
-                         " peer=" + (peer_virtual_ip.empty() ? "-" : peer_virtual_ip) +
-                         " inner_src=" + inner_src_virtual_ip + ":" +
+                         " 已知对端=" + (from_known_peer ? "是" : "否") +
+                         " 对端=" + (peer_virtual_ip.empty() ? "-" : peer_virtual_ip) +
+                         " inner_来源=" + inner_src_virtual_ip + ":" +
                          std::to_string(inner_src_port) +
-                         " inner_dst=" + inner_dst_virtual_ip + ":" +
+                         " inner_目标=" + inner_dst_virtual_ip + ":" +
                          std::to_string(inner_dst_port) +
-                         " probe=" + probe_kind +
-                         " len=" + std::to_string(payload_len));
+                         " 探测=" + probe_kind +
+                         " 长度=" + std::to_string(payload_len));
             }
             if (!from_server && !from_known_peer && peer_link_manager_ != NULL &&
                 payload_len >= 20 && inner_is_udp) {
@@ -4037,20 +4037,20 @@ void PacketTunnelClient::SocketReadLoop() {
                             ? "request"
                             : (probe_type == kPeerDirectProbeResponse ? "response" : "unknown");
                     if (debug_enabled) {
-                        PT_DEBUG("learn direct endpoint peer=" +
+                        PT_DEBUG("学习直连端点 对端=" +
                                  peer_virtual_ip +
-                                 " reason=" + learned_direct_reason +
-                                 " probe_type=" + probe_kind +
-                                 " src_virtual_ip=" + inferred_peer_virtual_ip +
-                                 " dst_virtual_ip=" + inferred_local_virtual_ip +
-                                 " source=" + SockaddrToString(source_addr, source_addr_len) +
-                                 (learned_direct_endpoint_changed ? " changed=yes" : " changed=no"));
+                                 " 原因=" + learned_direct_reason +
+                                 " 探测类型=" + probe_kind +
+                                 " 来源虚拟IP=" + inferred_peer_virtual_ip +
+                                 " 目标虚拟IP=" + inferred_local_virtual_ip +
+                                 " 来源=" + SockaddrToString(source_addr, source_addr_len) +
+                                 (learned_direct_endpoint_changed ? " 已变化=是" : " 已变化=否"));
                     }
                 }
             }
             if (!from_server && !from_known_peer) {
                 if (debug_enabled) {
-                    PT_DEBUG("ignore ipv4 packet from unknown endpoint source=" +
+                    PT_DEBUG("忽略来自未知端点的IPv4数据包: 来源=" +
                              SockaddrToString(source_addr, source_addr_len));
                 }
                 continue;
@@ -4059,7 +4059,7 @@ void PacketTunnelClient::SocketReadLoop() {
                 (payload_len < 20 ||
                  Ipv4ToString(payload + 12) != peer_virtual_ip)) {
                 if (debug_enabled) {
-                    PT_DEBUG("ignore peer ipv4 packet with mismatched inner src peer=" +
+                    PT_DEBUG("忽略内部源地址不匹配的对端IPv4数据包: 对端=" +
                              peer_virtual_ip);
                 }
                 continue;
@@ -4108,8 +4108,8 @@ void PacketTunnelClient::SocketReadLoop() {
                                                     probe_response.size(),
                                                     NULL);
                                 if (debug_enabled) {
-                                    PT_DEBUG("reply direct probe peer=" + peer_virtual_ip +
-                                             " endpoint=" +
+                                    PT_DEBUG("回复直连探测 对端=" + peer_virtual_ip +
+                                             " 端点=" +
                                              SockaddrToString(source_addr, source_addr_len));
                                 }
                             }
@@ -4145,7 +4145,7 @@ void PacketTunnelClient::SocketReadLoop() {
             if (debug_enabled &&
                 !IsNoisyUdpForLogging(payload, payload_len) &&
                 TryDescribeUdpPacket(payload, payload_len, &desc)) {
-                PT_DEBUG(std::string(from_known_peer ? "udp peer->wintun " : "udp tunnel->wintun ") + desc);
+                PT_DEBUG(std::string(from_known_peer ? "UDP 对端->Wintun " : "UDP 中转->Wintun ") + desc);
             }
             if (debug_enabled) {
                 MaybeLogTcpPayloadIpHints(from_known_peer ? "peer->wintun" : "tunnel->wintun",
@@ -4166,13 +4166,13 @@ void PacketTunnelClient::SocketReadLoop() {
                                      inner_dst_virtual_ip,
                                      inner_dst_port)) {
                 if (!stop_requested_) {
-                    PacketTunnelWarnLog(std::string("failed tunnel->wintun enqueue dir=") +
+                    PacketTunnelWarnLog(std::string("中转->Wintun 入队失败 方向=") +
                                         (from_known_peer ? "peer->wintun" : "tunnel->wintun") +
-                                        " src=" + inner_src_virtual_ip + ":" +
+                                        " 来源=" + inner_src_virtual_ip + ":" +
                                         std::to_string(inner_src_port) +
-                                        " dst=" + inner_dst_virtual_ip + ":" +
+                                        " 目标=" + inner_dst_virtual_ip + ":" +
                                         std::to_string(inner_dst_port) +
-                                        " len=" + std::to_string(payload_len));
+                                        " 长度=" + std::to_string(payload_len));
                 }
                 datagram_valid = false;
                 break;
@@ -4180,20 +4180,20 @@ void PacketTunnelClient::SocketReadLoop() {
             const unsigned long long frame_process_elapsed =
                 GetTickCount64() - frame_process_start;
             if (frame_process_elapsed >= kSlowPacketProcessWarnMs) {
-                PacketTunnelWarnLog(std::string("slow socket-read processing elapsed_ms=") +
+                PacketTunnelWarnLog(std::string("套接字读取处理耗时偏长 耗时毫秒=") +
                                     std::to_string(frame_process_elapsed) +
-                                    " dir=" + (from_known_peer ? "peer->wintun" : "tunnel->wintun") +
-                                    " src=" + inner_src_virtual_ip + ":" + std::to_string(inner_src_port) +
-                                    " dst=" + inner_dst_virtual_ip + ":" + std::to_string(inner_dst_port) +
-                                    " len=" + std::to_string(payload_len));
+                                    " 方向=" + (from_known_peer ? "peer->wintun" : "tunnel->wintun") +
+                                    " 来源=" + inner_src_virtual_ip + ":" + std::to_string(inner_src_port) +
+                                    " 目标=" + inner_dst_virtual_ip + ":" + std::to_string(inner_dst_port) +
+                                    " 长度=" + std::to_string(payload_len));
             }
             continue;
         }
 
             if (!from_server && !from_known_peer) {
-                PT_DEBUG("ignore packet from unknown endpoint source=" +
+                PT_DEBUG("忽略来自未知端点的数据包 来源=" +
                          SockaddrToString(source_addr, source_addr_len) +
-                         " frame=" + PacketTunnelFrameName(frame_type));
+                         " 帧=" + PacketTunnelFrameName(frame_type));
             }
         }
         if (!datagram_valid) {
@@ -4260,10 +4260,11 @@ void PacketTunnelClient::WintunReadLoop() {
         const bool is_udp = packet.size() >= 20 && packet[9] == IPPROTO_UDP;
         const bool is_tcp = packet.size() >= 20 && packet[9] == IPPROTO_TCP;
         const std::string inner_proto_name = is_udp ? "udp" : (is_tcp ? "tcp" : "ip");
+        const std::string inner_proto_label = is_udp ? "UDP" : (is_tcp ? "TCP" : "IP");
         std::string dst_virtual_ip = packet.size() >= 20 ? Ipv4ToString(packet.data() + 16) : "";
         std::string route_desc =
-            "dst=" + dst_virtual_ip + " proto=" + inner_proto_name +
-            " len=" + std::to_string(packet.size());
+            "目标=" + dst_virtual_ip + " 协议=" + inner_proto_label +
+            " 长度=" + std::to_string(packet.size());
         uint16_t src_port = 0;
         uint16_t dst_port = 0;
         if (is_udp) {
@@ -4275,8 +4276,8 @@ void PacketTunnelClient::WintunReadLoop() {
             }
             route_desc = has_desc
                             ? desc
-                            : ("dst=" + dst_virtual_ip + ":" + std::to_string(dst_port) +
-                               " len=" + std::to_string(packet.size()));
+                            : ("目标=" + dst_virtual_ip + ":" + std::to_string(dst_port) +
+                               " 长度=" + std::to_string(packet.size()));
             if (debug_enabled) {
                 MaybeLogWintunTargetIntent(dst_virtual_ip, dst_port, route_desc);
             }
@@ -4322,8 +4323,8 @@ void PacketTunnelClient::WintunReadLoop() {
                         (frame_process_start - mirror_it->second) <=
                             kMirroredGatewayUdpSignatureTtlMs) {
                         if (debug_enabled) {
-                            PT_DEBUG("drop mirrored gateway UDP peer copy " + route_desc +
-                                     " matched_ms=" +
+                            PT_DEBUG("丢弃镜像网关UDP对端副本 " + route_desc +
+                                     " 匹配毫秒=" +
                                      std::to_string(frame_process_start - mirror_it->second));
                         }
                         continue;
@@ -4363,11 +4364,11 @@ void PacketTunnelClient::WintunReadLoop() {
                                              &active_direct);
                     if (resolved_gateway_target) {
                         if (debug_enabled) {
-                            PT_DEBUG("udp gateway peer resolve dst=" +
+                            PT_DEBUG("UDP网关对端解析 目标=" +
                                      original_dst_virtual_ip + ":" +
                                      std::to_string(dst_port) +
-                                     " -> peer=" + target_peer_virtual_ip +
-                                     " resolver=" + target_resolution);
+                                     " -> 对端=" + target_peer_virtual_ip +
+                                     " 解析器=" + target_resolution);
                         }
                     }
                 }
@@ -4391,11 +4392,11 @@ void PacketTunnelClient::WintunReadLoop() {
                                                 target_peer_ip_be)) {
                     direct_payload_ready = false;
                     if (debug_enabled) {
-                        PT_DEBUG("udp gateway peer rewrite failed dst=" +
+                        PT_DEBUG("UDP网关对端改写失败 目标=" +
                                  original_dst_virtual_ip + ":" +
                                  std::to_string(dst_port) +
-                                 " peer=" + target_peer_virtual_ip +
-                                 " resolver=" + target_resolution);
+                                 " 对端=" + target_peer_virtual_ip +
+                                 " 解析器=" + target_resolution);
                     }
                 } else {
                     direct_packet_view = &direct_packet;
@@ -4427,7 +4428,7 @@ void PacketTunnelClient::WintunReadLoop() {
                     if (direct_flow_decision.try_udp_direct_now) {
                         if (!direct_path_fresh && active_direct && resolved_gateway_target) {
                             if (debug_enabled) {
-                                PT_DEBUG("udp stale active direct send " + direct_route_desc);
+                                PT_DEBUG("UDP 旧活跃直连发送 " + direct_route_desc);
                             }
                         }
                         if (SendFrameToEndpoint(peer_endpoint,
@@ -4438,17 +4439,17 @@ void PacketTunnelClient::WintunReadLoop() {
                             const unsigned long long frame_process_elapsed =
                                 GetTickCount64() - frame_process_start;
                             if (frame_process_elapsed >= kSlowPacketProcessWarnMs) {
-                                PacketTunnelWarnLog(std::string("slow wintun direct-send processing elapsed_ms=") +
+                                PacketTunnelWarnLog(std::string("Wintun 直连发送处理耗时偏长 耗时毫秒=") +
                                                     std::to_string(frame_process_elapsed) +
-                                                    " dst=" + target_peer_virtual_ip + ":" +
+                                                    " 目标=" + target_peer_virtual_ip + ":" +
                                                     std::to_string(dst_port) +
-                                                    " len=" + std::to_string(direct_packet_view->size()));
+                                                    " 长度=" + std::to_string(direct_packet_view->size()));
                             }
                             if (debug_enabled) {
                                 TraceWatchedTcpPacket(direct_packet_view->data(),
                                                       direct_packet_view->size(),
                                                       "wintun->peer");
-                                PT_DEBUG(inner_proto_name + " wintun->peer " + direct_route_desc);
+                                PT_DEBUG(inner_proto_label + " Wintun->对端 " + direct_route_desc);
                             }
                             continue;
                         }
@@ -4467,7 +4468,7 @@ void PacketTunnelClient::WintunReadLoop() {
                         if (debug_enabled &&
                             state_changed &&
                             failed_status.state == PeerRouteState::Cooldown) {
-                            PT_DEBUG("udp direct route entered cooldown peer=" +
+                            PT_DEBUG("UDP直连进入冷却: 对端=" +
                                      failed_status.peer_virtual_ip);
                         }
                     } else {
@@ -4494,8 +4495,8 @@ void PacketTunnelClient::WintunReadLoop() {
                         peer_probe_send_tick_[target_peer_virtual_ip] = now_tick;
                         sent_shadow_payload = true;
                         if (debug_enabled) {
-                            PT_DEBUG("udp direct shadow send " + direct_route_desc +
-                                     " endpoint=" +
+                            PT_DEBUG("UDP直连影子发送 " + direct_route_desc +
+                                     " 端点=" +
                                      SockaddrToString(peer_endpoint.addr,
                                                       peer_endpoint.addr_len));
                         }
@@ -4514,7 +4515,7 @@ void PacketTunnelClient::WintunReadLoop() {
                         if (debug_enabled &&
                             state_changed &&
                             failed_status.state == PeerRouteState::Cooldown) {
-                            PT_DEBUG("udp direct route entered cooldown peer=" +
+                            PT_DEBUG("UDP直连进入冷却: 对端=" +
                                      failed_status.peer_virtual_ip);
                         }
                     }
@@ -4560,7 +4561,7 @@ void PacketTunnelClient::WintunReadLoop() {
                             if (debug_enabled &&
                                 state_changed &&
                                 failed_status.state == PeerRouteState::Cooldown) {
-                                PT_DEBUG("udp direct route entered cooldown peer=" +
+                                PT_DEBUG("UDP直连进入冷却: 对端=" +
                                          failed_status.peer_virtual_ip);
                             }
                         }
@@ -4592,17 +4593,17 @@ void PacketTunnelClient::WintunReadLoop() {
             const unsigned long long frame_process_elapsed =
                 GetTickCount64() - frame_process_start;
             if (frame_process_elapsed >= kSlowPacketProcessWarnMs) {
-                PacketTunnelWarnLog(std::string("slow wintun tcp-direct processing elapsed_ms=") +
+                PacketTunnelWarnLog(std::string("Wintun TCP直连处理耗时偏长 耗时毫秒=") +
                                     std::to_string(frame_process_elapsed) +
-                                    " dst=" + dst_virtual_ip + ":" +
+                                    " 目标=" + dst_virtual_ip + ":" +
                                     std::to_string(dst_port) +
-                                    " len=" + std::to_string(packet.size()));
+                                    " 长度=" + std::to_string(packet.size()));
             }
             if (debug_enabled) {
                 TraceWatchedTcpPacket(packet.data(), packet.size(), "wintun->tcp-peer");
-                PT_DEBUG("tcp wintun->tcp-peer dst=" + dst_virtual_ip + ":" +
+                PT_DEBUG("TCP Wintun->TCP对端 目标=" + dst_virtual_ip + ":" +
                          std::to_string(dst_port) +
-                         " len=" + std::to_string(packet.size()));
+                         " 长度=" + std::to_string(packet.size()));
             }
             continue;
         }
@@ -4617,7 +4618,7 @@ void PacketTunnelClient::WintunReadLoop() {
                                              packet.size(),
                                              NULL);
             if (!relay_send_ok) {
-                PacketTunnelWarnLog("tcp relay carrier send failed, fallback to udp relay");
+                PacketTunnelWarnLog("TCP中转载体发送失败，回退到UDP中转");
                 tcp_connected_ = false;
                 SOCKET stale_tcp_sock = tcp_sock_;
                 tcp_sock_ = INVALID_SOCKET;
@@ -4673,9 +4674,9 @@ void PacketTunnelClient::WintunReadLoop() {
                                                        NULL);
                 LeaveCriticalSection(&send_lock_);
                 if (debug_enabled && relay_batch_frames > 1) {
-                    PT_DEBUG("tcp wintun->tunnel batched frames=" +
+                    PT_DEBUG("TCP Wintun->中转 批量帧数=" +
                              std::to_string(relay_batch_frames) +
-                             " bytes=" + std::to_string(relay_datagram.size()));
+                             " 字节数=" + std::to_string(relay_datagram.size()));
                 }
             } else {
                 relay_send_ok = SendFrame(packet_tunnel::kFrameIpv4Packet,
@@ -4687,7 +4688,7 @@ void PacketTunnelClient::WintunReadLoop() {
 
         if (!relay_send_ok) {
             if (debug_enabled) {
-                PT_DEBUG("wintun read loop send failed");
+                PT_DEBUG("Wintun 读取循环发送失败");
             }
             break;
         }
@@ -4696,14 +4697,14 @@ void PacketTunnelClient::WintunReadLoop() {
         }
         const unsigned long long frame_process_elapsed = GetTickCount64() - frame_process_start;
         if (frame_process_elapsed >= kSlowPacketProcessWarnMs) {
-            PacketTunnelWarnLog(std::string("slow wintun relay-send processing elapsed_ms=") +
+            PacketTunnelWarnLog(std::string("Wintun 中转发送处理耗时偏长 耗时毫秒=") +
                                 std::to_string(frame_process_elapsed) +
-                                " dst=" + dst_virtual_ip + ":" + std::to_string(dst_port) +
-                                " len=" + std::to_string(packet.size()));
+                                " 目标=" + dst_virtual_ip + ":" + std::to_string(dst_port) +
+                                " 长度=" + std::to_string(packet.size()));
         }
 
         if (debug_enabled && has_desc) {
-            PT_DEBUG("udp wintun->tunnel " + desc);
+            PT_DEBUG("UDP Wintun->中转 " + desc);
         }
     }
 
@@ -4717,7 +4718,7 @@ void PacketTunnelClient::TcpSocketReadLoop() {
         std::wstring err;
         if (!RecvTcpExact(header, sizeof(header), &err)) {
             if (!stop_requested_ && tcp_connected_ && !err.empty()) {
-                PacketTunnelWarnLog("tcp relay read loop stopped: " + WideToUtf8(err));
+                PacketTunnelWarnLog("TCP中转载体读取循环已停止: " + WideToUtf8(err));
             }
             break;
         }
@@ -4728,7 +4729,7 @@ void PacketTunnelClient::TcpSocketReadLoop() {
         if (payload_len > 0 &&
             !RecvTcpExact(payload.data(), payload_len, &err)) {
             if (!stop_requested_ && tcp_connected_ && !err.empty()) {
-                PacketTunnelWarnLog("tcp relay payload read stopped: " + WideToUtf8(err));
+                PacketTunnelWarnLog("TCP中转载体负载读取已停止: " + WideToUtf8(err));
             }
             break;
         }
@@ -4740,8 +4741,8 @@ void PacketTunnelClient::TcpSocketReadLoop() {
             continue;
         }
         if (frame_type != packet_tunnel::kFrameIpv4Packet || wintun_manager_ == NULL) {
-            PacketTunnelDebugLog("ignore tcp relay frame " + PacketTunnelFrameName(frame_type) +
-                                 " len=" + std::to_string(payload.size()));
+            PacketTunnelDebugLog("忽略TCP中转载体帧 " + PacketTunnelFrameName(frame_type) +
+                                 " 长度=" + std::to_string(payload.size()));
             continue;
         }
 
@@ -4779,7 +4780,7 @@ void PacketTunnelClient::TcpSocketReadLoop() {
                                  inner_dst_virtual_ip,
                                  inner_dst_port)) {
             if (!stop_requested_) {
-                PacketTunnelWarnLog("enqueue tcp relay payload to wintun failed");
+                PacketTunnelWarnLog("TCP中转载体负载写入Wintun队列失败");
             }
             break;
         }
@@ -4801,7 +4802,7 @@ bool PacketTunnelClient::RecvFrameFromSocket(SOCKET sock,
                                              std::wstring* error_msg) {
     if (sock == INVALID_SOCKET || frame_type == NULL || payload == NULL) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel TCP direct recv invalid argument";
+            *error_msg = L"IP Tunnel TCP直连接收参数无效";
         }
         return false;
     }
@@ -4819,7 +4820,7 @@ bool PacketTunnelClient::RecvFrameFromSocket(SOCKET sock,
             }
             if (n == 0) {
                 if (error_msg != NULL) {
-                    *error_msg = L"IP Tunnel TCP direct peer closed";
+                    *error_msg = L"IP Tunnel TCP直连对端已关闭";
                 }
                 return false;
             }
@@ -4828,7 +4829,7 @@ bool PacketTunnelClient::RecvFrameFromSocket(SOCKET sock,
                 continue;
             }
             if (error_msg != NULL) {
-                *error_msg = BuildSocketError(L"IP Tunnel TCP direct recv failed", err);
+                *error_msg = BuildSocketError(L"IP Tunnel TCP直连接收失败", err);
             }
             return false;
         }
@@ -4857,7 +4858,7 @@ bool PacketTunnelClient::SendFrameOverSocket(SOCKET sock,
                                              std::wstring* error_msg) {
     if (sock == INVALID_SOCKET || length > 0xFFFFu) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel TCP direct send invalid argument";
+            *error_msg = L"IP Tunnel TCP直连发送参数无效";
         }
         return false;
     }
@@ -4903,9 +4904,9 @@ bool PacketTunnelClient::SendFrameOverSocket(SOCKET sock,
     }
     if (error_msg != NULL) {
         if (last_error != 0) {
-            *error_msg = BuildSocketError(L"IP Tunnel TCP direct send failed", last_error);
+            *error_msg = BuildSocketError(L"IP Tunnel TCP直连发送失败", last_error);
         } else {
-            *error_msg = L"IP Tunnel TCP direct send interrupted";
+            *error_msg = L"IP Tunnel TCP直连发送被中断";
         }
     }
     return false;
@@ -4927,7 +4928,7 @@ void PacketTunnelClient::TcpDirectAcceptLoop() {
             if (!stop_requested_) {
                 int err = WSAGetLastError();
                 if (err != WSAENOTSOCK && err != WSAEINTR) {
-                    PacketTunnelWarnLog("tcp direct accept failed: " +
+                    PacketTunnelWarnLog("TCP直连接受失败: " +
                                         WideToUtf8(BuildSocketError(L"accept", err)));
                 }
             }
@@ -4947,7 +4948,7 @@ void PacketTunnelClient::TcpDirectAcceptLoop() {
         connection->read_thread =
             std::thread(&PacketTunnelClient::TcpDirectReadLoop, this, connection, true);
         connection->read_thread.detach();
-        PacketTunnelDebugLog("tcp direct accepted from " +
+        PacketTunnelDebugLog("已接受TCP直连接入，来源=" +
                              SockaddrToString(peer_addr, peer_addr_len));
     }
 }
@@ -4972,7 +4973,7 @@ void PacketTunnelClient::TcpDirectReadLoop(const std::shared_ptr<TcpDirectConnec
             open_frame_type != packet_tunnel::kFrameTcpDirectOpen ||
             open_payload.size() != packet_tunnel::kTcpDirectOpenPayloadSize) {
             if (!stop_requested_) {
-                PacketTunnelDebugLog("tcp direct incoming open failed: " +
+                PacketTunnelDebugLog("TCP直连接入打开失败: " +
                                      WideToUtf8(open_error));
             }
             CloseSocketQuiet(&connection->sock);
@@ -4985,9 +4986,9 @@ void PacketTunnelClient::TcpDirectReadLoop(const std::shared_ptr<TcpDirectConnec
         if (src_virtual_ip.empty() ||
             src_virtual_ip == virtual_ip_ ||
             dst_virtual_ip != virtual_ip_) {
-            PacketTunnelDebugLog("tcp direct incoming open rejected src=" +
+            PacketTunnelDebugLog("拒绝TCP直连接入 来源=" +
                                  src_virtual_ip +
-                                 " dst=" + dst_virtual_ip);
+                                 " 目标=" + dst_virtual_ip);
             CloseSocketQuiet(&connection->sock);
             connection->active = false;
             return;
@@ -5004,9 +5005,9 @@ void PacketTunnelClient::TcpDirectReadLoop(const std::shared_ptr<TcpDirectConnec
         std::wstring err;
         if (!RecvFrameFromSocket(connection->sock, &frame_type, &payload, &err)) {
             if (!stop_requested_ && !err.empty()) {
-                PacketTunnelDebugLog("tcp direct read stopped peer=" +
+                PacketTunnelDebugLog("TCP直连读取已停止 对端=" +
                                      (peer_virtual_ip.empty() ? std::string("?") : peer_virtual_ip) +
-                                     " reason=" + WideToUtf8(err));
+                                     " 原因=" + WideToUtf8(err));
             }
             break;
         }
@@ -5029,18 +5030,18 @@ void PacketTunnelClient::TcpDirectReadLoop(const std::shared_ptr<TcpDirectConnec
 
         if (frame_type != packet_tunnel::kFrameIpv4Packet || payload.size() < 20 ||
             (((payload[0] >> 4) & 0x0F) != 4)) {
-            PacketTunnelDebugLog("ignore tcp direct frame " +
+            PacketTunnelDebugLog("忽略TCP直连帧 " +
                                  PacketTunnelFrameName(frame_type) +
-                                 " len=" + std::to_string(payload.size()));
+                                 " 长度=" + std::to_string(payload.size()));
             continue;
         }
 
         const std::string inner_src_virtual_ip = Ipv4ToString(payload.data() + 12);
         const std::string inner_dst_virtual_ip = Ipv4ToString(payload.data() + 16);
         if (!peer_virtual_ip.empty() && inner_src_virtual_ip != peer_virtual_ip) {
-            PacketTunnelDebugLog("ignore tcp direct packet with mismatched src peer=" +
+            PacketTunnelDebugLog("忽略源地址不匹配的TCP直连包 对端=" +
                                  peer_virtual_ip +
-                                 " inner_src=" + inner_src_virtual_ip);
+                                 " inner_来源=" + inner_src_virtual_ip);
             continue;
         }
 
@@ -5075,7 +5076,7 @@ void PacketTunnelClient::TcpDirectReadLoop(const std::shared_ptr<TcpDirectConnec
                                  inner_dst_virtual_ip,
                                  inner_dst_port)) {
             if (!stop_requested_) {
-                PacketTunnelWarnLog("enqueue tcp direct payload to wintun failed peer=" +
+                PacketTunnelWarnLog("TCP直连负载写入Wintun失败 对端=" +
                                     peer_virtual_ip);
             }
             break;
@@ -5117,9 +5118,9 @@ void PacketTunnelClient::RegisterTcpDirectConnection(
         CloseSocketQuiet(&old_connection->sock);
     }
 
-    PacketTunnelInfoLog(std::string("tcp direct ") +
-                        (incoming ? "incoming" : "outgoing") +
-                        " active peer=" + peer_virtual_ip);
+    PacketTunnelInfoLog(std::string("TCP直连 ") +
+                        (incoming ? "入站" : "出站") +
+                        " active 对端=" + peer_virtual_ip);
 }
 
 void PacketTunnelClient::RemoveTcpDirectConnection(const std::string& peer_virtual_ip,
@@ -5197,7 +5198,7 @@ void PacketTunnelClient::MaintainTcpDirectConnections(unsigned long long now_tic
     }
 
     for (size_t i = 0; i < stale_connections.size(); ++i) {
-        PacketTunnelDebugLog("tcp direct idle timeout peer=" + stale_connections[i].first);
+        PacketTunnelDebugLog("TCP直连空闲超时 对端=" + stale_connections[i].first);
         RemoveTcpDirectConnection(stale_connections[i].first,
                                   stale_connections[i].second,
                                   true);
@@ -5350,7 +5351,7 @@ bool PacketTunnelClient::TrySendTcpDirectPacket(const std::string& peer_virtual_
         return true;
     }
 
-    PacketTunnelWarnLog("tcp direct send failed, fallback to relay peer=" + peer_virtual_ip);
+    PacketTunnelWarnLog("TCP直连发送失败，回退到中转 对端=" + peer_virtual_ip);
     RecordTcpDirectCandidateResult(peer_virtual_ip, connection->candidate, false, 0);
     RemoveTcpDirectConnection(peer_virtual_ip, connection->sock, true);
     MaybeStartTcpDirectConnect(peer_virtual_ip);
@@ -5458,9 +5459,9 @@ void PacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_virtual_
                                       kTcpDirectConnectTimeoutMs,
                                       &connect_error)) {
             if (!stop_requested_) {
-                PacketTunnelDebugLog("tcp direct candidate failed peer=" + peer_virtual_ip +
-                                     " endpoint=" + SockaddrToString(peer_addr, peer_addr_len) +
-                                     " err=" + std::to_string(connect_error));
+                PacketTunnelDebugLog("TCP直连候选连接失败 对端=" + peer_virtual_ip +
+                                     " 端点=" + SockaddrToString(peer_addr, peer_addr_len) +
+                                     " 错误码=" + std::to_string(connect_error));
             }
             closesocket(direct_sock);
             RecordTcpDirectCandidateResult(peer_virtual_ip, candidate, false, 0);
@@ -5503,9 +5504,9 @@ void PacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_virtual_
         connection->read_thread =
             std::thread(&PacketTunnelClient::TcpDirectReadLoop, this, connection, false);
         connection->read_thread.detach();
-        PacketTunnelInfoLog("tcp direct connected peer=" + peer_virtual_ip +
-                            " endpoint=" + SockaddrToString(peer_addr, peer_addr_len) +
-                            " candidate=" + std::to_string(candidate_index + 1) +
+        PacketTunnelInfoLog("TCP直连已连接 对端=" + peer_virtual_ip +
+                            " 端点=" + SockaddrToString(peer_addr, peer_addr_len) +
+                            " 候选=" + std::to_string(candidate_index + 1) +
                             "/" + std::to_string(candidate_count));
         return;
     }
@@ -5524,7 +5525,7 @@ void PacketTunnelClient::HeartbeatLoop() {
         }
 
         if (!SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
-            PacketTunnelDebugLog("heartbeat send failed");
+            PacketTunnelDebugLog("心跳发送失败");
             break;
         }
 
@@ -5538,10 +5539,10 @@ void PacketTunnelClient::HeartbeatLoop() {
                 kPeerDirectReadyTimeoutMs,
                 kPeerCooldownTimeoutMs);
             for (size_t i = 0; i < expired.size(); ++i) {
-                PacketTunnelDebugLog("peer control state transition: peer=" +
+                PacketTunnelDebugLog("对等端控制 状态切换: 对端=" +
                                      expired[i].peer_virtual_ip +
-                                     " state=" + PeerRouteStateName(expired[i].state) +
-                                     " version=" + std::to_string(expired[i].endpoint_version));
+                                     " 状态=" + PeerRouteStateName(expired[i].state) +
+                                     " 版本=" + std::to_string(expired[i].endpoint_version));
             }
 
             std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
@@ -5549,7 +5550,7 @@ void PacketTunnelClient::HeartbeatLoop() {
                 (last_peer_snapshot_log_tick == 0 ||
                  now_tick < last_peer_snapshot_log_tick ||
                  (now_tick - last_peer_snapshot_log_tick) >= kPeerSnapshotLogIntervalMs)) {
-                PacketTunnelDebugLog("peer control snapshot: " +
+                PacketTunnelDebugLog("对等端控制 快照: " +
                                      BuildPeerRouteSnapshotSummary(peers, now_tick));
                 last_peer_snapshot_log_tick = now_tick;
             }
@@ -5592,11 +5593,11 @@ void PacketTunnelClient::HeartbeatLoop() {
                                                     probe_packet.size(),
                                                     NULL)) {
                                 peer_probe_send_tick_[peers[i].peer_virtual_ip] = now_tick;
-                                PacketTunnelDebugLog("peer control eager direct probe: peer=" +
+                                PacketTunnelDebugLog("对等端控制 主动直连探测: 对端=" +
                                                      peers[i].peer_virtual_ip +
-                                                     " state=" + PeerRouteStateName(peers[i].state) +
-                                                     " active=" + (active_direct ? std::string("yes")
-                                                                                 : std::string("no")));
+                                                     " 状态=" + PeerRouteStateName(peers[i].state) +
+                                                     " 激活=" + (active_direct ? std::string("是")
+                                                                              : std::string("否")));
                             } else {
                                 PeerRouteStatus failed_status = {};
                                 const bool state_changed =
@@ -5605,11 +5606,11 @@ void PacketTunnelClient::HeartbeatLoop() {
                                         peers[i].endpoint_version,
                                         active_direct,
                                         &failed_status);
-                                PacketTunnelDebugLog("peer control eager direct probe failed: peer=" +
+                                PacketTunnelDebugLog("对等端控制 主动直连探测失败: 对端=" +
                                                      peers[i].peer_virtual_ip);
                                 if (state_changed &&
                                     failed_status.state == PeerRouteState::Cooldown) {
-                                    PacketTunnelDebugLog("udp direct route entered cooldown peer=" +
+                                    PacketTunnelDebugLog("UDP直连进入冷却: 对端=" +
                                                          failed_status.peer_virtual_ip);
                                 }
                             }
@@ -5638,17 +5639,17 @@ void PacketTunnelClient::HeartbeatLoop() {
                                         peers[i].endpoint_version,
                                         nonce)) {
                     peer_keepalive_send_tick_[peers[i].peer_virtual_ip] = now_tick;
-                    PacketTunnelDebugLog("peer control send peer_keepalive: peer=" +
+                    PacketTunnelDebugLog("对等端控制 发送对等保活: 对端=" +
                                          peers[i].peer_virtual_ip +
-                                         " version=" + std::to_string(peers[i].endpoint_version) +
-                                         " nonce=" + std::to_string(nonce));
+                                         " 版本=" + std::to_string(peers[i].endpoint_version) +
+                                         " 随机数=" + std::to_string(nonce));
                 }
             }
         }
 
         unsigned long long last_tick = last_network_activity_tick_.load();
         if (last_tick != 0 && now_tick > last_tick && (now_tick - last_tick) > kHeartbeatTimeoutMs) {
-            PacketTunnelDebugLog("heartbeat timeout: idle_ms=" + std::to_string(now_tick - last_tick));
+            PacketTunnelDebugLog("心跳超时: 空闲毫秒=" + std::to_string(now_tick - last_tick));
             break;
         }
     }
@@ -5682,7 +5683,7 @@ void PacketTunnelClient::MaybeLogDirectRouteFallback(const std::string& peer_vir
     }
 
     peer_route_debug_log_tick_[peer_virtual_ip] = now_tick;
-    PacketTunnelDebugLog("udp direct route fallback: reason=" + reason + " peer=" + detail);
+    PacketTunnelDebugLog("UDP直连回退: 原因=" + reason + " 对端=" + detail);
 }
 
 void PacketTunnelClient::MarkPeerBusinessActivity(const std::string& peer_virtual_ip) {
@@ -5789,15 +5790,15 @@ void PacketTunnelClient::MaybeLogWintunTargetIntent(const std::string& dst_virtu
         return;
     }
 
-    std::string direct_target = "none";
-    std::string peers_summary = "none";
-    std::string resolution = "none";
+    std::string direct_target = "无";
+    std::string peers_summary = "无";
+    std::string resolution = "无";
     if (peer_link_manager_ != NULL) {
         const std::vector<PeerRouteStatus> peers = peer_link_manager_->Snapshot();
         const std::string detail = DescribeSinglePeerRoute(peers, dst_virtual_ip, now_tick);
         if (!detail.empty()) {
             direct_target = detail;
-            resolution = "direct_ip";
+            resolution = "直连IP";
         } else {
             std::string resolved_peer_virtual_ip;
             if (TryResolveGatewayUdpPeerTarget(dst_virtual_ip,
@@ -5816,10 +5817,10 @@ void PacketTunnelClient::MaybeLogWintunTargetIntent(const std::string& dst_virtu
     }
 
     wintun_target_debug_log_tick_[flow_key] = now_tick;
-    PacketTunnelDebugLog("udp wintun intent " + route_desc +
-                         " direct_target=" + direct_target +
-                         " resolver=" + resolution +
-                         " peers=" + peers_summary);
+    PacketTunnelDebugLog("UDP Wintun流量意图 " + route_desc +
+                         " 直连目标=" + direct_target +
+                         " 解析方式=" + resolution +
+                         " 对端=" + peers_summary);
 }
 
 void PacketTunnelClient::MaybeLogTcpPayloadIpHints(const std::string& direction,
@@ -5996,16 +5997,16 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
     if (frame_type == packet_tunnel::kFrameTcpPeerOffer) {
         ParsedPeerOffer offer = {};
         if (!ParsePeerOfferPayload(payload, length, &offer)) {
-            PacketTunnelDebugLog("ignore invalid tcp_peer_offer frame len=" +
+            PacketTunnelDebugLog("忽略无效的TCP对等提议帧，长度=" +
                                  std::to_string(length));
             return true;
         }
         if (offer.peer_virtual_ip.empty() ||
             offer.peer_virtual_ip == virtual_ip_ ||
             offer.endpoint_port == 0) {
-            PacketTunnelDebugLog("ignore unusable tcp_peer_offer peer=" +
+            PacketTunnelDebugLog("忽略不可用的TCP对等提议: 对端=" +
                                  offer.peer_virtual_ip +
-                                 " endpoint=" + offer.endpoint);
+                                 " 端点=" + offer.endpoint);
             return true;
         }
 
@@ -6015,9 +6016,9 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             TcpDirectOffer& stored = tcp_direct_offers_[offer.peer_virtual_ip];
             if (stored.endpoint_version != 0 &&
                 offer.endpoint_version < stored.endpoint_version) {
-                PacketTunnelDebugLog("ignore stale tcp_peer_offer peer=" +
+                PacketTunnelDebugLog("忽略过期的TCP对等提议: 对端=" +
                                      offer.peer_virtual_ip +
-                                     " version=" +
+                                     " 版本=" +
                                      std::to_string(offer.endpoint_version));
                 return true;
             }
@@ -6086,12 +6087,12 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
 
         const unsigned long long now_tick = GetTickCount64();
         if (changed) {
-            PacketTunnelDebugLog("peer control tcp_peer_offer: peer=" +
+            PacketTunnelDebugLog("对等端控制 TCP对等提议: 对端=" +
                                  offer.peer_virtual_ip +
-                                 " version=" +
+                                 " 版本=" +
                                  std::to_string(offer.endpoint_version) +
-                                 " endpoint=" + offer.endpoint +
-                                 " changed=yes");
+                                 " 端点=" + offer.endpoint +
+                                 " 已变化=是");
             MarkPeerWarmupWindow(offer.peer_virtual_ip);
             if (ShouldAutoWarmTcpPeer(offer.peer_virtual_ip, now_tick)) {
                 MaybeStartTcpDirectConnect(offer.peer_virtual_ip);
@@ -6099,9 +6100,9 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
         } else if (ShouldLogPeerControlEvent("stable_tcp_offer:" + offer.peer_virtual_ip,
                                              now_tick,
                                              kPeerSnapshotLogIntervalMs)) {
-            PacketTunnelDebugLog("peer control ignore stable tcp_peer_offer: peer=" +
+            PacketTunnelDebugLog("对等端控制 忽略稳定的TCP对等提议: 对端=" +
                                  offer.peer_virtual_ip +
-                                 " version=" +
+                                 " 版本=" +
                                  std::to_string(offer.endpoint_version));
         }
         return true;
@@ -6110,13 +6111,13 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
     if (frame_type == packet_tunnel::kFramePeerOffer) {
         ParsedPeerOffer offer = {};
         if (!ParsePeerOfferPayload(payload, length, &offer)) {
-            PacketTunnelDebugLog("ignore invalid peer_offer frame len=" + std::to_string(length));
+            PacketTunnelDebugLog("忽略无效的对等提议帧，长度=" + std::to_string(length));
             return true;
         }
         if (!peer_direct_allowed_) {
-            PacketTunnelDebugLog("peer control ignore peer_offer: relay-only mode peer=" +
+            PacketTunnelDebugLog("对等端控制 忽略对等提议: 当前为仅中转模式 对端=" +
                                  offer.peer_virtual_ip +
-                                 " endpoint=" + offer.endpoint);
+                                 " 端点=" + offer.endpoint);
             if (offer.endpoint_version != 0) {
                 SendPeerDisableFrame(offer.peer_virtual_ip,
                                      offer.endpoint_version,
@@ -6137,16 +6138,16 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             if (ShouldLogPeerControlEvent("stable_udp_offer:" + offer.peer_virtual_ip,
                                           now_tick,
                                           kPeerSnapshotLogIntervalMs)) {
-                PacketTunnelDebugLog("peer control ignore stable peer_offer: peer=" +
+                PacketTunnelDebugLog("对等端控制 忽略稳定的对等提议: 对端=" +
                                      offer.peer_virtual_ip +
-                                     " version=" +
+                                     " 版本=" +
                                      std::to_string(offer.endpoint_version));
             }
             return true;
         }
-        PacketTunnelDebugLog("peer control peer_offer: peer=" + offer.peer_virtual_ip +
-                             " version=" + std::to_string(offer.endpoint_version) +
-                             " endpoint=" + offer.endpoint);
+        PacketTunnelDebugLog("对等端控制 对等提议: 对端=" + offer.peer_virtual_ip +
+                             " 版本=" + std::to_string(offer.endpoint_version) +
+                             " 端点=" + offer.endpoint);
         MarkPeerWarmupWindow(offer.peer_virtual_ip);
         const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
         if (SendPeerSignalFrame(packet_tunnel::kFramePeerHello,
@@ -6158,13 +6159,13 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                                                         offer.endpoint_version,
                                                         nonce);
             }
-            PacketTunnelDebugLog("peer control send peer_hello: peer=" + offer.peer_virtual_ip +
-                                 " version=" + std::to_string(offer.endpoint_version) +
-                                 " nonce=" + std::to_string(nonce));
+            PacketTunnelDebugLog("对等端控制 发送对等问候: 对端=" + offer.peer_virtual_ip +
+                                 " 版本=" + std::to_string(offer.endpoint_version) +
+                                 " 随机数=" + std::to_string(nonce));
         } else {
-            PacketTunnelDebugLog("peer control send peer_hello failed: peer=" + offer.peer_virtual_ip +
-                                 " version=" + std::to_string(offer.endpoint_version) +
-                                 " nonce=" + std::to_string(nonce));
+            PacketTunnelDebugLog("对等端控制 发送对等问候失败: 对端=" + offer.peer_virtual_ip +
+                                 " 版本=" + std::to_string(offer.endpoint_version) +
+                                 " 随机数=" + std::to_string(nonce));
         }
         return true;
     }
@@ -6174,16 +6175,16 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
         frame_type == packet_tunnel::kFramePeerKeepalive) {
         ParsedPeerSignal signal = {};
         if (!ParsePeerSignalPayload(payload, length, &signal)) {
-            PacketTunnelDebugLog("ignore invalid " + PacketTunnelFrameName(frame_type) +
-                                 " frame len=" + std::to_string(length));
+            PacketTunnelDebugLog("忽略无效的" + PacketTunnelFrameName(frame_type) +
+                                 "帧，长度=" + std::to_string(length));
             return true;
         }
 
         if (!peer_direct_allowed_) {
-            PacketTunnelDebugLog("peer control ignore " + PacketTunnelFrameName(frame_type) +
-                                 ": relay-only mode peer=" + signal.peer_virtual_ip +
-                                 " version=" + std::to_string(signal.endpoint_version) +
-                                 " nonce=" + std::to_string(signal.nonce));
+            PacketTunnelDebugLog("对等端控制 ignore " + PacketTunnelFrameName(frame_type) +
+                                 ": 当前为仅中转模式 对端=" + signal.peer_virtual_ip +
+                                 " 版本=" + std::to_string(signal.endpoint_version) +
+                                 " 随机数=" + std::to_string(signal.nonce));
             if (frame_type != packet_tunnel::kFramePeerAck && signal.endpoint_version != 0) {
                 SendPeerDisableFrame(signal.peer_virtual_ip,
                                      signal.endpoint_version,
@@ -6198,10 +6199,10 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                 if (!peer_link_manager_->TryPromotePeerDirectReady(signal.peer_virtual_ip,
                                                                    signal.endpoint_version,
                                                                    signal.nonce)) {
-                    PacketTunnelDebugLog("peer control ignore unexpected peer_ack: peer=" +
+                    PacketTunnelDebugLog("对等端控制 忽略非预期的对等确认: 对端=" +
                                          signal.peer_virtual_ip +
-                                         " version=" + std::to_string(signal.endpoint_version) +
-                                         " nonce=" + std::to_string(signal.nonce));
+                                         " 版本=" + std::to_string(signal.endpoint_version) +
+                                         " 随机数=" + std::to_string(signal.nonce));
                     return true;
                 }
             } else {
@@ -6209,23 +6210,23 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             }
         }
 
-        PacketTunnelDebugLog("peer control " + PacketTunnelFrameName(frame_type) +
-                             ": peer=" + signal.peer_virtual_ip +
-                             " version=" + std::to_string(signal.endpoint_version) +
-                             " nonce=" + std::to_string(signal.nonce));
+        PacketTunnelDebugLog("对等端控制 " + PacketTunnelFrameName(frame_type) +
+                             ": 对端=" + signal.peer_virtual_ip +
+                             " 版本=" + std::to_string(signal.endpoint_version) +
+                             " 随机数=" + std::to_string(signal.nonce));
 
         if (frame_type == packet_tunnel::kFramePeerHello) {
             if (SendPeerSignalFrame(packet_tunnel::kFramePeerAck,
                                     signal.peer_virtual_ip,
                                     signal.endpoint_version,
                                     signal.nonce)) {
-                PacketTunnelDebugLog("peer control send peer_ack: peer=" + signal.peer_virtual_ip +
-                                     " version=" + std::to_string(signal.endpoint_version) +
-                                     " nonce=" + std::to_string(signal.nonce));
+                PacketTunnelDebugLog("对等端控制 发送对等确认: 对端=" + signal.peer_virtual_ip +
+                                     " 版本=" + std::to_string(signal.endpoint_version) +
+                                     " 随机数=" + std::to_string(signal.nonce));
             } else {
-                PacketTunnelDebugLog("peer control send peer_ack failed: peer=" + signal.peer_virtual_ip +
-                                     " version=" + std::to_string(signal.endpoint_version) +
-                                     " nonce=" + std::to_string(signal.nonce));
+                PacketTunnelDebugLog("对等端控制 发送对等确认失败: 对端=" + signal.peer_virtual_ip +
+                                     " 版本=" + std::to_string(signal.endpoint_version) +
+                                     " 随机数=" + std::to_string(signal.nonce));
             }
         }
         return true;
@@ -6234,23 +6235,23 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
     if (frame_type == packet_tunnel::kFramePeerDisable) {
         ParsedPeerDisable disable = {};
         if (!ParsePeerDisablePayload(payload, length, &disable)) {
-            PacketTunnelDebugLog("ignore invalid peer_disable frame len=" + std::to_string(length));
+            PacketTunnelDebugLog("忽略无效的对等端禁用帧，长度=" + std::to_string(length));
             return true;
         }
         if (!peer_direct_allowed_) {
-            PacketTunnelDebugLog("peer control ignore peer_disable: relay-only mode peer=" +
+            PacketTunnelDebugLog("对等端控制 ignore peer_disable: 当前为仅中转模式 对端=" +
                                  disable.peer_virtual_ip +
-                                 " version=" + std::to_string(disable.endpoint_version) +
-                                 " reason=" + std::to_string(disable.reason));
+                                 " 版本=" + std::to_string(disable.endpoint_version) +
+                                 " 原因=" + std::to_string(disable.reason));
             return true;
         }
         if (peer_link_manager_ != NULL) {
             peer_link_manager_->MarkPeerCooldown(disable.peer_virtual_ip,
                                                  disable.endpoint_version);
         }
-        PacketTunnelDebugLog("peer control peer_disable: peer=" + disable.peer_virtual_ip +
-                             " version=" + std::to_string(disable.endpoint_version) +
-                             " reason=" + std::to_string(disable.reason));
+        PacketTunnelDebugLog("对等端控制 对等端禁用: 对端=" + disable.peer_virtual_ip +
+                             " 版本=" + std::to_string(disable.endpoint_version) +
+                             " 原因=" + std::to_string(disable.reason));
         return true;
     }
 
@@ -6412,8 +6413,8 @@ void PacketTunnelClient::LearnPeerUdpPortOwner(const std::string& peer_virtual_i
     owner.last_seen_ms = now_tick;
 
     if (owner_changed) {
-        PacketTunnelDebugLog("udp gateway owner update port=" + std::to_string(src_port) +
-                             " owner=" + previous_owner + "->" + peer_virtual_ip);
+        PacketTunnelDebugLog("UDP网关归属已更新 端口=" + std::to_string(src_port) +
+                             " 归属=" + previous_owner + "->" + peer_virtual_ip);
     }
 }
 
@@ -6505,7 +6506,7 @@ bool PacketTunnelClient::TryResolveGatewayUdpPeerTarget(const std::string& dst_v
 
     if (selected_peer_virtual_ip.empty()) {
         if (resolution != NULL) {
-            *resolution = "unresolved_candidates=" + std::to_string(candidate_count);
+            *resolution = "unresolved_候选数=" + std::to_string(candidate_count);
         }
         return false;
     }
@@ -6537,12 +6538,12 @@ bool PacketTunnelClient::SendFrameToEndpoint(const UdpEndpoint& endpoint,
     LeaveCriticalSection(&send_lock_);
     const unsigned long long send_elapsed = GetTickCount64() - send_start;
     if (send_elapsed >= kSlowSocketSendWarnMs) {
-        PacketTunnelWarnLog("slow frame send elapsed_ms=" +
+        PacketTunnelWarnLog("发送帧耗时偏长 耗时毫秒=" +
                             std::to_string(send_elapsed) +
-                            " frame=" + PacketTunnelFrameName(frame_type) +
-                            " endpoint=" + SockaddrToString(endpoint.addr, endpoint.addr_len) +
-                            " payload_len=" + std::to_string(length) +
-                            " ok=" + (ok ? std::string("yes") : std::string("no")));
+                            " 帧=" + PacketTunnelFrameName(frame_type) +
+                            " 端点=" + SockaddrToString(endpoint.addr, endpoint.addr_len) +
+                            " 负载长度=" + std::to_string(length) +
+                            " 成功=" + (ok ? std::string("是") : std::string("否")));
     }
     return ok;
 }
@@ -6585,10 +6586,10 @@ bool PacketTunnelClient::SendDatagramToEndpoint(const UdpEndpoint& endpoint,
         break;
     }
 
-    PacketTunnelWarnLog("IP Tunnel send dropped after transient stall error=" +
+    PacketTunnelWarnLog("IP Tunnel 发送在短暂阻塞后丢弃 错误=" +
                         std::to_string(last_error) +
-                        " endpoint=" + SockaddrToString(endpoint.addr, endpoint.addr_len) +
-                        " len=" + std::to_string(length));
+                        " 端点=" + SockaddrToString(endpoint.addr, endpoint.addr_len) +
+                        " 长度=" + std::to_string(length));
     if (error_msg != NULL) {
         *error_msg = BuildSocketError(L"IP Tunnel send dropped", last_error);
     }

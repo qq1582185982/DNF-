@@ -111,7 +111,7 @@ std::wstring BuildWindowsErrorMessage(const std::wstring& prefix, DWORD error) {
     FormatMessageW(flags, NULL, error, 0, reinterpret_cast<LPWSTR>(&buffer), 0, NULL);
 
     std::wstringstream stream;
-    stream << prefix << L" (error=" << error << L")";
+    stream << prefix << L" (错误=" << error << L")";
     if (buffer != NULL) {
         std::wstring detail(buffer);
         while (!detail.empty() && (detail.back() == L'\r' || detail.back() == L'\n')) {
@@ -181,7 +181,7 @@ int ExecuteCommandSilent(const std::string& command) {
 
 std::wstring CommandError(const wchar_t* action, const std::string& command, int exit_code) {
     std::wstringstream stream;
-    stream << action << L" failed (exit=" << exit_code << L"): ";
+    stream << action << L"失败 (退出码=" << exit_code << L"): ";
     stream << Utf8ToWideLocal(command);
     return stream.str();
 }
@@ -273,7 +273,7 @@ bool WintunManager::LoadRuntime(std::wstring* error_msg) {
     module_ = LoadWintunModuleFromDisk();
     if (module_ == NULL) {
         if (error_msg != NULL) {
-            *error_msg = BuildWindowsErrorMessage(L"Unable to load wintun.dll", GetLastError());
+            *error_msg = BuildWindowsErrorMessage(L"无法加载 wintun.dll", GetLastError());
         }
         return false;
     }
@@ -297,7 +297,7 @@ bool WintunManager::LoadRuntime(std::wstring* error_msg) {
         get_read_wait_event_ == NULL || receive_packet_ == NULL || release_receive_packet_ == NULL ||
         allocate_send_packet_ == NULL || send_packet_ == NULL) {
         if (error_msg != NULL) {
-            *error_msg = L"wintun.dll is missing required exports";
+            *error_msg = L"wintun.dll 缺少必需导出函数";
         }
         Cleanup();
         return false;
@@ -318,7 +318,7 @@ bool WintunManager::EnsureAdapter(std::wstring* error_msg) {
 
     if (adapter_ == NULL) {
         if (error_msg != NULL) {
-            *error_msg = BuildWindowsErrorMessage(L"Unable to open or create Wintun adapter", GetLastError());
+            *error_msg = BuildWindowsErrorMessage(L"无法打开或创建 Wintun 适配器", GetLastError());
         }
         return false;
     }
@@ -327,7 +327,7 @@ bool WintunManager::EnsureAdapter(std::wstring* error_msg) {
     get_adapter_luid_(adapter_, &luid);
     if (ConvertInterfaceLuidToIndex(&luid, &interface_index_) != NO_ERROR || interface_index_ == 0) {
         if (error_msg != NULL) {
-            *error_msg = L"Unable to resolve Wintun interface index";
+            *error_msg = L"无法解析 Wintun 接口索引";
         }
         return false;
     }
@@ -343,7 +343,7 @@ bool WintunManager::StartSession(std::wstring* error_msg) {
     session_ = start_session_(adapter_, kRingCapacity);
     if (session_ == NULL) {
         if (error_msg != NULL) {
-            *error_msg = BuildWindowsErrorMessage(L"Unable to start Wintun session", GetLastError());
+            *error_msg = BuildWindowsErrorMessage(L"无法启动 Wintun 会话", GetLastError());
         }
         return false;
     }
@@ -366,7 +366,7 @@ bool WintunManager::ConfigureAddress(const TunnelLeaseRuntimeConfig& config, std
         config.virtual_ip + " " + config.subnet_mask + " none >nul 2>&1";
     ret = ExecuteCommandSilent(fallback);
     if (ret != 0 && error_msg != NULL) {
-        *error_msg = CommandError(L"Setting Wintun address", fallback, ret);
+        *error_msg = CommandError(L"设置 Wintun 地址", fallback, ret);
     }
     return ret == 0;
 }
@@ -382,7 +382,7 @@ bool WintunManager::ConfigureMtu(const TunnelLeaseRuntimeConfig& config, std::ws
 
     int ret = ExecuteCommandSilent(command.str());
     if (ret != 0 && error_msg != NULL) {
-        *error_msg = CommandError(L"Setting Wintun MTU", command.str(), ret);
+        *error_msg = CommandError(L"设置 Wintun MTU", command.str(), ret);
     }
     return ret == 0;
 }
@@ -390,7 +390,7 @@ bool WintunManager::ConfigureMtu(const TunnelLeaseRuntimeConfig& config, std::ws
 bool WintunManager::ConfigureRoutes(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg) {
     if (interface_index_ == 0) {
         if (error_msg != NULL) {
-            *error_msg = L"Wintun interface index is unavailable";
+            *error_msg = L"Wintun 接口索引不可用";
         }
         return false;
     }
@@ -401,7 +401,7 @@ bool WintunManager::ConfigureRoutes(const TunnelLeaseRuntimeConfig& config, std:
         std::string mask;
         if (!ParseIpv4Cidr(cidr, &network, &mask)) {
             if (error_msg != NULL) {
-                *error_msg = L"Invalid IPv4 route cidr: " + Utf8ToWideLocal(cidr);
+                *error_msg = L"无效的 IPv4 路由 CIDR: " + Utf8ToWideLocal(cidr);
             }
             return false;
         }
@@ -418,7 +418,7 @@ bool WintunManager::ConfigureRoutes(const TunnelLeaseRuntimeConfig& config, std:
         int ret = ExecuteCommandSilent(add_cmd);
         if (ret != 0) {
             if (error_msg != NULL) {
-                *error_msg = CommandError(L"Adding Wintun route", add_cmd, ret);
+                *error_msg = CommandError(L"添加 Wintun 路由", add_cmd, ret);
             }
             return false;
         }
@@ -429,7 +429,7 @@ bool WintunManager::ConfigureRoutes(const TunnelLeaseRuntimeConfig& config, std:
 bool WintunManager::ConfigureInterface(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg) {
     int enable_ret = ExecuteCommandSilent("netsh interface set interface name=\"DNFProxyWintun\" enable >nul 2>&1");
     if (enable_ret != 0 && error_msg != NULL) {
-        *error_msg = CommandError(L"Enabling Wintun interface", "netsh interface set interface name=\"DNFProxyWintun\" enable >nul 2>&1", enable_ret);
+        *error_msg = CommandError(L"启用 Wintun 接口", "netsh interface set interface name=\"DNFProxyWintun\" enable >nul 2>&1", enable_ret);
         return false;
     }
 
@@ -450,7 +450,7 @@ bool WintunManager::Setup(const TunnelLeaseRuntimeConfig& config, std::wstring* 
 
     if (!HasBasicRuntimeConfig(config)) {
         if (error_msg != NULL) {
-            *error_msg = L"Wintun runtime config is incomplete";
+            *error_msg = L"Wintun 运行时配置不完整";
         }
         return false;
     }
@@ -474,7 +474,7 @@ bool WintunManager::Setup(const TunnelLeaseRuntimeConfig& config, std::wstring* 
 bool WintunManager::ActivateNetwork(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg) {
     if (!session_ || !adapter_) {
         if (error_msg != NULL) {
-            *error_msg = L"Wintun session is not active";
+            *error_msg = L"Wintun 会话未激活";
         }
         return false;
     }
@@ -488,7 +488,7 @@ bool WintunManager::ActivateNetwork(const TunnelLeaseRuntimeConfig& config, std:
 bool WintunManager::ReadPacket(std::vector<uint8_t>* packet, DWORD wait_ms, std::wstring* error_msg) {
     if (packet == NULL) {
         if (error_msg != NULL) {
-            *error_msg = L"Wintun read packet output buffer is null";
+            *error_msg = L"Wintun 读包输出缓冲区为空";
         }
         return false;
     }
@@ -496,7 +496,7 @@ bool WintunManager::ReadPacket(std::vector<uint8_t>* packet, DWORD wait_ms, std:
 
     if (session_ == NULL || receive_packet_ == NULL || release_receive_packet_ == NULL) {
         if (error_msg != NULL) {
-            *error_msg = L"Wintun session is not ready";
+            *error_msg = L"Wintun 会话尚未就绪";
         }
         return false;
     }
@@ -521,19 +521,19 @@ bool WintunManager::ReadPacket(std::vector<uint8_t>* packet, DWORD wait_ms, std:
                 continue;
             }
             if (error_msg != NULL) {
-                *error_msg = BuildWindowsErrorMessage(L"Wintun wait failed", GetLastError());
+                *error_msg = BuildWindowsErrorMessage(L"Wintun 等待失败", GetLastError());
             }
             return false;
         }
         if (err == ERROR_HANDLE_EOF) {
             if (error_msg != NULL) {
-                *error_msg = L"Wintun adapter is terminating";
+                *error_msg = L"Wintun 适配器正在终止";
             }
             return false;
         }
 
         if (error_msg != NULL) {
-            *error_msg = BuildWindowsErrorMessage(L"Wintun receive failed", err);
+            *error_msg = BuildWindowsErrorMessage(L"Wintun 接收失败", err);
         }
         return false;
     }
@@ -542,14 +542,14 @@ bool WintunManager::ReadPacket(std::vector<uint8_t>* packet, DWORD wait_ms, std:
 bool WintunManager::WritePacket(const uint8_t* packet, size_t length, std::wstring* error_msg) {
     if (packet == NULL || length == 0) {
         if (error_msg != NULL) {
-            *error_msg = L"Wintun send packet is empty";
+            *error_msg = L"Wintun 发送包为空";
         }
         return false;
     }
 
     if (session_ == NULL || allocate_send_packet_ == NULL || send_packet_ == NULL) {
         if (error_msg != NULL) {
-            *error_msg = L"Wintun session is not ready";
+            *error_msg = L"Wintun 会话尚未就绪";
         }
         return false;
     }
@@ -577,9 +577,9 @@ bool WintunManager::WritePacket(const uint8_t* packet, size_t length, std::wstri
     if (outgoing == NULL) {
         if (error_msg != NULL) {
             if (last_error == ERROR_BUFFER_OVERFLOW) {
-                *error_msg = L"Wintun send ring remained full after retries";
+                *error_msg = L"Wintun 发送环在重试后仍然已满";
             } else {
-                *error_msg = BuildWindowsErrorMessage(L"Wintun allocate send packet failed", last_error);
+                *error_msg = BuildWindowsErrorMessage(L"Wintun 分配发送包失败", last_error);
             }
         }
         return false;
@@ -589,10 +589,10 @@ bool WintunManager::WritePacket(const uint8_t* packet, size_t length, std::wstri
     send_packet_(session_, outgoing);
     const DWORD write_elapsed = GetTickCount() - write_start;
     if (retry_count > 0 || write_elapsed >= kSlowWintunWriteWarnMs) {
-        PacketTunnelWarnLog("wintun write delayed elapsed_ms=" +
+        PacketTunnelWarnLog("Wintun 写入延迟 耗时毫秒=" +
                             std::to_string(write_elapsed) +
-                            " retries=" + std::to_string(retry_count) +
-                            " len=" + std::to_string(length));
+                            " 重试次数=" + std::to_string(retry_count) +
+                            " 长度=" + std::to_string(length));
     }
     return true;
 }

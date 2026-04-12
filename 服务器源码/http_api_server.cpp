@@ -344,7 +344,7 @@ void handle_http_request(int client_fd) {
     // 解析请求行
     char method[16], path[256], version[16];
     if (sscanf(buffer, "%s %s %s", method, path, version) != 3) {
-        send_http_response(client_fd, 400, "Bad Request", "text/plain", "Invalid HTTP request");
+        send_http_response(client_fd, 400, "请求错误", "text/plain", "无效的HTTP请求");
         close(client_fd);
         return;
     }

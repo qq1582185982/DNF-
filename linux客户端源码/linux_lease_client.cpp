@@ -201,7 +201,7 @@ bool LinuxLeaseClient::ReleaseLease(const std::string& api_url,
     int status = ExtractJsonInt(response, "status", (int)ip_tunnel::kStatusInvalidRequest);
     if (status != (int)ip_tunnel::kStatusOk) {
         if (error != NULL) {
-            *error = "release lease failed: " + ExtractJsonString(response, "message");
+            *error = "释放租约失败: " + ExtractJsonString(response, "message");
         }
         return false;
     }

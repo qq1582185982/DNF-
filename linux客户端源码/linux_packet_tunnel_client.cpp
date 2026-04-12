@@ -448,33 +448,33 @@ struct LinuxWatchedTcpPacketInfo {
 std::string LinuxFrameName(uint8_t frame_type) {
     switch (frame_type) {
     case packet_tunnel::kFrameHeartbeat:
-        return "heartbeat";
+        return "心跳";
     case packet_tunnel::kFrameHeartbeatAck:
-        return "heartbeat_ack";
+        return "心跳确认";
     case packet_tunnel::kFrameIpv4Packet:
-        return "ipv4_packet";
+        return "IPv4数据包";
     case packet_tunnel::kFramePeerOffer:
-        return "peer_offer";
+        return "对等提议";
     case packet_tunnel::kFramePeerHello:
-        return "peer_hello";
+        return "对等问候";
     case packet_tunnel::kFramePeerAck:
-        return "peer_ack";
+        return "对等确认";
     case packet_tunnel::kFramePeerKeepalive:
-        return "peer_keepalive";
+        return "对等保活";
     case packet_tunnel::kFramePeerDisable:
-        return "peer_disable";
+        return "对等端禁用";
     case packet_tunnel::kFrameTcpPeerOffer:
-        return "tcp_peer_offer";
+        return "TCP对等提议";
     case packet_tunnel::kFrameTcpDirectAdvertise:
-        return "tcp_direct_advertise";
+        return "TCP直连通告";
     case packet_tunnel::kFrameTcpDirectOpen:
-        return "tcp_direct_open";
+        return "TCP直连打开";
     case packet_tunnel::kFrameTcpDirectCandidateAdvertise:
-        return "tcp_direct_candidate_advertise";
+        return "TCP直连候选通告";
     case packet_tunnel::kFrameUdpDirectCandidateAdvertise:
-        return "udp_direct_candidate_advertise";
+        return "UDP直连候选通告";
     default:
-        return "unknown";
+        return "未知";
     }
 }
 
@@ -516,17 +516,17 @@ std::string BuildLinuxPeerRouteSnapshotSummary(const std::vector<LinuxPeerRouteS
                 : 0;
         ss << peers[i].peer_virtual_ip
            << "[" << LinuxPeerRouteStateName(peers[i].state)
-           << " v=" << peers[i].endpoint_version
-           << " ready=" << (peers[i].direct_ready ? "y" : "n")
-           << " eligible=" << (peers[i].direct_eligible ? "y" : "n")
-           << " active=" << (peers[i].active_direct ? "y" : "n")
-           << " obs=" << observed_age << "ms"
-           << " direct=" << ((peers[i].last_direct_data_ms != 0 && now_ms_value > peers[i].last_direct_data_ms)
+           << " 版本=" << peers[i].endpoint_version
+           << " 就绪=" << (peers[i].direct_ready ? "是" : "否")
+           << " 可用=" << (peers[i].direct_eligible ? "是" : "否")
+           << " 激活=" << (peers[i].active_direct ? "是" : "否")
+           << " 观测=" << observed_age << "ms"
+           << " 直连=" << ((peers[i].last_direct_data_ms != 0 && now_ms_value > peers[i].last_direct_data_ms)
                                 ? (now_ms_value - peers[i].last_direct_data_ms)
                                 : 0) << "ms"
-           << " sample=" << peers[i].direct_sample_count
-           << " fail=" << peers[i].active_failures << "/" << peers[i].probe_failures
-           << " state=" << state_age << "ms]";
+           << " 样本=" << peers[i].direct_sample_count
+           << " 失败=" << peers[i].active_failures << "/" << peers[i].probe_failures
+           << " 状态=" << state_age << "ms]";
     }
     return ss.str();
 }
@@ -551,19 +551,19 @@ std::string DescribeSingleLinuxPeerRoute(const std::vector<LinuxPeerRouteStatus>
         std::ostringstream ss;
         ss << peers[i].peer_virtual_ip
            << "[" << LinuxPeerRouteStateName(peers[i].state)
-           << " v=" << peers[i].endpoint_version
-           << " family=" << static_cast<int>(peers[i].endpoint_family)
-           << " port=" << peers[i].endpoint_port
-           << " ready=" << (peers[i].direct_ready ? "y" : "n")
-           << " eligible=" << (peers[i].direct_eligible ? "y" : "n")
-           << " active=" << (peers[i].active_direct ? "y" : "n")
-           << " obs=" << observed_age << "ms"
-           << " direct=" << ((peers[i].last_direct_data_ms != 0 && now_ms_value > peers[i].last_direct_data_ms)
+           << " 版本=" << peers[i].endpoint_version
+           << " 协议族=" << static_cast<int>(peers[i].endpoint_family)
+           << " 端口=" << peers[i].endpoint_port
+           << " 就绪=" << (peers[i].direct_ready ? "是" : "否")
+           << " 可用=" << (peers[i].direct_eligible ? "是" : "否")
+           << " 激活=" << (peers[i].active_direct ? "是" : "否")
+           << " 观测=" << observed_age << "ms"
+           << " 直连=" << ((peers[i].last_direct_data_ms != 0 && now_ms_value > peers[i].last_direct_data_ms)
                                 ? (now_ms_value - peers[i].last_direct_data_ms)
                                 : 0) << "ms"
-           << " sample=" << peers[i].direct_sample_count
-           << " fail=" << peers[i].active_failures << "/" << peers[i].probe_failures
-           << " state=" << state_age << "ms]";
+           << " 样本=" << peers[i].direct_sample_count
+           << " 失败=" << peers[i].active_failures << "/" << peers[i].probe_failures
+           << " 状态=" << state_age << "ms]";
         return ss.str();
     }
 
@@ -624,9 +624,9 @@ bool TryDescribeLinuxUdpPacket(const uint8_t* packet, size_t packet_len, std::st
     const uint16_t src_port = ntohs(*(const uint16_t*)(packet + ip_header_len));
     const uint16_t dst_port = ntohs(*(const uint16_t*)(packet + ip_header_len + 2));
     std::ostringstream ss;
-    ss << "src=" << LinuxIpv4ToString(packet + 12) << ":" << src_port
-       << " dst=" << LinuxIpv4ToString(packet + 16) << ":" << dst_port
-       << " len=" << packet_len;
+    ss << "来源=" << LinuxIpv4ToString(packet + 12) << ":" << src_port
+       << " 目标=" << LinuxIpv4ToString(packet + 16) << ":" << dst_port
+       << " 长度=" << packet_len;
     *out_desc = ss.str();
     return true;
 }
@@ -1396,9 +1396,9 @@ void LinuxPacketTunnelClient::MarkWatchedTcpTunRead(const uint8_t* packet,
         std::ostringstream flow_ss;
         flow_ss << trace.client_ip << ":" << trace.client_port
                 << " -> " << trace.server_ip << ":" << trace.server_port;
-        LogInfo("tcp service trace tun_read_block flow=" + flow_ss.str() +
-                " block=" + std::to_string(read_wait_ms) + "ms" +
-                " bytes=" + std::to_string(info.payload_len));
+        LogInfo("TCP业务跟踪 TUN读取阻塞 流=" + flow_ss.str() +
+                " 阻塞=" + std::to_string(read_wait_ms) + "ms" +
+                " 字节数=" + std::to_string(info.payload_len));
     }
     trace.pending_server_tun_read_ms = tick;
 
@@ -1414,10 +1414,10 @@ void LinuxPacketTunnelClient::MarkWatchedTcpTunRead(const uint8_t* packet,
     std::ostringstream flow_ss;
     flow_ss << trace.client_ip << ":" << trace.client_port
             << " -> " << trace.server_ip << ":" << trace.server_port;
-    LogInfo("tcp service trace server_emit_wait flow=" + flow_ss.str() +
-            " origin=tun-read" +
-            " wait=" + std::to_string(emit_wait) + "ms" +
-            " bytes=" + std::to_string(info.payload_len));
+    LogInfo("TCP业务跟踪 服务端发包等待 流=" + flow_ss.str() +
+            " 来源=tun-read" +
+            " 等待=" + std::to_string(emit_wait) + "ms" +
+            " 字节数=" + std::to_string(info.payload_len));
 }
 
 void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
@@ -1451,16 +1451,16 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
 
     if (info.from_client && info.syn && !info.ack && trace.syn_ms == 0) {
         trace.syn_ms = tick;
-        LogInfo("tcp service trace syn flow=" + flow +
-                " origin=" + origin +
-                " port=" + std::to_string(trace.server_port));
+        LogInfo("TCP业务跟踪 SYN 流=" + flow +
+                " 来源=" + origin +
+                " 端口=" + std::to_string(trace.server_port));
     }
 
     if (!info.from_client && info.syn && info.ack && trace.synack_ms == 0) {
         trace.synack_ms = tick;
-        LogInfo("tcp service trace synack flow=" + flow +
-                " origin=" + origin +
-                " since_syn=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms");
+        LogInfo("TCP业务跟踪 SYNACK 流=" + flow +
+                " 来源=" + origin +
+                " 自SYN起=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms");
     }
 
     if (info.from_client &&
@@ -1472,10 +1472,10 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
         trace.synack_ms != 0 &&
         trace.established_ms == 0) {
         trace.established_ms = tick;
-        LogInfo("tcp service trace established flow=" + flow +
-                " origin=" + origin +
-                " since_syn=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms" +
-                " since_synack=" + LinuxFormatElapsedMs(trace.synack_ms, tick) + "ms");
+        LogInfo("TCP业务跟踪 已建立 流=" + flow +
+                " 来源=" + origin +
+                " 自SYN起=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms" +
+                " 自SYNACK起=" + LinuxFormatElapsedMs(trace.synack_ms, tick) + "ms");
     }
 
     if (info.from_client &&
@@ -1489,9 +1489,9 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
             tick >= trace.last_server_payload_ms) {
             const unsigned long long ack_delay = tick - trace.last_server_payload_ms;
             if (ack_delay >= 80) {
-                LogInfo("tcp service trace client_ack_delay flow=" + flow +
-                        " origin=" + origin +
-                        " delay=" + std::to_string(ack_delay) + "ms");
+                LogInfo("TCP业务跟踪 客户端确认延迟 流=" + flow +
+                        " 来源=" + origin +
+                        " 延迟=" + std::to_string(ack_delay) + "ms");
             }
         }
         trace.last_client_ack_only_ms = tick;
@@ -1504,11 +1504,11 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
             trace.pending_request_ms = tick;
             if (trace.first_client_payload_ms == 0) {
                 trace.first_client_payload_ms = tick;
-                LogInfo("tcp service trace first_client_payload flow=" + flow +
-                        " origin=" + origin +
-                        " bytes=" + std::to_string(info.payload_len) +
-                        " since_syn=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms" +
-                        " since_established=" +
+                LogInfo("TCP业务跟踪 客户端首个负载 流=" + flow +
+                        " 来源=" + origin +
+                        " 字节数=" + std::to_string(info.payload_len) +
+                        " 自SYN起=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms" +
+                        " 自建立起=" +
                         LinuxFormatElapsedMs(trace.established_ms, tick) + "ms");
             }
         } else {
@@ -1517,28 +1517,28 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
                 tick >= trace.pending_server_tun_read_ms) {
                 const unsigned long long send_lag = tick - trace.pending_server_tun_read_ms;
                 if (send_lag >= 20) {
-                    LogInfo("tcp service trace server_send_lag flow=" + flow +
-                            " origin=" + origin +
+                    LogInfo("TCP业务跟踪 服务端发送滞后 流=" + flow +
+                            " 来源=" + origin +
                             " lag=" + std::to_string(send_lag) + "ms" +
-                            " bytes=" + std::to_string(info.payload_len));
+                            " 字节数=" + std::to_string(info.payload_len));
                 }
                 trace.pending_server_tun_read_ms = 0;
             }
             if (trace.first_server_payload_ms == 0) {
                 trace.first_server_payload_ms = tick;
-                LogInfo("tcp service trace first_server_payload flow=" + flow +
-                        " origin=" + origin +
-                        " bytes=" + std::to_string(info.payload_len) +
-                        " since_syn=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms" +
-                        " since_client_payload=" +
+                LogInfo("TCP业务跟踪 服务端首个负载 流=" + flow +
+                        " 来源=" + origin +
+                        " 字节数=" + std::to_string(info.payload_len) +
+                        " 自SYN起=" + LinuxFormatElapsedMs(trace.syn_ms, tick) + "ms" +
+                        " 自客户端首个负载起=" +
                         LinuxFormatElapsedMs(trace.first_client_payload_ms, tick) + "ms");
             } else if (trace.pending_request_ms != 0 &&
                        tick >= trace.pending_request_ms &&
                        (tick - trace.pending_request_ms) >= kWatchedTcpServerWaitLogMs) {
-                LogInfo("tcp service trace server_reply_wait flow=" + flow +
-                        " origin=" + origin +
-                        " wait=" + std::to_string(tick - trace.pending_request_ms) + "ms" +
-                        " bytes=" + std::to_string(info.payload_len));
+                LogInfo("TCP业务跟踪 等待服务端回复 流=" + flow +
+                        " 来源=" + origin +
+                        " 等待=" + std::to_string(tick - trace.pending_request_ms) + "ms" +
+                        " 字节数=" + std::to_string(info.payload_len));
             }
             trace.last_server_payload_ms = tick;
             trace.pending_request_ms = 0;
@@ -1549,14 +1549,14 @@ void LinuxPacketTunnelClient::TraceWatchedTcpPacket(const uint8_t* packet,
         trace.close_logged = true;
         trace.closed_ms = tick;
         std::ostringstream close_ss;
-        close_ss << "tcp service trace close flow=" << flow
-                 << " origin=" << origin
-                 << " flags=" << LinuxDescribeTcpTraceFlags(info.flags)
-                 << " lifetime=" << LinuxFormatElapsedMs(trace.created_ms, tick) << "ms"
-                 << " client_payloads=" << trace.client_payload_count
-                 << " server_payloads=" << trace.server_payload_count;
+        close_ss << "TCP业务跟踪 关闭 流=" << flow
+                 << " 来源=" << origin
+                 << " 标志=" << LinuxDescribeTcpTraceFlags(info.flags)
+                 << " 存活=" << LinuxFormatElapsedMs(trace.created_ms, tick) << "ms"
+                 << " 客户端负载数=" << trace.client_payload_count
+                 << " 服务端负载数=" << trace.server_payload_count;
         if (trace.pending_request_ms != 0 && tick >= trace.pending_request_ms) {
-            close_ss << " pending_wait=" << (tick - trace.pending_request_ms) << "ms";
+            close_ss << " 挂起等待=" << (tick - trace.pending_request_ms) << "ms";
         }
         LogInfo(close_ss.str());
     }
@@ -1585,15 +1585,15 @@ bool LinuxPacketTunnelClient::Start(std::string* error) {
     std::string udp_candidate_error;
     if (!SendUdpDirectCandidateAdvertises(&udp_candidate_error) &&
         !udp_candidate_error.empty()) {
-        LogWarn("packet tunnel udp direct candidate advertise failed: " + udp_candidate_error);
+        LogWarn("上报UDP直连候选失败: " + udp_candidate_error);
     }
     std::string tcp_direct_listener_error;
     if (!StartTcpDirectListener(&tcp_direct_listener_error)) {
         if (!tcp_direct_listener_error.empty()) {
-            LogWarn("packet tunnel tcp direct listener unavailable, keep relay paths: " +
+            LogWarn("TCP直连监听不可用，继续保留中转路径: " +
                     tcp_direct_listener_error);
         } else {
-            LogWarn("packet tunnel tcp direct listener unavailable, keep relay paths");
+            LogWarn("TCP直连监听不可用，继续保留中转路径");
         }
     }
     std::string tcp_error;
@@ -1606,14 +1606,14 @@ bool LinuxPacketTunnelClient::Start(std::string* error) {
         }
         tcp_connected_ = false;
         if (!tcp_error.empty()) {
-            LogWarn("packet tunnel tcp relay unavailable, fallback to udp relay: " + tcp_error);
+            LogWarn("TCP中转载体不可用，回退到UDP中转: " + tcp_error);
         } else {
-            LogWarn("packet tunnel tcp relay unavailable, fallback to udp relay");
+            LogWarn("TCP中转载体不可用，回退到UDP中转");
         }
     } else {
         std::string advertise_error;
         if (!SendTcpDirectAdvertise(&advertise_error) && !advertise_error.empty()) {
-            LogWarn("packet tunnel tcp direct advertise failed: " + advertise_error);
+            LogWarn("上报TCP直连监听信息失败: " + advertise_error);
         }
     }
     if (!StartThreads(error)) {
@@ -1692,7 +1692,7 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
     int ret = getaddrinfo(tunnel_host_.c_str(), port_str.c_str(), &hints, &result);
     if (ret != 0) {
         if (error != NULL) {
-            *error = "packet tunnel DNS resolve failed: " + tunnel_host_;
+            *error = "数据隧道 DNS 解析失败: " + tunnel_host_;
         }
         return false;
     }
@@ -1704,12 +1704,12 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
 
     if (relay_candidates.empty()) {
         if (error != NULL) {
-            *error = "packet tunnel resolve returned no usable endpoint: " + tunnel_host_;
+            *error = "数据隧道解析后未返回可用端点: " + tunnel_host_;
         }
         return false;
     }
 
-    LogInfo("packet tunnel relay endpoint candidates: " +
+    LogInfo("中转端点候选: " +
             BuildLinuxRelayEndpointCandidateSummary(relay_candidates));
 
     auto configure_socket = [&](int sock, int family) {
@@ -1769,7 +1769,7 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
             bind(sock,
                  reinterpret_cast<const sockaddr*>(&local_bind_addr),
                  local_bind_addr_len) != 0) {
-            LogWarn("packet tunnel local bind fallback: " + std::string(strerror(errno)));
+            LogWarn("本地绑定回退: " + std::string(strerror(errno)));
             has_local_bind = false;
         }
 
@@ -1778,12 +1778,12 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
         server_endpoint_.addr = endpoint_addr;
         server_endpoint_.addr_len = endpoint_addr_len;
         server_endpoint_.valid = true;
-        LogInfo("packet tunnel udp socket ready for relay server " + tunnel_host_ +
+        LogInfo("UDP到中转服务器的套接字已就绪 " + tunnel_host_ +
                 ":" + std::to_string(tunnel_port_) +
-                " scope=" + LinuxRelayEndpointScopeName(candidate) +
-                " family=" + std::to_string(socket_family_) +
+                " 作用域=" + LinuxRelayEndpointScopeName(candidate) +
+                " 协议族=" + std::to_string(socket_family_) +
                 (has_local_bind
-                     ? (" local=" + LinuxSockaddrToString(local_bind_addr, local_bind_addr_len))
+                     ? (" 本地地址=" + LinuxSockaddrToString(local_bind_addr, local_bind_addr_len))
                      : std::string("")));
         return true;
     };
@@ -1798,7 +1798,7 @@ bool LinuxPacketTunnelClient::ConnectSocket(std::string* error) {
 
     if (!connected) {
         if (error != NULL) {
-            *error = "packet tunnel connect failed: " + tunnel_host_ + ":" + port_str;
+            *error = "数据隧道连接失败: " + tunnel_host_ + ":" + port_str;
         }
         return false;
     }
@@ -1813,7 +1813,7 @@ bool LinuxPacketTunnelClient::ConnectTcpSocket(std::string* error) {
     }
     if (!server_endpoint_.valid) {
         if (error != NULL) {
-            *error = "packet tunnel tcp relay endpoint is invalid";
+            *error = "TCP中转载体端点无效";
         }
         return false;
     }
@@ -1823,7 +1823,7 @@ bool LinuxPacketTunnelClient::ConnectTcpSocket(std::string* error) {
     int sock = socket(family, SOCK_STREAM, IPPROTO_TCP);
     if (sock < 0) {
         if (error != NULL) {
-            *error = std::string("packet tunnel tcp socket create failed: ") + strerror(errno);
+            *error = std::string("创建TCP中转载体套接字失败: ") + strerror(errno);
         }
         return false;
     }
@@ -1850,14 +1850,14 @@ bool LinuxPacketTunnelClient::ConnectTcpSocket(std::string* error) {
         const std::string connect_error = std::string(strerror(errno));
         close(sock);
         if (error != NULL) {
-            *error = "packet tunnel tcp connect failed: " + connect_error;
+            *error = "TCP中转载体连接失败: " + connect_error;
         }
         return false;
     }
 
     tcp_sock_ = sock;
     tcp_connected_ = true;
-    LogInfo("packet tunnel tcp relay connected to " +
+    LogInfo("TCP中转载体已连接到 " +
             LinuxSockaddrToString(server_endpoint_.addr, server_endpoint_.addr_len));
     return true;
 }
@@ -1867,7 +1867,7 @@ bool LinuxPacketTunnelClient::BuildHandshakePayload(bool relay_only,
                                                     std::string* error) const {
     if (handshake == NULL) {
         if (error != NULL) {
-            *error = "packet tunnel handshake buffer is null";
+            *error = "握手缓冲区为空";
         }
         return false;
     }
@@ -1875,13 +1875,13 @@ bool LinuxPacketTunnelClient::BuildHandshakePayload(bool relay_only,
     const uint8_t session_uuid_len = static_cast<uint8_t>(session_uuid_.size());
     if (client_id_.empty()) {
         if (error != NULL) {
-            *error = "packet tunnel client_id is empty";
+            *error = "客户端ID为空";
         }
         return false;
     }
     if (client_id_.size() > 255) {
         if (error != NULL) {
-            *error = "packet tunnel client_id is too long";
+            *error = "客户端ID过长";
         }
         return false;
     }
@@ -1928,7 +1928,7 @@ bool LinuxPacketTunnelClient::SendHandshake(std::string* error) {
 bool LinuxPacketTunnelClient::SendTcpHandshake(std::string* error) {
     if (!tcp_connected_ || tcp_sock_ < 0) {
         if (error != NULL) {
-            *error = "packet tunnel tcp relay is not connected";
+            *error = "TCP中转载体尚未连接";
         }
         return false;
     }
@@ -1950,19 +1950,19 @@ bool LinuxPacketTunnelClient::SendTcpHandshake(std::string* error) {
             continue;
         }
         if (error != NULL) {
-            *error = std::string("packet tunnel tcp handshake send failed: ") + strerror(errno);
+            *error = std::string("发送TCP中转载体握手失败: ") + strerror(errno);
         }
         return false;
     }
 
-    LogInfo("packet tunnel tcp relay handshake sent");
+    LogInfo("已发送TCP中转载体握手");
     return true;
 }
 
 bool LinuxPacketTunnelClient::SendUdpDirectCandidateAdvertises(std::string* error) {
     if (sock_ < 0) {
         if (error != NULL) {
-            *error = "packet tunnel udp socket is not connected";
+            *error = "UDP套接字尚未连接";
         }
         return false;
     }
@@ -1971,7 +1971,7 @@ bool LinuxPacketTunnelClient::SendUdpDirectCandidateAdvertises(std::string* erro
     socklen_t local_addr_len = sizeof(local_addr);
     if (getsockname(sock_, reinterpret_cast<sockaddr*>(&local_addr), &local_addr_len) != 0) {
         if (error != NULL) {
-            *error = std::string("packet tunnel udp getsockname failed: ") + strerror(errno);
+            *error = std::string("获取UDP套接字本地地址失败: ") + strerror(errno);
         }
         return false;
     }
@@ -1984,7 +1984,7 @@ bool LinuxPacketTunnelClient::SendUdpDirectCandidateAdvertises(std::string* erro
     }
     if (local_port == 0) {
         if (error != NULL) {
-            *error = "packet tunnel udp local port is unavailable";
+            *error = "UDP本地端口不可用";
         }
         return false;
     }
@@ -1993,7 +1993,7 @@ bool LinuxPacketTunnelClient::SendUdpDirectCandidateAdvertises(std::string* erro
     ifaddrs* interfaces = NULL;
     if (getifaddrs(&interfaces) != 0) {
         if (error != NULL) {
-            *error = std::string("packet tunnel udp interface enumeration failed: ") +
+            *error = std::string("枚举UDP网卡地址失败: ") +
                      strerror(errno);
         }
         return false;
@@ -2039,7 +2039,7 @@ bool LinuxPacketTunnelClient::SendUdpDirectCandidateAdvertises(std::string* erro
     }
     freeifaddrs(interfaces);
 
-    LogInfo("packet tunnel udp direct local candidates advertised count=" +
+    LogInfo("UDP直连本地候选已上报，数量=" +
             std::to_string(candidate_count));
     return true;
 }
@@ -2051,7 +2051,7 @@ bool LinuxPacketTunnelClient::SendUdpDirectCandidateAdvertise(
         (candidate.endpoint_family != packet_tunnel::kPeerEndpointFamilyIpv4 &&
          candidate.endpoint_family != packet_tunnel::kPeerEndpointFamilyIpv6)) {
         if (error != NULL) {
-            *error = "packet tunnel udp direct candidate is invalid";
+            *error = "UDP直连候选无效";
         }
         return false;
     }
@@ -2085,20 +2085,20 @@ bool LinuxPacketTunnelClient::ReceiveHandshakeAck(std::string* error) {
         }
         if (received != static_cast<int>(sizeof(ack))) {
             if (error != NULL) {
-                *error = "packet tunnel ack size mismatch";
+                *error = "握手确认长度不匹配";
             }
             return false;
         }
 
         if (ack[0] != packet_tunnel::kProtocolVersion) {
             if (error != NULL) {
-                *error = "packet tunnel ack version mismatch";
+                *error = "握手确认协议版本不匹配";
             }
             return false;
         }
         if (ack[1] != packet_tunnel::kStatusOk) {
             if (error != NULL) {
-                *error = "packet tunnel ack rejected";
+                *error = "握手确认被拒绝";
             }
             return false;
         }
@@ -2108,7 +2108,7 @@ bool LinuxPacketTunnelClient::ReceiveHandshakeAck(std::string* error) {
         return true;
     }
     if (error != NULL) {
-        *error = "packet tunnel handshake interrupted";
+        *error = "握手已中断";
     }
     return false;
 }
@@ -2121,18 +2121,18 @@ bool LinuxPacketTunnelClient::ReceiveTcpHandshakeAck(std::string* error) {
 
     if (ack[0] != packet_tunnel::kProtocolVersion) {
         if (error != NULL) {
-            *error = "packet tunnel tcp ack version mismatch";
+            *error = "TCP握手确认协议版本不匹配";
         }
         return false;
     }
     if (ack[1] != packet_tunnel::kStatusOk) {
         if (error != NULL) {
-            *error = "packet tunnel tcp ack rejected";
+            *error = "TCP握手确认被拒绝";
         }
         return false;
     }
 
-    LogInfo("packet tunnel tcp relay handshake acknowledged");
+    LogInfo("TCP中转载体握手已确认");
     return true;
 }
 
@@ -2207,14 +2207,14 @@ bool LinuxPacketTunnelClient::StartTcpDirectListener(std::string* error) {
     if (!try_listen_family(preferred_family, &listen_sock, &listen_port) &&
         !try_listen_family(fallback_family, &listen_sock, &listen_port)) {
         if (error != NULL) {
-            *error = std::string("packet tunnel tcp direct listen failed: ") + strerror(errno);
+            *error = std::string("TCP直连监听失败: ") + strerror(errno);
         }
         return false;
     }
 
     tcp_direct_listen_sock_ = listen_sock;
     tcp_direct_listen_port_ = listen_port;
-    LogInfo("packet tunnel tcp direct listener ready port=" +
+    LogInfo("TCP直连监听已就绪，端口=" +
             std::to_string(tcp_direct_listen_port_));
     return true;
 }
@@ -2222,13 +2222,13 @@ bool LinuxPacketTunnelClient::StartTcpDirectListener(std::string* error) {
 bool LinuxPacketTunnelClient::SendTcpDirectAdvertise(std::string* error) {
     if (!tcp_connected_ || tcp_sock_ < 0) {
         if (error != NULL) {
-            *error = "packet tunnel tcp relay is not connected";
+            *error = "TCP中转载体尚未连接";
         }
         return false;
     }
     if (tcp_direct_listen_port_ == 0) {
         if (error != NULL) {
-            *error = "packet tunnel tcp direct listener is not available";
+            *error = "TCP直连监听不可用";
         }
         return false;
     }
@@ -2242,7 +2242,7 @@ bool LinuxPacketTunnelClient::SendTcpDirectAdvertise(std::string* error) {
         return false;
     }
 
-    LogInfo("packet tunnel tcp direct advertised listen_port=" +
+    LogInfo("已上报TCP直连监听端口=" +
             std::to_string(tcp_direct_listen_port_));
 
     size_t candidate_count = 0;
@@ -2289,7 +2289,7 @@ bool LinuxPacketTunnelClient::SendTcpDirectAdvertise(std::string* error) {
         freeifaddrs(interfaces);
     }
 
-    LogInfo("packet tunnel tcp direct local candidates advertised count=" +
+    LogInfo("TCP直连本地候选已上报，数量=" +
             std::to_string(candidate_count));
     return true;
 }
@@ -2299,7 +2299,7 @@ bool LinuxPacketTunnelClient::SendTcpDirectCandidateAdvertise(
     std::string* error) {
     if (!tcp_connected_ || tcp_sock_ < 0) {
         if (error != NULL) {
-            *error = "packet tunnel tcp relay is not connected";
+            *error = "TCP中转载体尚未连接";
         }
         return false;
     }
@@ -2307,7 +2307,7 @@ bool LinuxPacketTunnelClient::SendTcpDirectCandidateAdvertise(
         (candidate.endpoint_family != packet_tunnel::kPeerEndpointFamilyIpv4 &&
          candidate.endpoint_family != packet_tunnel::kPeerEndpointFamilyIpv6)) {
         if (error != NULL) {
-            *error = "packet tunnel tcp direct candidate is invalid";
+            *error = "TCP直连候选无效";
         }
         return false;
     }
@@ -2523,20 +2523,20 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
                     datagram_peer_virtual_ip = peer_virtual_ip;
                     datagram_from_known_peer = true;
                     learned_direct_probe = true;
-                    LogInfo("learn direct probe endpoint peer=" + peer_virtual_ip +
-                            " source=" + LinuxSockaddrToString(source_addr, source_addr_len) +
-                            (learned_direct_endpoint_changed ? " changed=yes" : " changed=no"));
+                    LogInfo("通过直连探测学习到对端地址: 对端=" + peer_virtual_ip +
+                            " 来源=" + LinuxSockaddrToString(source_addr, source_addr_len) +
+                            (learned_direct_endpoint_changed ? " 已变化=是" : " 已变化=否"));
                 }
             }
             if (!from_server && !from_known_peer) {
-                LogWarn("ignore ipv4 packet from unknown endpoint source=" +
+                LogWarn("忽略来自未知端点的IPv4数据包: 来源=" +
                         LinuxSockaddrToString(source_addr, source_addr_len));
                 continue;
             }
             if (from_known_peer &&
                 (payload_len < 20 ||
                  LinuxIpv4ToString(payload + 12) != peer_virtual_ip)) {
-                LogWarn("ignore peer ipv4 packet with mismatched inner src peer=" + peer_virtual_ip);
+                LogWarn("忽略内部源地址不匹配的对端IPv4数据包: 对端=" + peer_virtual_ip);
                 continue;
             }
             if (from_known_peer) {
@@ -2602,17 +2602,17 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
             std::string tun_error;
             if (!tun_manager_->WritePacket(payload, payload_len, &tun_error)) {
                 if (should_log_focused_udp && !udp_desc.empty()) {
-                    LogWarn(std::string(from_known_peer ? "udp peer->tun write failed " :
-                                                           "udp tunnel->tun write failed ") +
-                            udp_desc + " error=" + tun_error);
+                    LogWarn(std::string(from_known_peer ? "UDP 对端->TUN 写入失败 " :
+                                                           "UDP 中转->TUN 写入失败 ") +
+                            udp_desc + " 错误=" + tun_error);
                 } else {
-                    LogWarn("write packet to TUN failed: " + tun_error);
+                    LogWarn("写入TUN失败: " + tun_error);
                 }
                 continue;
             }
 
             if (should_log_focused_udp && !udp_desc.empty()) {
-                LogInfo(std::string(from_known_peer ? "udp peer->tun " : "udp tunnel->tun ") +
+                LogInfo(std::string(from_known_peer ? "UDP 对端->TUN " : "UDP 中转->TUN ") +
                         udp_desc);
             }
             TraceWatchedTcpPacket(payload,
@@ -2636,15 +2636,15 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
     if (frame_type == packet_tunnel::kFrameTcpPeerOffer) {
         ParsedLinuxPeerOffer offer = {};
         if (!ParseLinuxPeerOfferPayload(payload, length, &offer)) {
-            LogWarn("ignore invalid tcp_peer_offer frame len=" + std::to_string(length));
+            LogWarn("忽略无效的TCP对等提议帧，长度=" + std::to_string(length));
             return true;
         }
         if (offer.peer_virtual_ip.empty() ||
             offer.peer_virtual_ip == virtual_ip_ ||
             offer.endpoint_port == 0) {
-            LogInfo("ignore unusable tcp_peer_offer peer=" +
+            LogInfo("忽略不可用的TCP对等提议: 对端=" +
                     offer.peer_virtual_ip +
-                    " endpoint=" + offer.endpoint);
+                    " 端点=" + offer.endpoint);
             return true;
         }
 
@@ -2654,9 +2654,9 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             TcpDirectOffer& stored = tcp_direct_offers_[offer.peer_virtual_ip];
             if (stored.endpoint_version != 0 &&
                 offer.endpoint_version < stored.endpoint_version) {
-                LogInfo("ignore stale tcp_peer_offer peer=" +
+                LogInfo("忽略过期的TCP对等提议: 对端=" +
                         offer.peer_virtual_ip +
-                        " version=" + std::to_string(offer.endpoint_version));
+                        " 版本=" + std::to_string(offer.endpoint_version));
                 return true;
             }
             std::vector<TcpDirectCandidate> previous_candidates;
@@ -2724,11 +2724,11 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
 
         const unsigned long long tick = now_ms();
         if (changed) {
-            LogInfo("peer control tcp_peer_offer: peer=" +
+            LogInfo("对等端控制 TCP对等提议: 对端=" +
                     offer.peer_virtual_ip +
-                    " version=" + std::to_string(offer.endpoint_version) +
-                    " endpoint=" + offer.endpoint +
-                    " changed=yes");
+                    " 版本=" + std::to_string(offer.endpoint_version) +
+                    " 端点=" + offer.endpoint +
+                    " 已变化=是");
             MarkPeerWarmupWindow(offer.peer_virtual_ip);
             if (ShouldAutoWarmTcpPeer(offer.peer_virtual_ip, tick)) {
                 MaybeStartTcpDirectConnect(offer.peer_virtual_ip);
@@ -2736,9 +2736,9 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
         } else if (ShouldLogPeerControlEvent("stable_tcp_offer:" + offer.peer_virtual_ip,
                                              tick,
                                              static_cast<unsigned long long>(kPeerSnapshotLogIntervalMs))) {
-            LogInfo("peer control ignore stable tcp_peer_offer: peer=" +
+            LogInfo("对等端控制 忽略稳定的TCP对等提议: 对端=" +
                     offer.peer_virtual_ip +
-                    " version=" + std::to_string(offer.endpoint_version));
+                    " 版本=" + std::to_string(offer.endpoint_version));
         }
         return true;
     }
@@ -2746,7 +2746,7 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
     if (frame_type == packet_tunnel::kFramePeerOffer) {
         ParsedLinuxPeerOffer offer = {};
         if (!ParseLinuxPeerOfferPayload(payload, length, &offer)) {
-            LogWarn("ignore invalid peer_offer frame len=" + std::to_string(length));
+            LogWarn("忽略无效的对等提议帧，长度=" + std::to_string(length));
             return true;
         }
         bool should_send_hello = true;
@@ -2762,14 +2762,14 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             if (ShouldLogPeerControlEvent("stable_udp_offer:" + offer.peer_virtual_ip,
                                           tick,
                                           static_cast<unsigned long long>(kPeerSnapshotLogIntervalMs))) {
-                LogInfo("peer control ignore stable peer_offer: peer=" + offer.peer_virtual_ip +
-                        " version=" + std::to_string(offer.endpoint_version));
+                LogInfo("对等端控制 忽略稳定的对等提议: 对端=" + offer.peer_virtual_ip +
+                        " 版本=" + std::to_string(offer.endpoint_version));
             }
             return true;
         }
-        LogInfo("peer control peer_offer: peer=" + offer.peer_virtual_ip +
-                " version=" + std::to_string(offer.endpoint_version) +
-                " endpoint=" + offer.endpoint);
+        LogInfo("对等端控制 对等提议: 对端=" + offer.peer_virtual_ip +
+                " 版本=" + std::to_string(offer.endpoint_version) +
+                " 端点=" + offer.endpoint);
         MarkPeerWarmupWindow(offer.peer_virtual_ip);
         const uint32_t nonce = peer_signal_nonce_.fetch_add(1);
         if (SendPeerSignalFrame(packet_tunnel::kFramePeerHello,
@@ -2781,13 +2781,13 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                                                         offer.endpoint_version,
                                                         nonce);
             }
-            LogInfo("peer control send peer_hello: peer=" + offer.peer_virtual_ip +
-                    " version=" + std::to_string(offer.endpoint_version) +
-                    " nonce=" + std::to_string(nonce));
+            LogInfo("对等端控制 发送对等问候: 对端=" + offer.peer_virtual_ip +
+                    " 版本=" + std::to_string(offer.endpoint_version) +
+                    " 随机数=" + std::to_string(nonce));
         } else {
-            LogWarn("peer control send peer_hello failed: peer=" + offer.peer_virtual_ip +
-                    " version=" + std::to_string(offer.endpoint_version) +
-                    " nonce=" + std::to_string(nonce));
+            LogWarn("对等端控制 发送对等问候失败: 对端=" + offer.peer_virtual_ip +
+                    " 版本=" + std::to_string(offer.endpoint_version) +
+                    " 随机数=" + std::to_string(nonce));
         }
         return true;
     }
@@ -2797,8 +2797,8 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
         frame_type == packet_tunnel::kFramePeerKeepalive) {
         ParsedLinuxPeerSignal signal = {};
         if (!ParseLinuxPeerSignalPayload(payload, length, &signal)) {
-            LogWarn("ignore invalid " + LinuxFrameName(frame_type) +
-                    " frame len=" + std::to_string(length));
+            LogWarn("忽略无效的" + LinuxFrameName(frame_type) +
+                    "帧，长度=" + std::to_string(length));
             return true;
         }
 
@@ -2809,9 +2809,9 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
                 if (!peer_link_manager_->TryPromotePeerDirectReady(signal.peer_virtual_ip,
                                                                    signal.endpoint_version,
                                                                    signal.nonce)) {
-                    LogInfo("peer control ignore unexpected peer_ack: peer=" + signal.peer_virtual_ip +
-                            " version=" + std::to_string(signal.endpoint_version) +
-                            " nonce=" + std::to_string(signal.nonce));
+                    LogInfo("对等端控制 忽略非预期的对等确认: 对端=" + signal.peer_virtual_ip +
+                            " 版本=" + std::to_string(signal.endpoint_version) +
+                            " 随机数=" + std::to_string(signal.nonce));
                     return true;
                 }
             } else {
@@ -2819,22 +2819,22 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             }
         }
 
-        LogInfo("peer control " + LinuxFrameName(frame_type) +
-                ": peer=" + signal.peer_virtual_ip +
-                " version=" + std::to_string(signal.endpoint_version) +
-                " nonce=" + std::to_string(signal.nonce));
+        LogInfo("对等端控制 " + LinuxFrameName(frame_type) +
+                ": 对端=" + signal.peer_virtual_ip +
+                " 版本=" + std::to_string(signal.endpoint_version) +
+                " 随机数=" + std::to_string(signal.nonce));
         if (frame_type == packet_tunnel::kFramePeerHello) {
             if (SendPeerSignalFrame(packet_tunnel::kFramePeerAck,
                                     signal.peer_virtual_ip,
                                     signal.endpoint_version,
                                     signal.nonce)) {
-                LogInfo("peer control send peer_ack: peer=" + signal.peer_virtual_ip +
-                        " version=" + std::to_string(signal.endpoint_version) +
-                        " nonce=" + std::to_string(signal.nonce));
+                LogInfo("对等端控制 发送对等确认: 对端=" + signal.peer_virtual_ip +
+                        " 版本=" + std::to_string(signal.endpoint_version) +
+                        " 随机数=" + std::to_string(signal.nonce));
             } else {
-                LogWarn("peer control send peer_ack failed: peer=" + signal.peer_virtual_ip +
-                        " version=" + std::to_string(signal.endpoint_version) +
-                        " nonce=" + std::to_string(signal.nonce));
+                LogWarn("对等端控制 发送对等确认失败: 对端=" + signal.peer_virtual_ip +
+                        " 版本=" + std::to_string(signal.endpoint_version) +
+                        " 随机数=" + std::to_string(signal.nonce));
             }
         }
         return true;
@@ -2843,16 +2843,16 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
     if (frame_type == packet_tunnel::kFramePeerDisable) {
         ParsedLinuxPeerDisable disable = {};
         if (!ParseLinuxPeerDisablePayload(payload, length, &disable)) {
-            LogWarn("ignore invalid peer_disable frame len=" + std::to_string(length));
+            LogWarn("忽略无效的对等端禁用帧，长度=" + std::to_string(length));
             return true;
         }
         if (peer_link_manager_ != NULL) {
             peer_link_manager_->MarkPeerCooldown(disable.peer_virtual_ip,
                                                  disable.endpoint_version);
         }
-        LogInfo("peer control peer_disable: peer=" + disable.peer_virtual_ip +
-                " version=" + std::to_string(disable.endpoint_version) +
-                " reason=" + std::to_string(disable.reason));
+        LogInfo("对等端控制 对等端禁用: 对端=" + disable.peer_virtual_ip +
+                " 版本=" + std::to_string(disable.endpoint_version) +
+                " 原因=" + std::to_string(disable.reason));
         return true;
     }
 
@@ -3190,7 +3190,7 @@ bool LinuxPacketTunnelClient::SendDatagramToEndpoint(const UdpEndpoint& endpoint
                                                      std::string* error) {
     if (!endpoint.valid) {
         if (error != NULL) {
-            *error = "packet tunnel send target is invalid";
+            *error = "数据隧道发送目标无效";
         }
         return false;
     }
@@ -3215,17 +3215,17 @@ bool LinuxPacketTunnelClient::SendDatagramToEndpoint(const UdpEndpoint& endpoint
         }
         if (!IsLinuxTransientSendError(last_error)) {
             if (error != NULL) {
-                *error = std::string("packet tunnel send failed: ") + strerror(last_error);
+                *error = std::string("数据隧道发送失败: ") + strerror(last_error);
             }
             return false;
         }
         break;
     }
 
-    LogWarn("packet tunnel send dropped after transient stall: error=" +
+    LogWarn("数据隧道发送在短暂阻塞后丢弃: 错误=" +
             std::string(strerror(last_error)));
     if (error != NULL) {
-        *error = std::string("packet tunnel send dropped: ") + strerror(last_error);
+        *error = std::string("数据隧道发送已丢弃: ") + strerror(last_error);
     }
     return true;
 }
@@ -3254,13 +3254,13 @@ int LinuxPacketTunnelClient::RecvDatagramFrom(uint8_t* data,
             return 0;
         }
         if (error != NULL) {
-            *error = std::string("packet tunnel recv failed: ") + strerror(errno);
+            *error = std::string("数据隧道接收失败: ") + strerror(errno);
         }
         return -1;
     }
     if (n == 0) {
         if (error != NULL) {
-            *error = "packet tunnel peer closed";
+            *error = "数据隧道对端已关闭";
         }
         return -1;
     }
@@ -3273,7 +3273,7 @@ void LinuxPacketTunnelClient::TcpSocketReadLoop() {
         std::string error;
         if (!RecvTcpExact(header, sizeof(header), &error)) {
             if (!stop_requested_ && tcp_connected_ && !error.empty()) {
-                LogWarn("packet tunnel tcp relay read stopped: " + error);
+                LogWarn("TCP中转载体读取已停止: " + error);
             }
             break;
         }
@@ -3284,7 +3284,7 @@ void LinuxPacketTunnelClient::TcpSocketReadLoop() {
         if (payload_len > 0 &&
             !RecvTcpExact(payload.data(), payload_len, &error)) {
             if (!stop_requested_ && tcp_connected_ && !error.empty()) {
-                LogWarn("packet tunnel tcp relay payload read stopped: " + error);
+                LogWarn("TCP中转载体负载读取已停止: " + error);
             }
             break;
         }
@@ -3296,15 +3296,15 @@ void LinuxPacketTunnelClient::TcpSocketReadLoop() {
             continue;
         }
         if (frame_type != packet_tunnel::kFrameIpv4Packet || tun_manager_ == NULL) {
-            LogInfo("ignore packet tunnel tcp relay frame type=" + std::to_string(frame_type) +
-                    " len=" + std::to_string(payload.size()));
+            LogInfo("忽略TCP中转载体帧: 类型=" + std::to_string(frame_type) +
+                    " 长度=" + std::to_string(payload.size()));
             continue;
         }
 
         std::string tun_error;
         if (!tun_manager_->WritePacket(payload.data(), payload.size(), &tun_error)) {
             if (!stop_requested_) {
-                LogWarn("packet tunnel tcp relay write to tun failed: " + tun_error);
+                LogWarn("TCP中转载体写入TUN失败: " + tun_error);
             }
             continue;
         }
@@ -3328,7 +3328,7 @@ bool LinuxPacketTunnelClient::RecvFrameFromSocket(int sock,
                                                   std::string* error) {
     if (sock < 0 || frame_type == NULL || payload == NULL) {
         if (error != NULL) {
-            *error = "packet tunnel tcp direct recv invalid argument";
+            *error = "TCP直连接收参数无效";
         }
         return false;
     }
@@ -3346,7 +3346,7 @@ bool LinuxPacketTunnelClient::RecvFrameFromSocket(int sock,
             }
             if (n == 0) {
                 if (error != NULL) {
-                    *error = "packet tunnel tcp direct peer closed";
+                    *error = "TCP直连对端已关闭";
                 }
                 return false;
             }
@@ -3355,7 +3355,7 @@ bool LinuxPacketTunnelClient::RecvFrameFromSocket(int sock,
                 continue;
             }
             if (error != NULL) {
-                *error = std::string("packet tunnel tcp direct recv failed: ") + strerror(errno);
+                *error = std::string("TCP直连接收失败: ") + strerror(errno);
             }
             return false;
         }
@@ -3384,7 +3384,7 @@ bool LinuxPacketTunnelClient::SendFrameOverSocket(int sock,
                                                   std::string* error) {
     if (sock < 0 || length > 0xFFFFu) {
         if (error != NULL) {
-            *error = "packet tunnel tcp direct send invalid argument";
+            *error = "TCP直连发送参数无效";
         }
         return false;
     }
@@ -3429,9 +3429,9 @@ bool LinuxPacketTunnelClient::SendFrameOverSocket(int sock,
     }
     if (error != NULL) {
         if (last_error != 0) {
-            *error = std::string("packet tunnel tcp direct send failed: ") + strerror(last_error);
+            *error = std::string("TCP直连发送失败: ") + strerror(last_error);
         } else {
-            *error = "packet tunnel tcp direct send interrupted";
+            *error = "TCP直连发送被中断";
         }
     }
     return false;
@@ -3473,7 +3473,7 @@ void LinuxPacketTunnelClient::TcpDirectAcceptLoop() {
         connection->read_thread =
             std::thread(&LinuxPacketTunnelClient::TcpDirectReadLoop, this, connection, true);
         connection->read_thread.detach();
-        LogInfo("packet tunnel tcp direct accepted from " +
+        LogInfo("已接受TCP直连接入，来源=" +
                 LinuxSockaddrToString(peer_addr, peer_addr_len));
     }
 }
@@ -3499,7 +3499,7 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
             open_frame_type != packet_tunnel::kFrameTcpDirectOpen ||
             open_payload.size() != packet_tunnel::kTcpDirectOpenPayloadSize) {
             if (!stop_requested_) {
-                LogInfo("packet tunnel tcp direct incoming open failed: " + open_error);
+                LogInfo("TCP直连接入打开失败: " + open_error);
             }
             CloseFdQuiet(&connection->sock);
             connection->active = false;
@@ -3511,9 +3511,9 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
         if (src_virtual_ip.empty() ||
             src_virtual_ip == virtual_ip_ ||
             dst_virtual_ip != virtual_ip_) {
-            LogInfo("packet tunnel tcp direct incoming open rejected src=" +
+            LogInfo("拒绝TCP直连接入，来源=" +
                     src_virtual_ip +
-                    " dst=" + dst_virtual_ip);
+                    " 目标=" + dst_virtual_ip);
             CloseFdQuiet(&connection->sock);
             connection->active = false;
             return;
@@ -3530,9 +3530,9 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
         std::string error;
         if (!RecvFrameFromSocket(connection->sock, &frame_type, &payload, &error)) {
             if (!stop_requested_ && !error.empty()) {
-                LogInfo("packet tunnel tcp direct read stopped peer=" +
+                LogInfo("TCP直连读取结束，对端=" +
                         (peer_virtual_ip.empty() ? std::string("?") : peer_virtual_ip) +
-                        " reason=" + error);
+                        " 原因=" + error);
             }
             break;
         }
@@ -3556,17 +3556,17 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
         if (frame_type != packet_tunnel::kFrameIpv4Packet ||
             payload.size() < 20 ||
             (((payload[0] >> 4) & 0x0F) != 4)) {
-            LogInfo("ignore packet tunnel tcp direct frame type=" +
+            LogInfo("忽略TCP直连帧，类型=" +
                     LinuxFrameName(frame_type) +
-                    " len=" + std::to_string(payload.size()));
+                    " 长度=" + std::to_string(payload.size()));
             continue;
         }
 
         const std::string inner_src_virtual_ip = LinuxIpv4ToString(payload.data() + 12);
         if (!peer_virtual_ip.empty() && inner_src_virtual_ip != peer_virtual_ip) {
-            LogInfo("ignore packet tunnel tcp direct packet with mismatched src peer=" +
+            LogInfo("忽略源地址不匹配的TCP直连包，对端=" +
                     peer_virtual_ip +
-                    " inner_src=" + inner_src_virtual_ip);
+                    " inner_来源=" + inner_src_virtual_ip);
             continue;
         }
 
@@ -3575,7 +3575,7 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
         if (!tun_manager_ ||
             !tun_manager_->WritePacket(payload.data(), payload.size(), &tun_error)) {
             if (!stop_requested_) {
-                LogWarn("packet tunnel tcp direct write to tun failed: " + tun_error);
+                LogWarn("写入TUN失败，TCP直连数据入队失败: " + tun_error);
             }
             break;
         }
@@ -3618,9 +3618,9 @@ void LinuxPacketTunnelClient::RegisterTcpDirectConnection(
         CloseFdQuiet(&old_connection->sock);
     }
 
-    LogInfo(std::string("packet tunnel tcp direct ") +
-            (incoming ? "incoming" : "outgoing") +
-            " active peer=" + peer_virtual_ip);
+    LogInfo(std::string("TCP直连 ") +
+            (incoming ? "入站" : "出站") +
+            " active 对端=" + peer_virtual_ip);
 }
 
 void LinuxPacketTunnelClient::RemoveTcpDirectConnection(const std::string& peer_virtual_ip,
@@ -3698,7 +3698,7 @@ void LinuxPacketTunnelClient::MaintainTcpDirectConnections(unsigned long long ti
     }
 
     for (size_t i = 0; i < stale_connections.size(); ++i) {
-        LogInfo("packet tunnel tcp direct idle timeout peer=" + stale_connections[i].first);
+        LogInfo("TCP直连空闲超时，对端=" + stale_connections[i].first);
         RemoveTcpDirectConnection(stale_connections[i].first,
                                   stale_connections[i].second,
                                   true);
@@ -3851,7 +3851,7 @@ bool LinuxPacketTunnelClient::TrySendTcpDirectPacket(const std::string& peer_vir
         return true;
     }
 
-    LogWarn("packet tunnel tcp direct send failed, fallback to relay peer=" +
+    LogWarn("TCP直连发送失败，回退到中转，对端=" +
             peer_virtual_ip);
     RecordTcpDirectCandidateResult(peer_virtual_ip, connection->candidate, false, 0);
     RemoveTcpDirectConnection(peer_virtual_ip, connection->sock, true);
@@ -3959,9 +3959,9 @@ void LinuxPacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_vir
                                            kTcpDirectConnectTimeoutMs,
                                            &connect_error)) {
             if (!stop_requested_) {
-                LogInfo("packet tunnel tcp direct candidate failed peer=" + peer_virtual_ip +
-                        " endpoint=" + LinuxSockaddrToString(peer_addr, peer_addr_len) +
-                        " err=" + std::to_string(connect_error));
+                LogInfo("TCP直连候选连接失败，对端=" + peer_virtual_ip +
+                        " 端点=" + LinuxSockaddrToString(peer_addr, peer_addr_len) +
+                        " 错误码=" + std::to_string(connect_error));
             }
             close(direct_sock);
             RecordTcpDirectCandidateResult(peer_virtual_ip, candidate, false, 0);
@@ -4002,9 +4002,9 @@ void LinuxPacketTunnelClient::TcpDirectConnectWorker(const std::string& peer_vir
         connection->read_thread =
             std::thread(&LinuxPacketTunnelClient::TcpDirectReadLoop, this, connection, false);
         connection->read_thread.detach();
-        LogInfo("packet tunnel tcp direct connected peer=" + peer_virtual_ip +
-                " endpoint=" + LinuxSockaddrToString(peer_addr, peer_addr_len) +
-                " candidate=" + std::to_string(candidate_index + 1) +
+        LogInfo("TCP直连已连接，对端=" + peer_virtual_ip +
+                " 端点=" + LinuxSockaddrToString(peer_addr, peer_addr_len) +
+                " 候选=" + std::to_string(candidate_index + 1) +
                 "/" + std::to_string(candidate_count));
         return;
     }
@@ -4063,9 +4063,9 @@ void LinuxPacketTunnelClient::TunReadLoop() {
         const std::string route_desc =
             (has_desc && is_udp)
                 ? desc
-                : ("dst=" + dst_virtual_ip +
-                   " proto=" + inner_proto_name +
-                   " len=" + std::to_string(packet.size()));
+                : ("目标=" + dst_virtual_ip +
+                   " 协议=" + inner_proto_name +
+                   " 长度=" + std::to_string(packet.size()));
         uint16_t src_port = 0;
         uint16_t dst_port = 0;
         if (is_tcp) {
@@ -4167,7 +4167,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                             direct_packet_view->data(),
                                             direct_packet_view->size(),
                                             NULL)) {
-                        LogInfo(inner_proto_name + " tun->peer " + direct_route_desc);
+                        LogInfo(inner_proto_name + " TUN->对端 " + direct_route_desc);
                         TraceWatchedTcpPacket(packet.data(), packet.size(), "tun->peer");
                         continue;
                     }
@@ -4182,10 +4182,10 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                                                     0,
                                                                     active_direct,
                                                                     &failed_status);
-                    LogWarn(inner_proto_name + " active direct send failed, fallback to relay " +
+                    LogWarn(inner_proto_name + " 激活直连发送失败，回退到中转 " +
                             direct_route_desc);
                     if (state_changed && failed_status.state == LinuxPeerRouteState::Cooldown) {
-                        LogInfo("udp direct route entered cooldown peer=" +
+                        LogInfo("UDP直连进入冷却: 对端=" +
                                 failed_status.peer_virtual_ip);
                     }
                 } else if (direct_flow_decision.try_udp_probe) {
@@ -4211,7 +4211,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                                 probe_packet.size(),
                                                 NULL)) {
                             peer_probe_send_tick_[target_peer_virtual_ip] = tick;
-                            LogInfo(inner_proto_name + " direct probe request " + direct_route_desc);
+                            LogInfo(inner_proto_name + " 直连探测请求 " + direct_route_desc);
                         } else {
                             LinuxPeerRouteStatus failed_status = {};
                             const bool state_changed =
@@ -4226,11 +4226,11 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                         direct_route_desc);
                             } else {
                                 LogInfo(inner_proto_name +
-                                        " direct probe send failed, keep relay primary " +
+                                        " 直连探测发送失败，继续以中转为主 " +
                                         direct_route_desc);
                             }
                             if (state_changed && failed_status.state == LinuxPeerRouteState::Cooldown) {
-                                LogInfo("udp direct route entered cooldown peer=" +
+                                LogInfo("UDP直连进入冷却: 对端=" +
                                         failed_status.peer_virtual_ip);
                             }
                         }
@@ -4259,9 +4259,9 @@ void LinuxPacketTunnelClient::TunReadLoop() {
 
         if (flow_decision.try_tcp_direct_now &&
             TrySendTcpDirectPacket(dst_virtual_ip, packet.data(), packet.size())) {
-            LogInfo("tcp tun->tcp-peer dst=" + dst_virtual_ip + ":" +
+            LogInfo("TCP TUN->TCP对端 目标=" + dst_virtual_ip + ":" +
                     std::to_string(dst_port) +
-                    " len=" + std::to_string(packet.size()));
+                    " 长度=" + std::to_string(packet.size()));
             TraceWatchedTcpPacket(packet.data(), packet.size(), "tun->tcp-peer");
             continue;
         }
@@ -4276,7 +4276,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                              packet.size(),
                                              NULL);
             if (!relay_send_ok) {
-                LogWarn("packet tunnel tcp relay send failed, fallback to udp relay");
+                LogWarn("TCP中转载体发送失败，回退到UDP中转");
                 tcp_connected_ = false;
                 const int stale_tcp_sock = tcp_sock_;
                 tcp_sock_ = -1;
@@ -4329,9 +4329,9 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                                        relay_datagram.size(),
                                                        NULL);
                 if (relay_batch_frames > 1) {
-                    LogInfo("tcp tun->tunnel batched frames=" +
+                    LogInfo("TCP TUN->中转 批量帧数=" +
                             std::to_string(relay_batch_frames) +
-                            " bytes=" + std::to_string(relay_datagram.size()));
+                            " 字节数=" + std::to_string(relay_datagram.size()));
                 }
             } else {
                 relay_send_ok = SendFrame(packet_tunnel::kFrameIpv4Packet,
@@ -4347,7 +4347,7 @@ void LinuxPacketTunnelClient::TunReadLoop() {
 
         TraceWatchedTcpPacket(packet.data(), packet.size(), "tun->tunnel");
         if (has_desc) {
-            LogInfo("udp tun->tunnel " + desc);
+            LogInfo("UDP TUN->中转 " + desc);
         }
     }
 
@@ -4376,7 +4376,7 @@ void LinuxPacketTunnelClient::MaybeLogDirectRouteFallback(const std::string& pee
     }
 
     peer_route_debug_log_tick_[peer_virtual_ip] = tick;
-    LogInfo("udp direct route fallback: reason=" + reason + " peer=" + detail);
+    LogInfo("UDP直连回退: 原因=" + reason + " 对端=" + detail);
 }
 
 void LinuxPacketTunnelClient::MarkPeerBusinessActivity(const std::string& peer_virtual_ip) {
@@ -4486,9 +4486,9 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                 kPeerDirectReadyTimeoutMs,
                 kPeerCooldownTimeoutMs);
             for (size_t i = 0; i < expired.size(); ++i) {
-                LogInfo("peer control state transition: peer=" + expired[i].peer_virtual_ip +
-                        " state=" + LinuxPeerRouteStateName(expired[i].state) +
-                        " version=" + std::to_string(expired[i].endpoint_version));
+                LogInfo("对等端控制 状态切换: 对端=" + expired[i].peer_virtual_ip +
+                        " 状态=" + LinuxPeerRouteStateName(expired[i].state) +
+                        " 版本=" + std::to_string(expired[i].endpoint_version));
             }
 
             std::vector<LinuxPeerRouteStatus> peers = peer_link_manager_->Snapshot();
@@ -4496,7 +4496,7 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                 (last_peer_snapshot_log_ms == 0 ||
                  current_ms < last_peer_snapshot_log_ms ||
                  (current_ms - last_peer_snapshot_log_ms) >= kPeerSnapshotLogIntervalMs)) {
-                LogInfo("peer control snapshot: " +
+                LogInfo("对等端控制 快照: " +
                         BuildLinuxPeerRouteSnapshotSummary(peers, current_ms));
                 last_peer_snapshot_log_ms = current_ms;
             }
@@ -4538,11 +4538,11 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                                                     probe_packet.size(),
                                                     NULL)) {
                                 peer_probe_send_tick_[peers[i].peer_virtual_ip] = current_ms;
-                                LogInfo("peer control eager direct probe: peer=" +
+                                LogInfo("对等端控制 主动直连探测: 对端=" +
                                         peers[i].peer_virtual_ip +
-                                        " state=" + LinuxPeerRouteStateName(peers[i].state) +
-                                        " active=" + (active_direct ? std::string("yes")
-                                                                    : std::string("no")));
+                                        " 状态=" + LinuxPeerRouteStateName(peers[i].state) +
+                                        " 激活=" + (active_direct ? std::string("是")
+                                                                  : std::string("否")));
                             } else {
                                 LinuxPeerRouteStatus failed_status = {};
                                 const bool state_changed =
@@ -4551,11 +4551,11 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                                         peers[i].endpoint_version,
                                         active_direct,
                                         &failed_status);
-                                LogInfo("peer control eager direct probe failed: peer=" +
+                                LogInfo("对等端控制 主动直连探测失败: 对端=" +
                                         peers[i].peer_virtual_ip);
                                 if (state_changed &&
                                     failed_status.state == LinuxPeerRouteState::Cooldown) {
-                                    LogInfo("udp direct route entered cooldown peer=" +
+                                    LogInfo("UDP直连进入冷却: 对端=" +
                                             failed_status.peer_virtual_ip);
                                 }
                             }
@@ -4584,9 +4584,9 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
                                         peers[i].endpoint_version,
                                         nonce)) {
                     peer_keepalive_send_tick_[peers[i].peer_virtual_ip] = current_ms;
-                    LogInfo("peer control send peer_keepalive: peer=" + peers[i].peer_virtual_ip +
-                            " version=" + std::to_string(peers[i].endpoint_version) +
-                            " nonce=" + std::to_string(nonce));
+                    LogInfo("对等端控制 发送对等保活: 对端=" + peers[i].peer_virtual_ip +
+                            " 版本=" + std::to_string(peers[i].endpoint_version) +
+                            " 随机数=" + std::to_string(nonce));
                 }
             }
         }
@@ -4595,7 +4595,7 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
         if (last_receive_ms != 0 &&
             current_ms > last_receive_ms &&
             (current_ms - last_receive_ms) > kHeartbeatTimeoutMs) {
-            LogWarn("packet tunnel receive timeout, reconnect required: idle=" +
+            LogWarn("数据隧道接收超时，需要重连: 空闲=" +
                     std::to_string(current_ms - last_receive_ms) + "ms");
             break;
         }
@@ -4621,7 +4621,7 @@ bool LinuxPacketTunnelClient::RecvTcpExact(uint8_t* data,
         }
         if (n == 0) {
             if (error != NULL) {
-                *error = "packet tunnel tcp relay closed";
+                *error = "TCP中转载体已关闭";
             }
             return false;
         }
@@ -4632,7 +4632,7 @@ bool LinuxPacketTunnelClient::RecvTcpExact(uint8_t* data,
             continue;
         }
         if (error != NULL) {
-            *error = std::string("packet tunnel tcp recv failed: ") + strerror(errno);
+            *error = std::string("TCP中转载体接收失败: ") + strerror(errno);
         }
         return false;
     }
@@ -4641,7 +4641,7 @@ bool LinuxPacketTunnelClient::RecvTcpExact(uint8_t* data,
         return true;
     }
     if (error != NULL && error->empty() && !stop_requested_) {
-        *error = "packet tunnel tcp recv interrupted";
+        *error = "TCP中转载体接收被中断";
     }
     return false;
 }
@@ -4659,7 +4659,7 @@ bool LinuxPacketTunnelClient::SendFrameOverTcp(uint8_t frame_type,
                                                std::string* error) {
     if (!tcp_connected_ || tcp_sock_ < 0) {
         if (error != NULL) {
-            *error = "packet tunnel tcp relay is not connected";
+            *error = "TCP中转载体尚未连接";
         }
         return false;
     }
@@ -4693,7 +4693,7 @@ bool LinuxPacketTunnelClient::SendFrameOverTcp(uint8_t frame_type,
             continue;
         }
         if (error != NULL) {
-            *error = std::string("packet tunnel tcp send failed: ") + strerror(send_errno);
+            *error = std::string("TCP中转载体发送失败: ") + strerror(send_errno);
         }
         return false;
     }
@@ -4702,7 +4702,7 @@ bool LinuxPacketTunnelClient::SendFrameOverTcp(uint8_t frame_type,
         return true;
     }
     if (error != NULL && error->empty()) {
-        *error = "packet tunnel tcp send interrupted";
+        *error = "TCP中转载体发送被中断";
     }
     return false;
 }
@@ -4721,7 +4721,7 @@ uint32_t LinuxPacketTunnelClient::ParseVirtualIp(std::string* error) const {
     in_addr addr = {};
     if (inet_pton(AF_INET, virtual_ip_.c_str(), &addr) != 1) {
         if (error != NULL) {
-            *error = "invalid virtual ip: " + virtual_ip_;
+            *error = "无效的虚拟IP: " + virtual_ip_;
         }
         return 0;
     }
