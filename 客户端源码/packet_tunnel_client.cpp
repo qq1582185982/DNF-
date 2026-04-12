@@ -2101,7 +2101,7 @@ bool QueryRelayEndpointsViaSingleDnsServer(const std::string& host_name,
             PacketTunnelDebugLog("物理DNS发送失败: 服务器=" +
                                  SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
                                  " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
-                                 " type=" + DnsRecordTypeName(query_type) +
+                                 " 类型=" + DnsRecordTypeName(query_type) +
                                  " wsa=" + std::to_string(WSAGetLastError()));
             break;
         }
@@ -2112,7 +2112,7 @@ bool QueryRelayEndpointsViaSingleDnsServer(const std::string& host_name,
             PacketTunnelDebugLog("物理DNS接收失败: 服务器=" +
                                  SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
                                  " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
-                                 " type=" + DnsRecordTypeName(query_type) +
+                                 " 类型=" + DnsRecordTypeName(query_type) +
                                  " wsa=" + std::to_string(WSAGetLastError()));
             break;
         }
@@ -2128,7 +2128,7 @@ bool QueryRelayEndpointsViaSingleDnsServer(const std::string& host_name,
             PacketTunnelDebugLog("物理DNS解析失败: 服务器=" +
                                  SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
                                  " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
-                                 " type=" + DnsRecordTypeName(query_type) +
+                                 " 类型=" + DnsRecordTypeName(query_type) +
                                  " 字节数=" + std::to_string(received));
             break;
         }
@@ -2136,7 +2136,7 @@ bool QueryRelayEndpointsViaSingleDnsServer(const std::string& host_name,
         PacketTunnelDebugLog("物理DNS查询结果: 服务器=" +
                              SockaddrToString(dns_server.server_addr, dns_server.server_addr_len) +
                              " bind=" + SockaddrToString(bind_addr, bind_addr_len) +
-                             " type=" + DnsRecordTypeName(query_type) +
+                             " 类型=" + DnsRecordTypeName(query_type) +
                              " added=" + std::to_string(added));
         success = added > 0;
     } while (false);
@@ -2754,7 +2754,7 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
                                                  SockaddrToString(local_bind_addr, local_bind_addr_len) +
                                                  (bind_adapter_name.empty()
                                                       ? std::string()
-                                                      : (" adapter=" + bind_adapter_name)));
+                                                      : (" 适配器=" + bind_adapter_name)));
                         }
                     }
                 }
@@ -2778,7 +2778,7 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
                 has_local_bind_hint = true;
                 PacketTunnelDebugLog("UDP套接字路由提示已覆盖: " +
                                      SockaddrToString(local_bind_addr, local_bind_addr_len) +
-                                     " adapter=" + bind_adapter_name);
+                                     " 适配器=" + bind_adapter_name);
             } else if (!has_local_bind_hint) {
                 PacketTunnelDebugLog("UDP套接字未找到路由提示: 协议族=" +
                                      std::to_string(preferred_family));
@@ -2806,7 +2806,7 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
                              " 作用域=" + RelayEndpointScopeName(candidate) +
                              " 协议族=" + std::to_string(socket_family_) +
                              ((public_relay_target && has_local_bind_hint)
-                                  ? (" local_hint=" + SockaddrToString(local_bind_addr, local_bind_addr_len))
+                                  ? (" 本地提示=" + SockaddrToString(local_bind_addr, local_bind_addr_len))
                                   : std::string("")));
         return true;
     };
@@ -2997,7 +2997,7 @@ bool PacketTunnelClient::SendTcpHandshake(std::wstring* error_msg) {
 bool PacketTunnelClient::SendUdpDirectCandidateAdvertises(std::wstring* error_msg) {
     if (sock_ == INVALID_SOCKET) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel UDP socket is not connected";
+            *error_msg = L"IP Tunnel UDP套接字未连接";
         }
         return false;
     }
@@ -3050,7 +3050,7 @@ bool PacketTunnelClient::SendUdpDirectCandidateAdvertises(std::wstring* error_ms
     }
     if (ret != NO_ERROR) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel adapter enumeration failed";
+            *error_msg = L"IP Tunnel适配器枚举失败";
         }
         return false;
     }
@@ -3116,7 +3116,7 @@ bool PacketTunnelClient::SendUdpDirectCandidateAdvertise(
         (candidate.endpoint_family != packet_tunnel::kPeerEndpointFamilyIpv4 &&
          candidate.endpoint_family != packet_tunnel::kPeerEndpointFamilyIpv6)) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel UDP direct candidate is invalid";
+            *error_msg = L"IP Tunnel UDP直连候选无效";
         }
         return false;
     }
@@ -6506,7 +6506,7 @@ bool PacketTunnelClient::TryResolveGatewayUdpPeerTarget(const std::string& dst_v
 
     if (selected_peer_virtual_ip.empty()) {
         if (resolution != NULL) {
-            *resolution = "unresolved_候选数=" + std::to_string(candidate_count);
+            *resolution = "未解析候选数=" + std::to_string(candidate_count);
         }
         return false;
     }
@@ -6554,7 +6554,7 @@ bool PacketTunnelClient::SendDatagramToEndpoint(const UdpEndpoint& endpoint,
                                                 std::wstring* error_msg) {
     if (!endpoint.valid) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel send target is invalid";
+            *error_msg = L"IP Tunnel发送目标无效";
         }
         return false;
     }
@@ -6672,7 +6672,7 @@ bool PacketTunnelClient::RecvTcpExact(uint8_t* data,
         return true;
     }
     if (error_msg != NULL && error_msg->empty() && !stop_requested_) {
-        *error_msg = L"IP Tunnel TCP recv interrupted";
+        *error_msg = L"IP Tunnel TCP接收被中断";
     }
     return false;
 }
@@ -6687,7 +6687,7 @@ bool PacketTunnelClient::SendFrameOverTcp(uint8_t frame_type,
                                           std::wstring* error_msg) {
     if (!tcp_connected_ || tcp_sock_ == INVALID_SOCKET) {
         if (error_msg != NULL) {
-            *error_msg = L"IP Tunnel TCP relay is not connected";
+            *error_msg = L"IP Tunnel TCP中转载体未连接";
         }
         return false;
     }
@@ -6752,7 +6752,7 @@ uint32_t PacketTunnelClient::ParseVirtualIp(std::wstring* error_msg) const {
     IN_ADDR addr = {};
     if (InetPtonA(AF_INET, virtual_ip_.c_str(), &addr) != 1) {
         if (error_msg != NULL) {
-            *error_msg = L"Invalid leased virtual IP: " + Utf8ToWide(virtual_ip_);
+            *error_msg = L"无效的租约虚拟IP: " + Utf8ToWide(virtual_ip_);
         }
         return 0;
     }

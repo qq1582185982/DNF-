@@ -354,15 +354,15 @@ void handle_http_request(int client_fd) {
     // 处理GET /api/servers
     if (strcmp(method, "GET") == 0 && strcmp(path, "/api/servers") == 0) {
         string json_response = generate_server_list_json();
-        send_http_response(client_fd, 200, "OK", "application/json", json_response.c_str());
+        send_http_response(client_fd, 200, "成功", "application/json", json_response.c_str());
     }
     // 处理OPTIONS请求 (CORS预检)
     else if (strcmp(method, "OPTIONS") == 0) {
-        send_http_response(client_fd, 200, "OK", "text/plain", "");
+        send_http_response(client_fd, 200, "成功", "text/plain", "");
     }
     // 404
     else {
-        send_http_response(client_fd, 404, "Not Found", "text/plain", "Endpoint not found");
+        send_http_response(client_fd, 404, "未找到", "text/plain; charset=utf-8", "接口不存在");
     }
 
     close(client_fd);

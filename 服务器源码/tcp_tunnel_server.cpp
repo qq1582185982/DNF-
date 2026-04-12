@@ -1433,7 +1433,7 @@ int replace_ip_in_payload(uint8_t* payload, size_t payload_len,
         Logger::info(log_prefix + "✓ 完成: " + old_ip + " -> " + new_ip +
                     " (替换" + to_string(replace_count) + "处)");
     } else {
-        Logger::info(log_prefix + "✗ 未找到IP " + old_ip + " (payload=" +
+        Logger::info(log_prefix + "✗ 未找到IP " + old_ip + " (负载=" +
                     to_string(payload_len) + "字节)");
     }
 
@@ -1852,7 +1852,7 @@ private:
 
         if (owner_changed) {
             Logger::debug("[IP Tunnel|" + session->session_uuid + "] 网关UDP端口归属已更新 端口=" +
-                          to_string(src_port) + " owner=" + describe_scoped_virtual_ip(session));
+                          to_string(src_port) + " 归属=" + describe_scoped_virtual_ip(session));
         }
     }
 
@@ -2121,7 +2121,7 @@ private:
                                            session->session_uuid,
                                            &active_lease,
                                            &lease_error)) {
-            if (error) *error = lease_error.empty() ? "lease not found" : lease_error;
+            if (error) *error = lease_error.empty() ? "未找到租约" : lease_error;
             return false;
         }
 
@@ -2171,7 +2171,7 @@ private:
             Logger::debug("[" + server_name + "|IP Tunnel] 对等协调状态切换 " +
                           changed[i].peer_virtual_ip +
                           " -> " + peer_endpoint_state_name(changed[i].state) +
-                          " version=" + to_string(changed[i].endpoint_version));
+                          " 版本=" + to_string(changed[i].endpoint_version));
         }
         if (!changed.empty()) {
             ostringstream ss;
@@ -2363,7 +2363,7 @@ private:
                                       payload,
                                       payload_len)) {
             Logger::warning("[IP Tunnel|" + sender_session->session_uuid +
-                            "] failed to relay virtual peer packet to " +
+                            "] 转发虚拟对等端数据包失败，目标=" +
                             describe_scoped_virtual_ip(target_session));
             target_session->active = false;
             if (!target_session->use_udp && target_session->client_fd >= 0) {
@@ -2882,7 +2882,7 @@ private:
                       sender_scope_label + " -> " +
                       target_scope_label +
                       " nonce=" + to_string(signal.nonce) +
-                      " version=" + to_string(sender_version));
+                      " 版本=" + to_string(sender_version));
         {
             ostringstream ss;
             vector<PeerCoordStatus> snapshot = peer_coord_.Snapshot();
@@ -2992,7 +2992,7 @@ private:
                 if (!running) {
                     break;
                 }
-                Logger::warning("[" + server_name + "|IP Tunnel] read TUN packet failed: " + error);
+                Logger::warning("[" + server_name + "|IP Tunnel] 读取TUN数据包失败: " + error);
                 break;
             }
 
@@ -3438,7 +3438,7 @@ private:
                     continue;
                 }
                 if (errno != EBADF && errno != EINVAL) {
-                    Logger::warning("[" + server_name + "|IP Tunnel] recvfrom failed: " + string(strerror(errno)));
+                    Logger::warning("[" + server_name + "|IP Tunnel] recvfrom接收失败: " + string(strerror(errno)));
                 }
                 break;
             }
@@ -3848,7 +3848,7 @@ private:
 
             string tun_error;
             if (!tun_manager.WritePacket(payload, payload_len, &tun_error)) {
-                Logger::warning("[IP Tunnel|" + session->session_uuid + "] write TUN failed: " + tun_error);
+                Logger::warning("[IP Tunnel|" + session->session_uuid + "] 写入TUN失败: " + tun_error);
                 session->active = false;
             } else {
                 const uint64_t process_elapsed_ms = monotonic_millis() - loop_start_ms;
@@ -4312,7 +4312,7 @@ private:
 
                     uint8_t ip_version = (payload[0] >> 4) & 0x0F;
                     if (ip_version != 4) {
-                        Logger::warning("[IP Tunnel|" + session_uuid + "] 非IPv4帧，已忽略: version=" + to_string((int)ip_version));
+                        Logger::warning("[IP Tunnel|" + session_uuid + "] 非IPv4帧，已忽略: 版本=" + to_string((int)ip_version));
                         continue;
                     }
 
