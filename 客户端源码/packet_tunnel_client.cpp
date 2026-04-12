@@ -749,17 +749,41 @@ bool TryExtractPeerEndpointFromSockaddr(const sockaddr_storage& source_addr,
 const char* PeerRouteStateName(PeerRouteState state) {
     switch (state) {
     case PeerRouteState::RelayOnly:
-        return "relay_only";
+        return "仅中转";
     case PeerRouteState::OfferReceived:
-        return "offer_received";
+        return "已收到提议";
     case PeerRouteState::Probing:
-        return "probing";
+        return "探测中";
     case PeerRouteState::DirectActive:
-        return "direct_active";
+        return "直连激活";
     case PeerRouteState::Cooldown:
-        return "cooldown";
+        return "冷却中";
     default:
-        return "unknown";
+        return "未知";
+    }
+}
+
+std::string PeerDirectLearnReasonDisplayName(const std::string& reason) {
+    if (reason == "probe") {
+        return "直连探测";
+    }
+    if (reason == "payload") {
+        return "业务负载";
+    }
+    if (reason.empty()) {
+        return "未知";
+    }
+    return reason;
+}
+
+const char* PeerDirectProbeTypeDisplayName(uint8_t probe_type) {
+    switch (probe_type) {
+    case kPeerDirectProbeRequest:
+        return "请求";
+    case kPeerDirectProbeResponse:
+        return "响应";
+    default:
+        return "未知";
     }
 }
 
@@ -3983,10 +4007,7 @@ void PacketTunnelClient::SocketReadLoop() {
                 inner_is_udp &&
                 (is_direct_probe || inner_src_port == 5063 || inner_dst_port == 5063) &&
                 !IsNoisyUdpForLogging(payload, payload_len)) {
-                const std::string probe_kind =
-                    probe_type == kPeerDirectProbeRequest
-                        ? "request"
-                        : (probe_type == kPeerDirectProbeResponse ? "response" : "none");
+                const std::string probe_kind = PeerDirectProbeTypeDisplayName(probe_type);
                 PT_DEBUG("收到非服务端IPv4 来源=" +
                          SockaddrToString(source_addr, source_addr_len) +
                          " 已知对端=" + (from_known_peer ? "是" : "否") +
@@ -4036,19 +4057,19 @@ void PacketTunnelClient::SocketReadLoop() {
                     datagram_from_known_peer = true;
                     learned_direct_endpoint = true;
                     learned_direct_reason = is_direct_probe ? "probe" : "payload";
+                    const std::string learned_reason =
+                        PeerDirectLearnReasonDisplayName(learned_direct_reason);
                     const std::string probe_kind =
-                        probe_type == kPeerDirectProbeRequest
-                            ? "request"
-                            : (probe_type == kPeerDirectProbeResponse ? "response" : "unknown");
+                        PeerDirectProbeTypeDisplayName(probe_type);
                     PacketTunnelInfoLog("通过直连探测学习到对端地址: 对端=" +
                                         peer_virtual_ip +
-                                        " 原因=" + learned_direct_reason +
+                                        " 原因=" + learned_reason +
                                         " 探测类型=" + probe_kind +
                                         (learned_direct_endpoint_changed ? " 已变化=是"
                                                                          : " 已变化=否"));
                     PacketTunnelDebugLog("通过直连探测学习到对端地址详情: 对端=" +
                                          peer_virtual_ip +
-                                         " 原因=" + learned_direct_reason +
+                                         " 原因=" + learned_reason +
                                          " 探测类型=" + probe_kind +
                                          " 来源=" + SockaddrToString(source_addr, source_addr_len) +
                                          (learned_direct_endpoint_changed ? " 已变化=是"
@@ -5127,7 +5148,7 @@ void PacketTunnelClient::RegisterTcpDirectConnection(
 
     PacketTunnelInfoLog(std::string("TCP直连 ") +
                         (incoming ? "入站" : "出站") +
-                        " active 对端=" + peer_virtual_ip);
+                        "已激活 对端=" + peer_virtual_ip);
 }
 
 void PacketTunnelClient::RemoveTcpDirectConnection(const std::string& peer_virtual_ip,
@@ -6601,15 +6622,15 @@ bool PacketTunnelClient::SendDatagramToEndpoint(const UdpEndpoint& endpoint,
         break;
     }
 
-    PacketTunnelWarnLog("IP Tunnel 发送在短暂阻塞后丢弃 错误=" +
+    PacketTunnelWarnLog("数据隧道发送在短暂阻塞后丢弃 错误=" +
                         std::to_string(last_error) +
                         " 长度=" + std::to_string(length));
-    PacketTunnelDebugLog("IP Tunnel 发送在短暂阻塞后丢弃详情 错误=" +
+    PacketTunnelDebugLog("数据隧道发送在短暂阻塞后丢弃详情 错误=" +
                          std::to_string(last_error) +
                          " 端点=" + SockaddrToString(endpoint.addr, endpoint.addr_len) +
                          " 长度=" + std::to_string(length));
     if (error_msg != NULL) {
-        *error_msg = BuildSocketError(L"IP Tunnel send dropped", last_error);
+        *error_msg = BuildSocketError(L"数据隧道发送已丢弃", last_error);
     }
     return true;
 }

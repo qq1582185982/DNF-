@@ -1371,7 +1371,7 @@ int main(int argc, char* argv[]) {
     }
 
     cout << "[步骤4/4] 启动虚拟局域网数据面..." << endl;
-    Logger::info("[数据面] 启动 Wintun + IP Tunnel 主链路");
+    Logger::info("[数据面] 启动 Wintun + 数据隧道主链路");
 
     std::unique_ptr<WintunManager> wintun_manager(new WintunManager());
     wstring wintun_error;
@@ -1384,7 +1384,7 @@ int main(int argc, char* argv[]) {
         MessageBoxW(NULL, (L"Wintun 初始化失败\n\n原因: " + wintun_error).c_str(), L"启动错误", MB_OK | MB_ICONERROR);
         return 1;
     }
-    Logger::info("[数据面] Wintun运行时已就绪，尝试建立IP Tunnel专用会话");
+    Logger::info("[数据面] Wintun运行时已就绪，尝试建立数据隧道专用会话");
     cout << "  ✓ Wintun运行时已就绪" << endl;
 
     std::unique_ptr<PacketTunnelClient> packet_tunnel_client(new PacketTunnelClient(
@@ -1400,11 +1400,11 @@ int main(int argc, char* argv[]) {
     wstring packet_tunnel_error;
     if (!packet_tunnel_client->Start(&packet_tunnel_error)) {
         string packet_tunnel_error_utf8 = wstring_to_utf8(packet_tunnel_error);
-        Logger::error("[数据面] IP Tunnel专用会话建立失败: " + packet_tunnel_error_utf8);
-        cout << "错误: IP Tunnel专用会话建立失败" << endl;
+        Logger::error("[数据面] 数据隧道专用会话建立失败: " + packet_tunnel_error_utf8);
+        cout << "错误: 数据隧道专用会话建立失败" << endl;
         cout << "  原因: " << packet_tunnel_error_utf8 << endl;
         Logger::close();
-        MessageBoxW(NULL, (L"IP Tunnel专用会话建立失败\n\n原因: " + packet_tunnel_error).c_str(), L"启动错误", MB_OK | MB_ICONERROR);
+        MessageBoxW(NULL, (L"数据隧道专用会话建立失败\n\n原因: " + packet_tunnel_error).c_str(), L"启动错误", MB_OK | MB_ICONERROR);
         return 1;
     }
 
@@ -1420,12 +1420,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    Logger::info("[数据面] IP Tunnel专用会话已建立，主链路切换到Wintun");
-    cout << "  ✓ IP Tunnel专用会话已建立" << endl;
+    Logger::info("[数据面] 数据隧道专用会话已建立，主链路切换到Wintun");
+    cout << "  ✓ 数据隧道专用会话已建立" << endl;
     cout << endl;
 
     cout << "============================================================" << endl;
-    cout << "✓ 系统就绪！当前运行在 Wintun + IP Tunnel 虚拟局域网链路" << endl;
+    cout << "✓ 系统就绪！当前运行在 Wintun + 数据隧道虚拟局域网链路" << endl;
     cout << "当前版本 " << VERSION_NAME << endl;
     cout << "============================================================" << endl;
     cout << endl;
@@ -1451,7 +1451,7 @@ int main(int argc, char* argv[]) {
         packet_tunnel_client->Stop();
 
         ++reconnect_attempt;
-        Logger::warning("[数据面] IP Tunnel连接已断开，开始自动重连，第" + to_string(reconnect_attempt) + "次");
+        Logger::warning("[数据面] 数据隧道连接已断开，开始自动重连，第" + to_string(reconnect_attempt) + "次");
 
         ip_tunnel::LeaseGrant recovered_lease;
         wstring recover_error;
