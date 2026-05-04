@@ -518,6 +518,56 @@ cd 客户端源码
 
 Windows 客户端当前默认日志级别为 `INFO`。
 
+## 10.1 Windows 节点客户端（Win2022）
+
+目录：`客户端源码/`
+
+这个版本用于把 Win2022 当作远端节点接入，控制面行为按 Linux 节点客户端对齐：
+
+- 使用 `key=value` 配置文件
+- 通过 TCP 配置接口获取节点列表
+- 申请 / 续租 / 释放虚拟 IP
+- `server_virtual_ip` 为空时不抢占固定节点地址；不为空时会自动作为 `preferred_ip`
+- 使用 `Wintun + Packet Tunnel`
+- 启动失败 2 秒重试
+- 运行中断线或续租失败后自动恢复
+
+构建：
+
+```powershell
+cd 客户端源码
+.\build-windows-node-client.ps1
+```
+
+输出：
+
+```text
+DNF_Windows_Node_Client_v1.0.exe
+dnf-windows-node-client.conf.example
+```
+
+配置文件键名与 Linux 客户端保持一致：
+
+```ini
+api_url=vpn.example.com
+api_port=35000
+server_virtual_ip=10.0.11.5
+client_id=win2022-node-01
+if_name=dnfcli0
+```
+
+说明：
+
+- 必须管理员权限运行
+- `if_name` 在 Windows 下表示 Wintun 适配器名称
+- 默认配置搜索顺序包含 `.\dnf-windows-node-client.conf`、`.\dnf-linux-client.conf`、`.\client.conf`
+
+启动：
+
+```powershell
+.\DNF_Windows_Node_Client_v1.0.exe --config .\dnf-windows-node-client.conf
+```
+
 ## 11. Linux 客户端构建与运行
 
 目录：`linux客户端源码/`

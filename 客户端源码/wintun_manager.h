@@ -12,6 +12,7 @@
 #include <vector>
 
 struct TunnelLeaseRuntimeConfig {
+    std::string adapter_name;
     std::string server_virtual_ip;
     std::string virtual_ip;
     std::string subnet_mask;
@@ -84,4 +85,5 @@ private:
     AllocateSendPacketFn allocate_send_packet_;
     SendPacketFn send_packet_;
     NET_IFINDEX interface_index_;
+    TunnelLeaseRuntimeConfig current_config_;
 };

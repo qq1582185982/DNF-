@@ -47,8 +47,11 @@ shared/ip_lease_protocol.h
 
 # Generated artifacts
 .idea/
+dist/
 客户端源码/embedded_wintun.h
 客户端源码/*.md5
 linux客户端源码/dnf-linux-client
 linux客户端源码/dnf-linux-client-static-test
 服务器源码/dnf-tunnel-server
+WiresharkPortable64/
+tools/
