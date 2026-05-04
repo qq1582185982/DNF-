@@ -17,7 +17,7 @@ void PacketTunnelWarnLog(const std::string& msg);
 
 namespace {
 
-const WCHAR kAdapterName[] = L"DNFProxyWintun";
+const char kDefaultAdapterName[] = "DNFProxyWintun";
 const WCHAR kTunnelType[] = L"DNFProxy";
 const DWORD kRingCapacity = 0x1000000;
 const DWORD kWriteRetryDelayMs = 1;
@@ -152,6 +152,15 @@ bool IsTruthyEnv(const char* name) {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char ch) { return static_cast<char>(tolower(ch)); });
     return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+std::string GetAdapterName(const TunnelLeaseRuntimeConfig& config) {
+    return config.adapter_name.empty() ? std::string(kDefaultAdapterName) : config.adapter_name;
+}
+
+std::string EscapeQuotedCommandValue(std::string value) {
+    std::replace(value.begin(), value.end(), '"', '\'');
+    return value;
 }
 
 int ExecuteCommandSilent(const std::string& command) {
@@ -311,9 +320,11 @@ bool WintunManager::EnsureAdapter(std::wstring* error_msg) {
         return true;
     }
 
-    adapter_ = open_adapter_(kAdapterName);
+    const std::wstring adapter_name = Utf8ToWideLocal(GetAdapterName(current_config_));
+
+    adapter_ = open_adapter_(adapter_name.c_str());
     if (adapter_ == NULL) {
-        adapter_ = create_adapter_(kAdapterName, kTunnelType, NULL);
+        adapter_ = create_adapter_(adapter_name.c_str(), kTunnelType, NULL);
     }
 
     if (adapter_ == NULL) {
@@ -351,10 +362,12 @@ bool WintunManager::StartSession(std::wstring* error_msg) {
 }
 
 bool WintunManager::ConfigureAddress(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg) {
-    ExecuteCommandSilent("netsh interface ipv4 delete route prefix=0.0.0.0/0 interface=\"DNFProxyWintun\" store=active >nul 2>&1");
+    const std::string adapter_name = EscapeQuotedCommandValue(GetAdapterName(config));
+    ExecuteCommandSilent("netsh interface ipv4 delete route prefix=0.0.0.0/0 interface=\"" +
+                         adapter_name + "\" store=active >nul 2>&1");
 
     const std::string base =
-        "netsh interface ipv4 set address name=\"DNFProxyWintun\" source=static address=" +
+        "netsh interface ipv4 set address name=\"" + adapter_name + "\" source=static address=" +
         config.virtual_ip + " mask=" + config.subnet_mask + " gateway=none store=active >nul 2>&1";
     int ret = ExecuteCommandSilent(base);
     if (ret == 0) {
@@ -362,7 +375,7 @@ bool WintunManager::ConfigureAddress(const TunnelLeaseRuntimeConfig& config, std
     }
 
     const std::string fallback =
-        "netsh interface ip set address name=\"DNFProxyWintun\" static " +
+        "netsh interface ip set address name=\"" + adapter_name + "\" static " +
         config.virtual_ip + " " + config.subnet_mask + " none >nul 2>&1";
     ret = ExecuteCommandSilent(fallback);
     if (ret != 0 && error_msg != NULL) {
@@ -377,7 +390,9 @@ bool WintunManager::ConfigureMtu(const TunnelLeaseRuntimeConfig& config, std::ws
     }
 
     std::ostringstream command;
-    command << "netsh interface ipv4 set subinterface \"DNFProxyWintun\" mtu=" << config.mtu
+    command << "netsh interface ipv4 set subinterface \""
+            << EscapeQuotedCommandValue(GetAdapterName(config))
+            << "\" mtu=" << config.mtu
             << " store=active >nul 2>&1";
 
     int ret = ExecuteCommandSilent(command.str());
@@ -427,9 +442,12 @@ bool WintunManager::ConfigureRoutes(const TunnelLeaseRuntimeConfig& config, std:
 }
 
 bool WintunManager::ConfigureInterface(const TunnelLeaseRuntimeConfig& config, std::wstring* error_msg) {
-    int enable_ret = ExecuteCommandSilent("netsh interface set interface name=\"DNFProxyWintun\" enable >nul 2>&1");
+    const std::string adapter_name = EscapeQuotedCommandValue(GetAdapterName(config));
+    const std::string enable_cmd =
+        "netsh interface set interface name=\"" + adapter_name + "\" enable >nul 2>&1";
+    int enable_ret = ExecuteCommandSilent(enable_cmd);
     if (enable_ret != 0 && error_msg != NULL) {
-        *error_msg = CommandError(L"启用 Wintun 接口", "netsh interface set interface name=\"DNFProxyWintun\" enable >nul 2>&1", enable_ret);
+        *error_msg = CommandError(L"启用 Wintun 接口", enable_cmd, enable_ret);
         return false;
     }
 
@@ -454,6 +472,8 @@ bool WintunManager::Setup(const TunnelLeaseRuntimeConfig& config, std::wstring* 
         }
         return false;
     }
+
+    current_config_ = config;
 
     if (!LoadRuntime(error_msg)) {
         return false;

@@ -1,0 +1,25 @@
+# DNF Windows 节点客户端示例配置
+# 配置文件使用 key=value 格式，以 # 或 ; 开头的内容会被当作注释
+
+# 必填：服务端公网入口域名或 IP
+api_url=vpn.example.com
+
+# 必填：配置接口端口
+api_port=35000
+
+# 多节点时建议填写要加入的节点。可写节点 id/name/server_virtual_ip。
+# 如果服务端只返回 1 个节点，这一项可以不写。
+server_virtual_ip=10.0.11.5
+
+# 推荐显式写稳定值，影响 sticky IP 复用
+client_id=win2022-node-01
+
+# Windows 下映射为 Wintun 适配器名称；保持和 Linux 配置键一致
+if_name=dnfcli0
+
+# 以下配置都是可选项
+# server_key=1
+# preferred_ip=10.0.11.5
+# session_uuid=固定会话UUID
+# tunnel_host=vpn.example.com
+# tunnel_port=30003

@@ -8,6 +8,7 @@
 
 #include <string>
 #include <vector>
+#include <cstdint>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
@@ -21,6 +22,9 @@ struct ServerInfo {
     std::string tunnel_server_ip;
     int tunnel_port;
     std::string download_url;
+    std::string virtual_subnet;
+    std::string virtual_gateway;
+    uint32_t lease_seconds;
 };
 
 // TCP配置客户端类
