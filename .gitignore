@@ -11,6 +11,7 @@ log/
 *.dll
 *.lib
 *.sys
+!客户端源码/wintun.dll
 
 # 忽略IDE文件
 .vscode/

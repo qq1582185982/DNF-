@@ -36,7 +36,7 @@ jobs:
           EOF
 
       - name: Upload server artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: dnf-tunnel-server-static-${{ github.run_number }}
           path: |
@@ -72,7 +72,7 @@ jobs:
           EOF
 
       - name: Upload linux client artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: dnf-linux-client-static-${{ github.run_number }}
           path: |
@@ -101,21 +101,57 @@ jobs:
 
       - name: Download Wintun runtime
         run: |
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
           $url = "https://www.wintun.net/builds/wintun-0.14.1.zip"
           $zipPath = Join-Path $env:TEMP "wintun-0.14.1.zip"
           $extractPath = Join-Path $env:TEMP "wintun-0.14.1"
-          Invoke-WebRequest -Uri $url -OutFile $zipPath
-          if (Test-Path $extractPath) {
-            Remove-Item $extractPath -Recurse -Force
+          $fallbackDllPath = Join-Path (Get-Location) "wintun.dll"
+          $maxAttempts = 4
+          $downloadSucceeded = $false
+          $lastErrorMessage = ""
+
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            try {
+              if (Test-Path $zipPath) {
+                Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+              }
+              if (Test-Path $extractPath) {
+                Remove-Item $extractPath -Recurse -Force
+              }
+
+              Write-Host "Downloading Wintun runtime, attempt $attempt/$maxAttempts"
+              Invoke-WebRequest -Uri $url -OutFile $zipPath -TimeoutSec 60
+              Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+
+              $dllPath = Get-ChildItem -Path $extractPath -Recurse -Filter wintun.dll |
+                Where-Object { $_.FullName -match '[\\\\/]amd64[\\\\/]' } |
+                Select-Object -First 1 -ExpandProperty FullName
+
+              if (-not $dllPath) {
+                throw "Failed to locate amd64 wintun.dll in downloaded archive"
+              }
+
+              Copy-Item $dllPath $fallbackDllPath -Force
+              $downloadSucceeded = $true
+              Write-Host "Downloaded and refreshed Wintun runtime from upstream"
+              break
+            } catch {
+              $lastErrorMessage = $_.Exception.Message
+              Write-Warning "Wintun download attempt $attempt failed: $lastErrorMessage"
+              if ($attempt -lt $maxAttempts) {
+                Start-Sleep -Seconds (5 * $attempt)
+              }
+            }
           }
-          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-          $dllPath = Get-ChildItem -Path $extractPath -Recurse -Filter wintun.dll |
-            Where-Object { $_.FullName -match '[\\\\/]amd64[\\\\/]' } |
-            Select-Object -First 1 -ExpandProperty FullName
-          if (-not $dllPath) {
-            throw "Failed to locate amd64 wintun.dll in extracted archive"
+
+          if (-not $downloadSucceeded) {
+            if (Test-Path $fallbackDllPath) {
+              Write-Warning "Upstream download kept failing, falling back to repository Wintun runtime: $fallbackDllPath"
+            } else {
+              throw "Upstream download kept failing and no repository fallback wintun.dll was found. Last error: $lastErrorMessage"
+            }
           }
-          Copy-Item $dllPath ".\\wintun.dll" -Force
 
       - name: Build multi-server client
         run: .\build-multi-server-client.ps1
@@ -137,7 +173,7 @@ jobs:
           "@ | Set-Content -Path ".\build-info.txt" -Encoding UTF8
 
       - name: Upload windows artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: dnf-windows-client-${{ github.run_number }}
           path: |
