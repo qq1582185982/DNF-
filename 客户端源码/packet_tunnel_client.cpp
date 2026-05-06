@@ -2454,7 +2454,8 @@ PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
                                        const std::string& server_virtual_ip,
                                        const std::string& virtual_ip,
                                        uint16_t mtu,
-                                       WintunManager* wintun_manager)
+                                       WintunManager* wintun_manager,
+                                       bool peer_direct_enabled)
     : tunnel_server_ip_(tunnel_ip),
       tunnel_port_(tunnel_port),
       session_uuid_(session_uuid),
@@ -2475,7 +2476,8 @@ PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
       last_network_activity_tick_(0),
       peer_link_manager_(new PeerLinkManager()),
       peer_signal_nonce_(1),
-      peer_direct_allowed_(true) {
+      peer_direct_config_enabled_(peer_direct_enabled),
+      peer_direct_allowed_(peer_direct_enabled) {
     InitializeCriticalSection(&send_lock_);
     InitializeCriticalSection(&tcp_send_lock_);
 }
@@ -2546,19 +2548,23 @@ bool PacketTunnelClient::Start(std::wstring* error_msg) {
         Stop();
         return false;
     }
-    std::wstring udp_candidate_error;
-    if (!SendUdpDirectCandidateAdvertises(&udp_candidate_error) && !udp_candidate_error.empty()) {
-        PacketTunnelWarnLog("上报UDP直连候选失败: " +
-                            WideToUtf8(udp_candidate_error));
-    }
-    std::wstring tcp_direct_listener_error;
-    if (!StartTcpDirectListener(&tcp_direct_listener_error)) {
-        if (!tcp_direct_listener_error.empty()) {
-            PacketTunnelWarnLog("TCP直连监听不可用，继续保留中转路径: " +
-                                WideToUtf8(tcp_direct_listener_error));
-        } else {
-            PacketTunnelWarnLog("TCP直连监听不可用，继续保留中转路径");
+    if (peer_direct_allowed_) {
+        std::wstring udp_candidate_error;
+        if (!SendUdpDirectCandidateAdvertises(&udp_candidate_error) && !udp_candidate_error.empty()) {
+            PacketTunnelWarnLog("上报UDP直连候选失败: " +
+                                WideToUtf8(udp_candidate_error));
         }
+        std::wstring tcp_direct_listener_error;
+        if (!StartTcpDirectListener(&tcp_direct_listener_error)) {
+            if (!tcp_direct_listener_error.empty()) {
+                PacketTunnelWarnLog("TCP直连监听不可用，继续保留中转路径: " +
+                                    WideToUtf8(tcp_direct_listener_error));
+            } else {
+                PacketTunnelWarnLog("TCP直连监听不可用，继续保留中转路径");
+            }
+        }
+    } else {
+        PacketTunnelInfoLog("Peer direct disabled by user, using relay-only path");
     }
     std::wstring tcp_error;
     if (!ConnectTcpSocket(&tcp_error) ||
@@ -2575,7 +2581,7 @@ bool PacketTunnelClient::Start(std::wstring* error_msg) {
         } else {
             PacketTunnelWarnLog("TCP中转载体不可用，回退到UDP中转");
         }
-    } else {
+    } else if (peer_direct_allowed_) {
         std::wstring advertise_error;
         if (!SendTcpDirectAdvertise(&advertise_error) && !advertise_error.empty()) {
             PacketTunnelWarnLog("上报TCP直连监听信息失败: " + WideToUtf8(advertise_error));
@@ -2658,7 +2664,7 @@ void PacketTunnelClient::Stop() {
 bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
     server_endpoint_ = UdpEndpoint();
     socket_family_ = AF_UNSPEC;
-    peer_direct_allowed_ = true;
+    peer_direct_allowed_ = peer_direct_config_enabled_;
 
     struct addrinfo hints = {};
     struct addrinfo* result = NULL;
@@ -2746,7 +2752,9 @@ bool PacketTunnelClient::ConnectSocket(std::wstring* error_msg) {
         const int preferred_family = candidate.socket_family;
         const bool public_relay_target = candidate.public_internet;
         const bool ipv4_direct_test_override = (!public_relay_target && preferred_family == AF_INET);
-        peer_direct_allowed_ = public_relay_target || ipv4_direct_test_override;
+        peer_direct_allowed_ =
+            peer_direct_config_enabled_ &&
+            (public_relay_target || ipv4_direct_test_override);
 
         sockaddr_storage local_bind_addr = {};
         int local_bind_addr_len = 0;
@@ -4605,7 +4613,7 @@ void PacketTunnelClient::WintunReadLoop() {
 
         PacketFlowRouterInput flow_input;
         flow_input.is_tcp = is_tcp;
-        flow_input.has_tcp_direct_target = !dst_virtual_ip.empty();
+        flow_input.has_tcp_direct_target = peer_direct_allowed_ && !dst_virtual_ip.empty();
         flow_input.tcp_relay_available = tcp_connected_ && tcp_sock_ != INVALID_SOCKET;
         flow_input.udp_relay_batch_eligible =
             kPacketTunnelEnableWinRelayTcpMicroBatch &&
@@ -5347,6 +5355,9 @@ PacketTunnelClient::BuildOrderedTcpDirectCandidates(const TcpDirectOffer& offer,
 bool PacketTunnelClient::TrySendTcpDirectPacket(const std::string& peer_virtual_ip,
                                                 const uint8_t* data,
                                                 size_t length) {
+    if (!peer_direct_allowed_) {
+        return false;
+    }
     if (peer_virtual_ip.empty() || data == NULL || length == 0 || length > 0xFFFFu) {
         return false;
     }
@@ -5387,7 +5398,8 @@ bool PacketTunnelClient::TrySendTcpDirectPacket(const std::string& peer_virtual_
 }
 
 void PacketTunnelClient::MaybeStartTcpDirectConnect(const std::string& peer_virtual_ip) {
-    if (stop_requested_ || peer_virtual_ip.empty() || peer_virtual_ip == virtual_ip_) {
+    if (!peer_direct_allowed_ || stop_requested_ || peer_virtual_ip.empty() ||
+        peer_virtual_ip == virtual_ip_) {
         return;
     }
 
@@ -6038,6 +6050,17 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
             PacketTunnelDebugLog("忽略不可用的TCP对等提议: 对端=" +
                                  offer.peer_virtual_ip +
                                  " 端点=" + offer.endpoint);
+            return true;
+        }
+        if (!peer_direct_allowed_) {
+            PacketTunnelDebugLog("ignore tcp peer offer: peer direct disabled, peer=" +
+                                 offer.peer_virtual_ip +
+                                 " endpoint=" + offer.endpoint);
+            if (offer.endpoint_version != 0) {
+                SendPeerDisableFrame(offer.peer_virtual_ip,
+                                     offer.endpoint_version,
+                                     packet_tunnel::kPeerDisableReasonCooldown);
+            }
             return true;
         }
 

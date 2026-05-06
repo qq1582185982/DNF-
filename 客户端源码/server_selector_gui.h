@@ -23,6 +23,7 @@
 #define IDC_BTN_PREV_PAGE  1009  // 上一页
 #define IDC_STATIC_PAGE_INFO 1010  // 页码信息
 #define IDC_BTN_NEXT_PAGE  1011  // 下一页
+#define IDC_CHECK_PEER_DIRECT 1012  // 对等直连开关
 #define IDC_SERVER_BTN_BASE 2000  // 服务器按钮ID起始值 (2000+索引)
 
 // 服务器选择器类
@@ -61,6 +62,7 @@ private:
     bool showing_log;  // 是否显示日志页面
     bool is_connected;  // 是否已连接
     bool dialog_should_close;  // 对话框是否应该关闭
+    bool peer_direct_enabled;  // 用户是否启用对等直连
 
     // 子进程管理
     PROCESS_INFORMATION child_process;  // 子进程信息

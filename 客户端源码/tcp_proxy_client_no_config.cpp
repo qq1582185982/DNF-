@@ -1082,6 +1082,7 @@ int main(int argc, char* argv[]) {
     string worker_tunnel_ip;
     int worker_tunnel_port = 0;
     string worker_stop_event_name;
+    bool worker_peer_direct_enabled = true;
 
     if (argc >= 6 && strcmp(argv[1], "--worker") == 0) {
         worker_mode = true;
@@ -1094,6 +1095,11 @@ int main(int argc, char* argv[]) {
             if (strcmp(argv[i], "--stop-event") == 0 && i + 1 < argc) {
                 worker_stop_event_name = argv[i + 1];
                 ++i;
+            } else if (strcmp(argv[i], "--peer-direct") == 0 && i + 1 < argc) {
+                worker_peer_direct_enabled = atoi(argv[i + 1]) != 0;
+                ++i;
+            } else if (strcmp(argv[i], "--no-peer-direct") == 0) {
+                worker_peer_direct_enabled = false;
             }
         }
     }
@@ -1372,6 +1378,8 @@ int main(int argc, char* argv[]) {
 
     cout << "[步骤4/4] 启动虚拟局域网数据面..." << endl;
     Logger::info("[数据面] 启动 Wintun + 数据隧道主链路");
+    Logger::info(std::string("[数据面] 对等直连=") +
+                 (worker_peer_direct_enabled ? "启用" : "禁用，仅中转"));
 
     std::unique_ptr<WintunManager> wintun_manager(new WintunManager());
     wstring wintun_error;
@@ -1395,7 +1403,8 @@ int main(int argc, char* argv[]) {
         granted_lease.server_virtual_ip,
         granted_lease.virtual_ip,
         granted_lease.mtu,
-        wintun_manager.get()));
+        wintun_manager.get(),
+        worker_peer_direct_enabled));
 
     wstring packet_tunnel_error;
     if (!packet_tunnel_client->Start(&packet_tunnel_error)) {
@@ -1477,7 +1486,8 @@ int main(int argc, char* argv[]) {
             recovered_lease.server_virtual_ip,
             recovered_lease.virtual_ip,
             recovered_lease.mtu,
-            wintun_manager.get()));
+            wintun_manager.get(),
+            worker_peer_direct_enabled));
 
         wstring reconnect_error;
         if (!packet_tunnel_client->Start(&reconnect_error)) {

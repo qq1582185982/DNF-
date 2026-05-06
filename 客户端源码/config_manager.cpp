@@ -84,3 +84,34 @@ int ConfigManager::LoadLastServer() {
 
     return server_id;
 }
+
+bool ConfigManager::SavePeerDirectEnabled(bool enabled) {
+    if (!EnsureConfigDir()) {
+        return false;
+    }
+
+    BOOL result = WritePrivateProfileStringW(
+        L"DNFProxy",
+        L"PeerDirectEnabled",
+        enabled ? L"1" : L"0",
+        config_file.c_str()
+    );
+
+    return (result == TRUE);
+}
+
+bool ConfigManager::LoadPeerDirectEnabled() {
+    DWORD attr = GetFileAttributesW(config_file.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES) {
+        return true;
+    }
+
+    int enabled = GetPrivateProfileIntW(
+        L"DNFProxy",
+        L"PeerDirectEnabled",
+        1,
+        config_file.c_str()
+    );
+
+    return enabled != 0;
+}

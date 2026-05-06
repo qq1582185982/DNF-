@@ -24,6 +24,9 @@ public:
     // 返回: 服务器ID（如果没有记录则返回0）
     int LoadLastServer();
 
+    bool SavePeerDirectEnabled(bool enabled);
+    bool LoadPeerDirectEnabled();
+
 private:
     std::wstring config_dir;    // 配置目录路径
     std::wstring config_file;   // 配置文件路径

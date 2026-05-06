@@ -3,6 +3,7 @@
  */
 
 #include "server_selector_gui.h"
+#include "config_manager.h"
 #include "resource.h"
 #include <commctrl.h>
 #include <sstream>
@@ -82,7 +83,8 @@ ServerSelectorGUI::ServerSelectorGUI()
       selected_index(-1), user_confirmed(false),
       current_page(0), total_pages(1),
       showing_log(false), is_connected(false),
-      dialog_should_close(false), child_running(false), child_stdout_read(NULL), child_stdout_write(NULL),
+      dialog_should_close(false), peer_direct_enabled(true),
+      child_running(false), child_stdout_read(NULL), child_stdout_write(NULL),
       child_job_object(NULL), child_stop_event(NULL),
       hBackgroundBitmap(NULL), bg_width(0), bg_height(0) {
     ZeroMemory(&child_process, sizeof(child_process));
@@ -283,6 +285,20 @@ bool ServerSelectorGUI::InitWindow() {
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑"
     );
     SendMessage(hBtnShowLog, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
+
+    ConfigManager config_manager;
+    peer_direct_enabled = config_manager.LoadPeerDirectEnabled();
+    HWND hCheckPeerDirect = CreateWindowW(
+        L"BUTTON", L"启用对等直连加速",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        590, 430, 180, 28,
+        hwnd, (HMENU)IDC_CHECK_PEER_DIRECT, hInstance, NULL
+    );
+    SendMessage(hCheckPeerDirect, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
+    SendMessage(hCheckPeerDirect,
+                BM_SETCHECK,
+                peer_direct_enabled ? BST_CHECKED : BST_UNCHECKED,
+                0);
 
     // 9. 日志文本框（多行只读，初始隐藏）
     HWND hEditLog = CreateWindowW(
@@ -531,6 +547,14 @@ void ServerSelectorGUI::OnConnectClick() {
         return;
     }
 
+    HWND hCheckPeerDirect = GetDlgItem(hwnd, IDC_CHECK_PEER_DIRECT);
+    if (hCheckPeerDirect) {
+        peer_direct_enabled =
+            (SendMessage(hCheckPeerDirect, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        ConfigManager config_manager;
+        config_manager.SavePeerDirectEnabled(peer_direct_enabled);
+    }
+
     // 切换到日志页面
     ShowLogPage();
 
@@ -544,6 +568,9 @@ void ServerSelectorGUI::OnConnectClick() {
     std::wstring server_name = servers[selected_index].name;
     AppendLog(L"=== 开始连接 ===\r\n");
     AppendLog(L"服务器: " + server_name + L"\r\n");
+    AppendLog(peer_direct_enabled
+                  ? L"对等直连：启用\r\n"
+                  : L"对等直连：禁用，仅中转\r\n");
     AppendLog(L"正在启动隧道进程...\r\n\r\n");
 
     // 启动子进程
@@ -607,6 +634,7 @@ void ServerSelectorGUI::ShowLogPage() {
     }
     ShowWindow(GetDlgItem(hwnd, IDC_STATIC_LABEL), SW_HIDE);
     ShowWindow(GetDlgItem(hwnd, IDC_EDIT_DOWNLOAD), SW_HIDE);
+    ShowWindow(GetDlgItem(hwnd, IDC_CHECK_PEER_DIRECT), SW_HIDE);
     ShowWindow(GetDlgItem(hwnd, IDC_BTN_CONNECT), SW_HIDE);
     ShowWindow(GetDlgItem(hwnd, IDC_BTN_CANCEL), SW_HIDE);
     ShowWindow(GetDlgItem(hwnd, IDC_BTN_SHOW_LOG), SW_HIDE);
@@ -631,6 +659,7 @@ void ServerSelectorGUI::ShowServerPage() {
     UpdatePaginationControls();
     ShowWindow(GetDlgItem(hwnd, IDC_STATIC_LABEL), SW_SHOW);
     ShowWindow(GetDlgItem(hwnd, IDC_EDIT_DOWNLOAD), SW_SHOW);
+    ShowWindow(GetDlgItem(hwnd, IDC_CHECK_PEER_DIRECT), SW_SHOW);
     ShowWindow(GetDlgItem(hwnd, IDC_BTN_CONNECT), SW_SHOW);
     ShowWindow(GetDlgItem(hwnd, IDC_BTN_CANCEL), SW_SHOW);
     ShowWindow(GetDlgItem(hwnd, IDC_BTN_SHOW_LOG), SW_SHOW);
@@ -823,13 +852,14 @@ bool ServerSelectorGUI::StartChildProcess(const ServerInfo& server) {
     // 构建命令行
     // 格式: "程序路径" --worker <server_id> <server_virtual_ip> <tunnel_server_ip> <tunnel_port>
     char cmdline[2048];
-    sprintf(cmdline, "\"%s\" --worker %d %s %s %d --stop-event %s",
+    sprintf(cmdline, "\"%s\" --worker %d %s %s %d --stop-event %s --peer-direct %d",
             exe_path,
             server.id,
             server.server_virtual_ip.c_str(),
             server.tunnel_server_ip.c_str(),
             server.tunnel_port,
-            child_stop_event_name.c_str());
+            child_stop_event_name.c_str(),
+            peer_direct_enabled ? 1 : 0);
 
     // 启动命令仅在调试模式下显示。
     if (IsDebugGuiLogEnabled()) {
