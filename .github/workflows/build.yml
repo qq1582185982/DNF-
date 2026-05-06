@@ -162,6 +162,9 @@ jobs:
       - name: Build multi-server config injector
         run: .\build-multi-server-injector.ps1
 
+      - name: Build Windows node client
+        run: .\build-windows-node-client.ps1
+
       - name: Write windows build info
         run: |
           @"
@@ -172,6 +175,16 @@ jobs:
           artifact=dnf-windows-client
           "@ | Set-Content -Path ".\build-info.txt" -Encoding UTF8
 
+      - name: Write Windows node build info
+        run: |
+          @"
+          ref_name=${{ github.ref_name }}
+          sha=${{ github.sha }}
+          run_number=${{ github.run_number }}
+          built_at_utc=$((Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"))
+          artifact=dnf-windows-node-client
+          "@ | Set-Content -Path ".\windows-node-build-info.txt" -Encoding UTF8
+
       - name: Upload windows artifacts
         uses: actions/upload-artifact@v6
         with:
@@ -181,3 +194,15 @@ jobs:
             客户端源码/DNFConfigInjector_MultiServer.exe
             客户端源码/embedded_client_multiserver.h
             客户端源码/build-info.txt
+
+      - name: Upload Windows node artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: dnf-windows-node-client-${{ github.run_number }}
+          path: |
+            客户端源码/DNF_Windows_Node_Client_v1.0.exe
+            客户端源码/dnf-windows-node-client.conf.example
+            客户端源码/run-windows-node-client.cmd
+            客户端源码/WINDOWS_NODE_CLIENT_README.txt
+            客户端源码/LICENSE.wintun.txt
+            客户端源码/windows-node-build-info.txt
