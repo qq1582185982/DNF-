@@ -20,6 +20,7 @@ public:
                             uint16_t tunnel_port,
                             const std::string& session_uuid,
                             const std::string& client_id,
+                            const std::string& server_virtual_ip,
                             const std::string& virtual_ip,
                             uint16_t mtu,
                             LinuxTunManager* tun_manager);
@@ -255,6 +256,7 @@ private:
     bool SendDatagram(const uint8_t* data, size_t length, std::string* error);
     int RecvDatagram(uint8_t* data, size_t length, std::string* error);
     uint32_t ParseVirtualIp(std::string* error) const;
+    bool IsServerVirtualPeer(const std::string& peer_virtual_ip) const;
     void MaybeLogDirectRouteFallback(const std::string& peer_virtual_ip, const std::string& reason);
     void MarkPeerBusinessActivity(const std::string& peer_virtual_ip);
     void MarkPeerWarmupWindow(const std::string& peer_virtual_ip);
@@ -276,6 +278,7 @@ private:
     uint16_t tunnel_port_;
     std::string session_uuid_;
     std::string client_id_;
+    std::string server_virtual_ip_;
     std::string virtual_ip_;
     uint16_t mtu_;
     LinuxTunManager* tun_manager_;

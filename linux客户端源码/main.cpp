@@ -454,6 +454,7 @@ int main(int argc, char** argv) {
                                                             (uint16_t)effective_tunnel_port,
                                                             options.session_uuid,
                                                             options.client_id,
+                                                            current_lease.server_virtual_ip,
                                                             current_lease.virtual_ip,
                                                             current_lease.mtu,
                                                             &tun_manager));
