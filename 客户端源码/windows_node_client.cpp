@@ -926,7 +926,8 @@ int main(int argc, char** argv) {
                                                        current_lease.server_virtual_ip,
                                                        current_lease.virtual_ip,
                                                        current_lease.mtu,
-                                                       &wintun_manager));
+                                                       &wintun_manager,
+                                                       false));
             return packet_client->Start(start_error);
         };
 

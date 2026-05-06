@@ -4613,14 +4613,17 @@ void PacketTunnelClient::WintunReadLoop() {
 
         PacketFlowRouterInput flow_input;
         flow_input.is_tcp = is_tcp;
-        flow_input.has_tcp_direct_target = peer_direct_allowed_ && !dst_virtual_ip.empty();
+        flow_input.has_tcp_direct_target =
+            peer_direct_allowed_ &&
+            !dst_virtual_ip.empty() &&
+            !IsServerVirtualPeer(dst_virtual_ip);
         flow_input.tcp_relay_available = tcp_connected_ && tcp_sock_ != INVALID_SOCKET;
         flow_input.udp_relay_batch_eligible =
             kPacketTunnelEnableWinRelayTcpMicroBatch &&
             IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size());
         const PacketFlowRouterDecision flow_decision = PacketFlowRouter::Decide(flow_input);
 
-        if (is_tcp && !dst_virtual_ip.empty()) {
+        if (is_tcp && !dst_virtual_ip.empty() && !IsServerVirtualPeer(dst_virtual_ip)) {
             MarkPeerBusinessActivity(dst_virtual_ip);
         }
 
@@ -6046,6 +6049,7 @@ bool PacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
         }
         if (offer.peer_virtual_ip.empty() ||
             offer.peer_virtual_ip == virtual_ip_ ||
+            IsServerVirtualPeer(offer.peer_virtual_ip) ||
             offer.endpoint_port == 0) {
             PacketTunnelDebugLog("忽略不可用的TCP对等提议: 对端=" +
                                  offer.peer_virtual_ip +
