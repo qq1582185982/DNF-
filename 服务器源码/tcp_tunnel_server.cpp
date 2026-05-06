@@ -2701,11 +2701,6 @@ private:
         if (!session || !session->active || session->use_udp || session->tcp_direct_listen_port == 0) {
             return;
         }
-        if (is_peer_direct_excluded_session(session) || !session_allows_peer_direct(session)) {
-            Logger::debug("[" + server_name + "|数据隧道] 跳过TCP对等提议: 会话不允许对等直连 " +
-                          describe_scoped_virtual_ip(session));
-            return;
-        }
 
         const string local_virtual_ip = ipv4_be_to_string(session->virtual_ip_be);
         const string local_scope_key =
@@ -2732,9 +2727,7 @@ private:
                 const shared_ptr<PacketTunnelSession>& peer = it->second;
                 if (!peer || peer == session || !peer->active || peer->use_udp ||
                     peer->server_key != session->server_key ||
-                    peer->tcp_direct_listen_port == 0 ||
-                    is_peer_direct_excluded_session(peer) ||
-                    !session_allows_peer_direct(peer)) {
+                    peer->tcp_direct_listen_port == 0) {
                     continue;
                 }
                 peers.push_back(peer);

@@ -1319,7 +1319,6 @@ LinuxPacketTunnelClient::LinuxPacketTunnelClient(const std::string& tunnel_host,
                                                  uint16_t tunnel_port,
                                                  const std::string& session_uuid,
                                                  const std::string& client_id,
-                                                 const std::string& server_virtual_ip,
                                                  const std::string& virtual_ip,
                                                  uint16_t mtu,
                                                  LinuxTunManager* tun_manager)
@@ -1327,7 +1326,6 @@ LinuxPacketTunnelClient::LinuxPacketTunnelClient(const std::string& tunnel_host,
       tunnel_port_(tunnel_port),
       session_uuid_(session_uuid),
       client_id_(client_id),
-      server_virtual_ip_(server_virtual_ip),
       virtual_ip_(virtual_ip),
       mtu_(mtu),
       tun_manager_(tun_manager),
@@ -1348,11 +1346,6 @@ LinuxPacketTunnelClient::~LinuxPacketTunnelClient() {
     Stop();
     delete peer_link_manager_;
     peer_link_manager_ = NULL;
-}
-
-bool LinuxPacketTunnelClient::IsServerVirtualPeer(const std::string& peer_virtual_ip) const {
-    return !server_virtual_ip_.empty() &&
-           peer_virtual_ip == server_virtual_ip_;
 }
 
 void LinuxPacketTunnelClient::MarkNetworkActivity() {
@@ -2648,7 +2641,6 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
         }
         if (offer.peer_virtual_ip.empty() ||
             offer.peer_virtual_ip == virtual_ip_ ||
-            IsServerVirtualPeer(offer.peer_virtual_ip) ||
             offer.endpoint_port == 0) {
             LogDebug("忽略不可用的TCP对等提议: 对端=" +
                     offer.peer_virtual_ip +
@@ -2755,15 +2747,6 @@ bool LinuxPacketTunnelClient::HandlePeerControlFrame(uint8_t frame_type,
         ParsedLinuxPeerOffer offer = {};
         if (!ParseLinuxPeerOfferPayload(payload, length, &offer)) {
             LogWarn("忽略无效的对等提议帧，长度=" + std::to_string(length));
-            return true;
-        }
-        if (offer.peer_virtual_ip.empty() ||
-            offer.peer_virtual_ip == virtual_ip_ ||
-            IsServerVirtualPeer(offer.peer_virtual_ip) ||
-            offer.endpoint_port == 0) {
-            LogDebug("忽略不可用的对等提议: 对端=" +
-                    offer.peer_virtual_ip +
-                    " 端点=" + offer.endpoint);
             return true;
         }
         bool should_send_hello = true;
@@ -3081,7 +3064,6 @@ void LinuxPacketTunnelClient::LearnPeerUdpPortOwner(const std::string& peer_virt
                                                     uint16_t src_port) {
     if (peer_virtual_ip.empty() ||
         peer_virtual_ip == virtual_ip_ ||
-        IsServerVirtualPeer(peer_virtual_ip) ||
         src_port == 0 ||
         IsKnownLinuxGameUdpPort(src_port) ||
         IsReservedLinuxPeerDirectPort(src_port)) {
@@ -3128,7 +3110,6 @@ bool LinuxPacketTunnelClient::TryResolveGatewayUdpPeerTarget(const std::string& 
     for (size_t i = 0; i < peers.size(); ++i) {
         if (peers[i].peer_virtual_ip.empty() ||
             peers[i].peer_virtual_ip == virtual_ip_ ||
-            IsServerVirtualPeer(peers[i].peer_virtual_ip) ||
             peers[i].state == LinuxPeerRouteState::Cooldown ||
             !peers[i].direct_ready ||
             peers[i].endpoint_family == packet_tunnel::kPeerEndpointFamilyUnknown ||
@@ -3163,8 +3144,7 @@ bool LinuxPacketTunnelClient::TryResolveGatewayUdpPeerTarget(const std::string& 
         tick < owner.last_seen_ms ||
         (tick - owner.last_seen_ms) > kLinuxGatewayUdpPortOwnerTtlMs ||
         owner.peer_virtual_ip.empty() ||
-        owner.peer_virtual_ip == virtual_ip_ ||
-        IsServerVirtualPeer(owner.peer_virtual_ip)) {
+        owner.peer_virtual_ip == virtual_ip_) {
         return false;
     }
 
@@ -3839,11 +3819,7 @@ LinuxPacketTunnelClient::BuildOrderedTcpDirectCandidates(const TcpDirectOffer& o
 bool LinuxPacketTunnelClient::TrySendTcpDirectPacket(const std::string& peer_virtual_ip,
                                                      const uint8_t* data,
                                                      size_t length) {
-    if (peer_virtual_ip.empty() ||
-        IsServerVirtualPeer(peer_virtual_ip) ||
-        data == NULL ||
-        length == 0 ||
-        length > 0xFFFFu) {
+    if (peer_virtual_ip.empty() || data == NULL || length == 0 || length > 0xFFFFu) {
         return false;
     }
 
@@ -3884,10 +3860,7 @@ bool LinuxPacketTunnelClient::TrySendTcpDirectPacket(const std::string& peer_vir
 }
 
 void LinuxPacketTunnelClient::MaybeStartTcpDirectConnect(const std::string& peer_virtual_ip) {
-    if (stop_requested_ ||
-        peer_virtual_ip.empty() ||
-        peer_virtual_ip == virtual_ip_ ||
-        IsServerVirtualPeer(peer_virtual_ip)) {
+    if (stop_requested_ || peer_virtual_ip.empty() || peer_virtual_ip == virtual_ip_) {
         return;
     }
 
@@ -4273,16 +4246,14 @@ void LinuxPacketTunnelClient::TunReadLoop() {
 
         PacketFlowRouterInput flow_input;
         flow_input.is_tcp = is_tcp;
-        flow_input.has_tcp_direct_target =
-            !dst_virtual_ip.empty() &&
-            !IsServerVirtualPeer(dst_virtual_ip);
+        flow_input.has_tcp_direct_target = !dst_virtual_ip.empty();
         flow_input.tcp_relay_available = tcp_connected_ && tcp_sock_ >= 0;
         flow_input.udp_relay_batch_eligible =
             kPacketTunnelEnableLinuxRelayTcpMicroBatch &&
             IsPacketTunnelMicroBatchEligibleTcpPacket(packet.data(), packet.size());
         const PacketFlowRouterDecision flow_decision = PacketFlowRouter::Decide(flow_input);
 
-        if (is_tcp && !dst_virtual_ip.empty() && !IsServerVirtualPeer(dst_virtual_ip)) {
+        if (is_tcp && !dst_virtual_ip.empty()) {
             MarkPeerBusinessActivity(dst_virtual_ip);
         }
 
