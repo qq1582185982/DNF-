@@ -767,6 +767,13 @@ bool ParseLinuxIpv4StringToBe(const std::string& value, uint32_t* out_ip_be) {
     return true;
 }
 
+bool IsLinuxTunnelVirtualIpv4Candidate(uint32_t candidate_ip_be,
+                                       const std::string& virtual_ip) {
+    uint32_t virtual_ip_be = 0;
+    return ParseLinuxIpv4StringToBe(virtual_ip, &virtual_ip_be) &&
+           candidate_ip_be == virtual_ip_be;
+}
+
 bool ParseLinuxIpv4Octets(const std::string& ip, uint8_t out_octets[4]) {
     if (out_octets == NULL) {
         return false;
@@ -2005,6 +2012,11 @@ bool LinuxPacketTunnelClient::SendUdpDirectCandidateAdvertises(std::string* erro
             (ifa->ifa_flags & IFF_LOOPBACK) != 0) {
             continue;
         }
+        if (tun_manager_ != NULL &&
+            ifa->ifa_name != NULL &&
+            tun_manager_->GetIfName() == ifa->ifa_name) {
+            continue;
+        }
 
         TcpDirectCandidate candidate;
         candidate.endpoint_port = local_port;
@@ -2014,7 +2026,9 @@ bool LinuxPacketTunnelClient::SendUdpDirectCandidateAdvertises(std::string* erro
             if (ip == 0 ||
                 (ip & 0xff000000u) == 0x7f000000u ||
                 (ip & 0xffff0000u) == 0xa9fe0000u ||
-                (ip & 0xf0000000u) == 0xe0000000u) {
+                (ip & 0xf0000000u) == 0xe0000000u ||
+                IsLinuxTunnelVirtualIpv4Candidate(addr4->sin_addr.s_addr,
+                                                  virtual_ip_)) {
                 continue;
             }
             candidate.endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
@@ -2254,6 +2268,11 @@ bool LinuxPacketTunnelClient::SendTcpDirectAdvertise(std::string* error) {
                 (ifa->ifa_flags & IFF_LOOPBACK) != 0) {
                 continue;
             }
+            if (tun_manager_ != NULL &&
+                ifa->ifa_name != NULL &&
+                tun_manager_->GetIfName() == ifa->ifa_name) {
+                continue;
+            }
 
             TcpDirectCandidate candidate;
             candidate.endpoint_port = tcp_direct_listen_port_;
@@ -2263,7 +2282,9 @@ bool LinuxPacketTunnelClient::SendTcpDirectAdvertise(std::string* error) {
                 if (ip == 0 ||
                     (ip & 0xff000000u) == 0x7f000000u ||
                     (ip & 0xffff0000u) == 0xa9fe0000u ||
-                    (ip & 0xf0000000u) == 0xe0000000u) {
+                    (ip & 0xf0000000u) == 0xe0000000u ||
+                    IsLinuxTunnelVirtualIpv4Candidate(addr4->sin_addr.s_addr,
+                                                      virtual_ip_)) {
                     continue;
                 }
                 candidate.endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;

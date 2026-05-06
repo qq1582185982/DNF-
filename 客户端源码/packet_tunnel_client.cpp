@@ -562,6 +562,24 @@ bool ParseIpv4StringToBe(const std::string& value, uint32_t* out_ip_be) {
     return true;
 }
 
+bool IsTunnelVirtualIpv4Candidate(uint32_t candidate_ip_be,
+                                  const std::string& virtual_ip,
+                                  const std::string& server_virtual_ip) {
+    uint32_t virtual_ip_be = 0;
+    if (ParseIpv4StringToBe(virtual_ip, &virtual_ip_be) &&
+        candidate_ip_be == virtual_ip_be) {
+        return true;
+    }
+
+    uint32_t server_virtual_ip_be = 0;
+    if (ParseIpv4StringToBe(server_virtual_ip, &server_virtual_ip_be) &&
+        candidate_ip_be == server_virtual_ip_be) {
+        return true;
+    }
+
+    return false;
+}
+
 void CloseSocketQuiet(SOCKET* sock) {
     if (sock == NULL || *sock == INVALID_SOCKET) {
         return;
@@ -3115,7 +3133,10 @@ bool PacketTunnelClient::SendUdpDirectCandidateAdvertises(std::wstring* error_ms
                 if (ip == 0 ||
                     (ip & 0xff000000u) == 0x7f000000u ||
                     (ip & 0xffff0000u) == 0xa9fe0000u ||
-                    (ip & 0xf0000000u) == 0xe0000000u) {
+                    (ip & 0xf0000000u) == 0xe0000000u ||
+                    IsTunnelVirtualIpv4Candidate(addr4->sin_addr.S_un.S_addr,
+                                                 virtual_ip_,
+                                                 server_virtual_ip_)) {
                     continue;
                 }
                 candidate.endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
@@ -3405,7 +3426,10 @@ bool PacketTunnelClient::SendTcpDirectAdvertise(std::wstring* error_msg) {
                     if (ip == 0 ||
                         (ip & 0xff000000u) == 0x7f000000u ||
                         (ip & 0xffff0000u) == 0xa9fe0000u ||
-                        (ip & 0xf0000000u) == 0xe0000000u) {
+                        (ip & 0xf0000000u) == 0xe0000000u ||
+                        IsTunnelVirtualIpv4Candidate(addr4->sin_addr.S_un.S_addr,
+                                                     virtual_ip_,
+                                                     server_virtual_ip_)) {
                         continue;
                     }
                     candidate.endpoint_family = packet_tunnel::kPeerEndpointFamilyIpv4;
