@@ -1,11 +1,25 @@
+param(
+    [ValidateSet("x64", "x86")]
+    [string]$Arch = "x64",
+    [string]$OutputExe = ""
+)
+
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\Resolve-VsVcvars.ps1"
+
+if ([string]::IsNullOrWhiteSpace($OutputExe)) {
+    $OutputExe = if ($Arch -eq "x86") {
+        "DNF_Windows_Node_Client_v1.0_x86.exe"
+    } else {
+        "DNF_Windows_Node_Client_v1.0.exe"
+    }
+}
 
 Push-Location $PSScriptRoot
 try {
     Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host "Compiling DNF Windows Node Client" -ForegroundColor Cyan
-    Write-Host "Linux-node-compatible control flow" -ForegroundColor Cyan
+    Write-Host "Linux-node-compatible control flow ($Arch)" -ForegroundColor Cyan
     Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host ""
 
@@ -16,7 +30,7 @@ try {
     }
 
     Write-Host "[2/3] Checking Visual Studio environment..." -ForegroundColor Yellow
-    $vsPath = Get-VsVcvarsPath
+    $vsPath = Get-VsVcvarsPath -Arch $Arch
     Write-Host "Visual Studio C++ environment found" -ForegroundColor Green
     Write-Host "  $vsPath" -ForegroundColor DarkGray
     Write-Host ""
@@ -26,7 +40,7 @@ try {
         '@echo off',
         ('call "{0}" >nul 2>&1' -f $vsPath),
         'if errorlevel 1 exit /b 1',
-        'cl /EHsc /O2 /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe"DNF_Windows_Node_Client_v1.0.exe" windows_node_client.cpp tcp_config_client.cpp ip_lease_client.cpp wintun_manager.cpp packet_tunnel_client.cpp peer_link_manager.cpp /link /SUBSYSTEM:CONSOLE ws2_32.lib advapi32.lib iphlpapi.lib shell32.lib dnsapi.lib',
+        ('cl /EHsc /O2 /MT /std:c++14 /utf-8 /W3 /D_UNICODE /DUNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fe"{0}" windows_node_client.cpp tcp_config_client.cpp ip_lease_client.cpp wintun_manager.cpp packet_tunnel_client.cpp peer_link_manager.cpp /link /SUBSYSTEM:CONSOLE ws2_32.lib advapi32.lib iphlpapi.lib shell32.lib dnsapi.lib' -f $OutputExe),
         'if errorlevel 1 exit /b 1',
         'exit /b 0'
     )
@@ -37,8 +51,7 @@ try {
     Remove-Item $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
 
     Write-Host "[3/3] Compiling node client..." -ForegroundColor Yellow
-    $outputExe = "DNF_Windows_Node_Client_v1.0.exe"
-    Remove-Item $outputExe -ErrorAction SilentlyContinue
+    Remove-Item $OutputExe -ErrorAction SilentlyContinue
     $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batchFile`"" -WorkingDirectory $PSScriptRoot -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
     $proc.WaitForExit()
     $proc.Refresh()
@@ -65,14 +78,14 @@ try {
 
     Remove-Item "windows_node_client.obj","tcp_config_client.obj","ip_lease_client.obj","wintun_manager.obj","packet_tunnel_client.obj","peer_link_manager.obj" -ErrorAction SilentlyContinue
 
-    if (-not (Test-Path $outputExe)) {
-        throw "Output file not found: $outputExe"
+    if (-not (Test-Path $OutputExe)) {
+        throw "Output file not found: $OutputExe"
     }
 
-    $fileSize = (Get-Item $outputExe).Length
+    $fileSize = (Get-Item $OutputExe).Length
     Write-Host ""
     Write-Host "Compilation Successful!" -ForegroundColor Green
-    Write-Host "Output file: $outputExe" -ForegroundColor Cyan
+    Write-Host "Output file: $OutputExe" -ForegroundColor Cyan
     Write-Host ("File size: {0:N2} MB" -f ($fileSize / 1MB)) -ForegroundColor Cyan
 }
 finally {

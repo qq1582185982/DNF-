@@ -107,6 +107,8 @@ jobs:
           $zipPath = Join-Path $env:TEMP "wintun-0.14.1.zip"
           $extractPath = Join-Path $env:TEMP "wintun-0.14.1"
           $fallbackDllPath = Join-Path (Get-Location) "wintun.dll"
+          $amd64DllPath = Join-Path (Get-Location) "wintun-amd64.dll"
+          $x86DllPath = Join-Path (Get-Location) "wintun-x86.dll"
           $maxAttempts = 4
           $downloadSucceeded = $false
           $lastErrorMessage = ""
@@ -124,15 +126,23 @@ jobs:
               Invoke-WebRequest -Uri $url -OutFile $zipPath -TimeoutSec 60
               Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
 
-              $dllPath = Get-ChildItem -Path $extractPath -Recurse -Filter wintun.dll |
+              $amd64SourcePath = Get-ChildItem -Path $extractPath -Recurse -Filter wintun.dll |
                 Where-Object { $_.FullName -match '[\\\\/]amd64[\\\\/]' } |
                 Select-Object -First 1 -ExpandProperty FullName
+              $x86SourcePath = Get-ChildItem -Path $extractPath -Recurse -Filter wintun.dll |
+                Where-Object { $_.FullName -match '[\\\\/]x86[\\\\/]' } |
+                Select-Object -First 1 -ExpandProperty FullName
 
-              if (-not $dllPath) {
+              if (-not $amd64SourcePath) {
                 throw "Failed to locate amd64 wintun.dll in downloaded archive"
               }
+              if (-not $x86SourcePath) {
+                throw "Failed to locate x86 wintun.dll in downloaded archive"
+              }
 
-              Copy-Item $dllPath $fallbackDllPath -Force
+              Copy-Item $amd64SourcePath $amd64DllPath -Force
+              Copy-Item $x86SourcePath $x86DllPath -Force
+              Copy-Item $amd64SourcePath $fallbackDllPath -Force
               $downloadSucceeded = $true
               Write-Host "Downloaded and refreshed Wintun runtime from upstream"
               break
@@ -148,6 +158,7 @@ jobs:
           if (-not $downloadSucceeded) {
             if (Test-Path $fallbackDllPath) {
               Write-Warning "Upstream download kept failing, falling back to repository Wintun runtime: $fallbackDllPath"
+              Copy-Item $fallbackDllPath $amd64DllPath -Force
             } else {
               throw "Upstream download kept failing and no repository fallback wintun.dll was found. Last error: $lastErrorMessage"
             }
@@ -162,8 +173,19 @@ jobs:
       - name: Build multi-server config injector
         run: .\build-multi-server-injector.ps1
 
-      - name: Build Windows node client
-        run: .\build-windows-node-client.ps1
+      - name: Build Windows node client x64
+        run: |
+          Copy-Item ".\wintun-amd64.dll" ".\wintun.dll" -Force
+          .\build-windows-node-client.ps1 -Arch x64 -OutputExe "DNF_Windows_Node_Client_v1.0.exe"
+
+      - name: Build Windows node client x86
+        run: |
+          if (-not (Test-Path ".\wintun-x86.dll")) {
+            throw "x86 Wintun runtime is missing; cannot build runnable x86 node client."
+          }
+          Copy-Item ".\wintun-x86.dll" ".\wintun.dll" -Force
+          .\build-windows-node-client.ps1 -Arch x86 -OutputExe "DNF_Windows_Node_Client_v1.0_x86.exe"
+          Copy-Item ".\wintun-amd64.dll" ".\wintun.dll" -Force
 
       - name: Write windows build info
         run: |
@@ -175,15 +197,38 @@ jobs:
           artifact=dnf-windows-client
           "@ | Set-Content -Path ".\build-info.txt" -Encoding UTF8
 
-      - name: Write Windows node build info
+      - name: Stage Windows node artifacts
         run: |
+          New-Item -ItemType Directory -Force ".\node-artifact-x64" | Out-Null
+          New-Item -ItemType Directory -Force ".\node-artifact-x86" | Out-Null
+
+          Copy-Item ".\DNF_Windows_Node_Client_v1.0.exe" ".\node-artifact-x64\DNF_Windows_Node_Client_v1.0.exe" -Force
+          Copy-Item ".\DNF_Windows_Node_Client_v1.0_x86.exe" ".\node-artifact-x86\DNF_Windows_Node_Client_v1.0.exe" -Force
+
+          foreach ($dir in @(".\node-artifact-x64", ".\node-artifact-x86")) {
+            Copy-Item ".\dnf-windows-node-client.conf.example" $dir -Force
+            Copy-Item ".\run-windows-node-client.cmd" $dir -Force
+            Copy-Item ".\WINDOWS_NODE_CLIENT_README.txt" $dir -Force
+            Copy-Item ".\LICENSE.wintun.txt" $dir -Force
+          }
+
           @"
           ref_name=${{ github.ref_name }}
           sha=${{ github.sha }}
           run_number=${{ github.run_number }}
           built_at_utc=$((Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"))
           artifact=dnf-windows-node-client
-          "@ | Set-Content -Path ".\windows-node-build-info.txt" -Encoding UTF8
+          arch=x64
+          "@ | Set-Content -Path ".\node-artifact-x64\windows-node-build-info.txt" -Encoding UTF8
+
+          @"
+          ref_name=${{ github.ref_name }}
+          sha=${{ github.sha }}
+          run_number=${{ github.run_number }}
+          built_at_utc=$((Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"))
+          artifact=dnf-windows-node-client
+          arch=x86
+          "@ | Set-Content -Path ".\node-artifact-x86\windows-node-build-info.txt" -Encoding UTF8
 
       - name: Upload windows artifacts
         uses: actions/upload-artifact@v6
@@ -195,14 +240,14 @@ jobs:
             客户端源码/embedded_client_multiserver.h
             客户端源码/build-info.txt
 
-      - name: Upload Windows node artifact
+      - name: Upload Windows node x64 artifact
         uses: actions/upload-artifact@v6
         with:
-          name: dnf-windows-node-client-${{ github.run_number }}
-          path: |
-            客户端源码/DNF_Windows_Node_Client_v1.0.exe
-            客户端源码/dnf-windows-node-client.conf.example
-            客户端源码/run-windows-node-client.cmd
-            客户端源码/WINDOWS_NODE_CLIENT_README.txt
-            客户端源码/LICENSE.wintun.txt
-            客户端源码/windows-node-build-info.txt
+          name: dnf-windows-node-client-x64-${{ github.run_number }}
+          path: 客户端源码/node-artifact-x64/
+
+      - name: Upload Windows node x86 artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: dnf-windows-node-client-x86-${{ github.run_number }}
+          path: 客户端源码/node-artifact-x86/
