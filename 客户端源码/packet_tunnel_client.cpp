@@ -2516,6 +2516,8 @@ bool PacketTunnelClient::IsServerVirtualPeer(const std::string& peer_virtual_ip)
 bool PacketTunnelClient::Start(std::wstring* error_msg) {
     Stop();
     stop_requested_ = false;
+    last_receive_tick_ = 0;
+    last_network_activity_tick_ = 0;
     peer_route_debug_log_tick_.clear();
     wintun_target_debug_log_tick_.clear();
     payload_ip_debug_log_tick_.clear();
@@ -4678,13 +4680,16 @@ void PacketTunnelClient::WintunReadLoop() {
                                              packet.size(),
                                              NULL);
             if (!relay_send_ok) {
-                PacketTunnelWarnLog("TCP中转载体发送失败，回退到UDP中转");
+                PacketTunnelWarnLog("TCP中转载体发送失败，触发数据隧道重连");
                 tcp_connected_ = false;
                 SOCKET stale_tcp_sock = tcp_sock_;
                 tcp_sock_ = INVALID_SOCKET;
                 if (stale_tcp_sock != INVALID_SOCKET) {
                     closesocket(stale_tcp_sock);
                 }
+                connected_ = false;
+                stop_requested_ = true;
+                break;
             }
         }
         if (!attempted_tcp_relay || !relay_send_ok) {
@@ -4846,6 +4851,7 @@ void PacketTunnelClient::TcpSocketReadLoop() {
         }
     }
 
+    const bool stopped_by_request = stop_requested_;
     SOCKET stale_sock = tcp_sock_;
     tcp_connected_ = false;
     if (stale_sock != INVALID_SOCKET) {
@@ -4853,6 +4859,10 @@ void PacketTunnelClient::TcpSocketReadLoop() {
         if (tcp_sock_ == stale_sock) {
             tcp_sock_ = INVALID_SOCKET;
         }
+    }
+    if (!stopped_by_request) {
+        connected_ = false;
+        stop_requested_ = true;
     }
 }
 
@@ -5714,9 +5724,10 @@ void PacketTunnelClient::HeartbeatLoop() {
             }
         }
 
-        unsigned long long last_tick = last_network_activity_tick_.load();
+        unsigned long long last_tick = last_receive_tick_.load();
         if (last_tick != 0 && now_tick > last_tick && (now_tick - last_tick) > kHeartbeatTimeoutMs) {
-            PacketTunnelDebugLog("心跳超时: 空闲毫秒=" + std::to_string(now_tick - last_tick));
+            PacketTunnelWarnLog("数据隧道接收超时，需要重连: 空闲毫秒=" +
+                                std::to_string(now_tick - last_tick));
             break;
         }
     }
