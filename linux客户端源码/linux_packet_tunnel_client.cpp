@@ -3310,6 +3310,8 @@ void LinuxPacketTunnelClient::TcpSocketReadLoop() {
             break;
         }
 
+        last_receive_ms_ = now_ms();
+        MarkNetworkActivity();
         if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
             continue;
         }
@@ -3333,7 +3335,6 @@ void LinuxPacketTunnelClient::TcpSocketReadLoop() {
         TraceWatchedTcpPacket(payload.data(), payload.size(), "tunnel->tun/tcp");
     }
 
-    const bool stopped_by_request = stop_requested_;
     const int stale_sock = tcp_sock_;
     tcp_connected_ = false;
     if (stale_sock >= 0) {
@@ -3341,10 +3342,6 @@ void LinuxPacketTunnelClient::TcpSocketReadLoop() {
         if (tcp_sock_ == stale_sock) {
             tcp_sock_ = -1;
         }
-    }
-    if (!stopped_by_request) {
-        connected_ = false;
-        stop_requested_ = true;
     }
 }
 
@@ -4302,16 +4299,13 @@ void LinuxPacketTunnelClient::TunReadLoop() {
                                              packet.size(),
                                              NULL);
             if (!relay_send_ok) {
-                LogWarn("TCP中转载体发送失败，触发数据隧道重连");
+                LogWarn("TCP中转载体发送失败，回退到UDP中转");
                 tcp_connected_ = false;
                 const int stale_tcp_sock = tcp_sock_;
                 tcp_sock_ = -1;
                 if (stale_tcp_sock >= 0) {
                     close(stale_tcp_sock);
                 }
-                connected_ = false;
-                stop_requested_ = true;
-                break;
             }
         }
         if (!attempted_tcp_relay || !relay_send_ok) {
