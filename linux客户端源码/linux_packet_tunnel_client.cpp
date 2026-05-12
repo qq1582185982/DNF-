@@ -26,7 +26,7 @@
 namespace {
 
 const int kHeartbeatIntervalMs = 3000;
-const int kHeartbeatTimeoutMs = 30000;
+const int kHeartbeatTimeoutMs = 12000;
 const int kPeerOfferTimeoutMs = 9000;
 const int kPeerDirectReadyTimeoutMs = 15000;
 const int kPeerCooldownTimeoutMs = 30000;
@@ -2566,7 +2566,6 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
                 if (inner_is_udp) {
                     LearnPeerUdpPortOwner(peer_virtual_ip, inner_src_port);
                 }
-                last_receive_ms_ = now_ms();
                 MarkNetworkActivity();
                 if (peer_link_manager_ != NULL) {
                     peer_link_manager_->TouchPeerDirectData(peer_virtual_ip, 0);
@@ -3561,10 +3560,7 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
             break;
         }
 
-        const unsigned long long rx_ms = now_ms();
-        connection->last_rx_ms = rx_ms;
-        last_receive_ms_ = rx_ms;
-        MarkNetworkActivity();
+        connection->last_rx_ms = now_ms();
         if (frame_type == packet_tunnel::kFrameHeartbeat && payload.empty()) {
             if (SendFrameOverSocket(connection->sock,
                                     &connection->send_mutex,
@@ -3598,6 +3594,7 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
         }
 
         std::string tun_error;
+        MarkNetworkActivity();
         if (!tun_manager_ ||
             !tun_manager_->WritePacket(payload.data(), payload.size(), &tun_error)) {
             if (!stop_requested_) {
@@ -4498,23 +4495,7 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
             break;
         }
 
-        const bool udp_heartbeat_sent =
-            SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL);
-        bool tcp_heartbeat_sent = false;
-        if (tcp_connected_ && tcp_sock_ >= 0) {
-            tcp_heartbeat_sent =
-                SendFrameOverTcp(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL);
-            if (!tcp_heartbeat_sent) {
-                LogWarn("TCP中转载体心跳发送失败，回退到UDP心跳");
-                tcp_connected_ = false;
-                const int stale_tcp_sock = tcp_sock_;
-                tcp_sock_ = -1;
-                if (stale_tcp_sock >= 0) {
-                    close(stale_tcp_sock);
-                }
-            }
-        }
-        if (!udp_heartbeat_sent && !tcp_heartbeat_sent) {
+        if (!SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
             break;
         }
 
@@ -4633,12 +4614,12 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
             }
         }
 
-        const unsigned long long last_receive_ms = last_receive_ms_.load();
-        if (last_receive_ms != 0 &&
-            current_ms > last_receive_ms &&
-            (current_ms - last_receive_ms) > kHeartbeatTimeoutMs) {
-            LogWarn("数据隧道接收超时，需要重连: 空闲=" +
-                    std::to_string(current_ms - last_receive_ms) + "ms");
+        const unsigned long long last_activity_ms = last_network_activity_ms_.load();
+        if (last_activity_ms != 0 &&
+            current_ms > last_activity_ms &&
+            (current_ms - last_activity_ms) > kHeartbeatTimeoutMs) {
+            LogDebug("Heartbeat idle timeout: idle_ms=" +
+                     std::to_string(current_ms - last_activity_ms));
             break;
         }
     }

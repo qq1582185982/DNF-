@@ -40,7 +40,7 @@ namespace {
 #endif
 
 const DWORD kHeartbeatIntervalMs = 3000;
-const DWORD kHeartbeatTimeoutMs = 30000;
+const DWORD kHeartbeatTimeoutMs = 12000;
 const DWORD kPeerOfferTimeoutMs = 9000;
 const DWORD kPeerDirectReadyTimeoutMs = 15000;
 const DWORD kPeerCooldownTimeoutMs = 30000;
@@ -4145,7 +4145,6 @@ void PacketTunnelClient::SocketReadLoop() {
                 if (inner_is_udp) {
                     LearnPeerUdpPortOwner(peer_virtual_ip, inner_src_port);
                 }
-                last_receive_tick_ = GetTickCount64();
                 MarkNetworkActivity();
                 if (peer_link_manager_ != NULL) {
                     peer_link_manager_->TouchPeerDirectData(peer_virtual_ip, 0);
@@ -5077,10 +5076,7 @@ void PacketTunnelClient::TcpDirectReadLoop(const std::shared_ptr<TcpDirectConnec
             break;
         }
 
-        const unsigned long long rx_tick = GetTickCount64();
-        connection->last_rx_tick_ms = rx_tick;
-        last_receive_tick_ = rx_tick;
-        MarkNetworkActivity();
+        connection->last_rx_tick_ms = GetTickCount64();
         if (frame_type == packet_tunnel::kFrameHeartbeat && payload.empty()) {
             if (SendFrameOverSocket(connection->sock,
                                     &connection->send_lock,
@@ -5132,6 +5128,7 @@ void PacketTunnelClient::TcpDirectReadLoop(const std::shared_ptr<TcpDirectConnec
                               &inner_dst_port);
         }
 
+        MarkNetworkActivity();
         if (PacketTunnelDebugEnabled()) {
             TraceWatchedTcpPacket(payload.data(), payload.size(), "tcp-peer->wintun");
         }
@@ -5598,23 +5595,7 @@ void PacketTunnelClient::HeartbeatLoop() {
             break;
         }
 
-        const bool udp_heartbeat_sent =
-            SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL);
-        bool tcp_heartbeat_sent = false;
-        if (tcp_connected_ && tcp_sock_ != INVALID_SOCKET) {
-            tcp_heartbeat_sent =
-                SendFrameOverTcp(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL);
-            if (!tcp_heartbeat_sent) {
-                PacketTunnelWarnLog("TCP中转载体心跳发送失败，回退到UDP心跳");
-                tcp_connected_ = false;
-                SOCKET stale_tcp_sock = tcp_sock_;
-                tcp_sock_ = INVALID_SOCKET;
-                if (stale_tcp_sock != INVALID_SOCKET) {
-                    closesocket(stale_tcp_sock);
-                }
-            }
-        }
-        if (!udp_heartbeat_sent && !tcp_heartbeat_sent) {
+        if (!SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
             PacketTunnelDebugLog("心跳发送失败");
             break;
         }
@@ -5737,10 +5718,9 @@ void PacketTunnelClient::HeartbeatLoop() {
             }
         }
 
-        unsigned long long last_tick = last_receive_tick_.load();
+        unsigned long long last_tick = last_network_activity_tick_.load();
         if (last_tick != 0 && now_tick > last_tick && (now_tick - last_tick) > kHeartbeatTimeoutMs) {
-            PacketTunnelWarnLog("数据隧道接收超时，需要重连: 空闲毫秒=" +
-                                std::to_string(now_tick - last_tick));
+            PacketTunnelDebugLog("心跳超时: 空闲毫秒=" + std::to_string(now_tick - last_tick));
             break;
         }
     }

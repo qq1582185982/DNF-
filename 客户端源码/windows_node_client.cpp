@@ -35,6 +35,7 @@
 namespace {
 
 const DWORD kStartupRetryDelayMs = 2000;
+const unsigned long long kNodeTunnelReceiveTimeoutMs = 60000;
 std::atomic<bool> g_stop_requested(false);
 
 std::string Trim(const std::string& value) {
@@ -997,8 +998,18 @@ int main(int argc, char** argv) {
 
         while (!g_stop_requested) {
             if (packet_client && packet_client->IsConnected() && !renew_failed) {
-                Sleep(200);
-                continue;
+                const unsigned long long now_tick = GetTickCount64();
+                const unsigned long long last_receive_tick = packet_client->GetLastReceiveTick();
+                if (last_receive_tick != 0 &&
+                    now_tick > last_receive_tick &&
+                    (now_tick - last_receive_tick) > kNodeTunnelReceiveTimeoutMs) {
+                    LogWarn("Node tunnel receive timeout, trigger reconnect: idle_ms=" +
+                            std::to_string(now_tick - last_receive_tick));
+                    packet_client->Stop();
+                } else {
+                    Sleep(200);
+                    continue;
+                }
             }
 
             if (g_stop_requested) {
