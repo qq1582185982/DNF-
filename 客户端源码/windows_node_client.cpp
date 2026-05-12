@@ -35,6 +35,7 @@
 namespace {
 
 const DWORD kStartupRetryDelayMs = 2000;
+const unsigned long long kNodeServerReceiveTimeoutMs = 60000;
 std::atomic<bool> g_stop_requested(false);
 
 std::string Trim(const std::string& value) {
@@ -926,7 +927,9 @@ int main(int argc, char** argv) {
                                                        current_lease.server_virtual_ip,
                                                        current_lease.virtual_ip,
                                                        current_lease.mtu,
-                                                       &wintun_manager));
+                                                       &wintun_manager,
+                                                       true,
+                                                       kNodeServerReceiveTimeoutMs));
             return packet_client->Start(start_error);
         };
 

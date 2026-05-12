@@ -2473,7 +2473,8 @@ PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
                                        const std::string& virtual_ip,
                                        uint16_t mtu,
                                        WintunManager* wintun_manager,
-                                       bool peer_direct_enabled)
+                                       bool peer_direct_enabled,
+                                       unsigned long long server_receive_timeout_ms)
     : tunnel_server_ip_(tunnel_ip),
       tunnel_port_(tunnel_port),
       session_uuid_(session_uuid),
@@ -2495,7 +2496,8 @@ PacketTunnelClient::PacketTunnelClient(const std::string& tunnel_ip,
       peer_link_manager_(new PeerLinkManager()),
       peer_signal_nonce_(1),
       peer_direct_config_enabled_(peer_direct_enabled),
-      peer_direct_allowed_(peer_direct_enabled) {
+      peer_direct_allowed_(peer_direct_enabled),
+      server_receive_timeout_ms_(server_receive_timeout_ms) {
     InitializeCriticalSection(&send_lock_);
     InitializeCriticalSection(&tcp_send_lock_);
 }
@@ -5714,10 +5716,23 @@ void PacketTunnelClient::HeartbeatLoop() {
             }
         }
 
-        unsigned long long last_tick = last_network_activity_tick_.load();
-        if (last_tick != 0 && now_tick > last_tick && (now_tick - last_tick) > kHeartbeatTimeoutMs) {
-            PacketTunnelDebugLog("心跳超时: 空闲毫秒=" + std::to_string(now_tick - last_tick));
-            break;
+        if (server_receive_timeout_ms_ > 0) {
+            unsigned long long last_tick = last_receive_tick_.load();
+            if (last_tick != 0 &&
+                now_tick > last_tick &&
+                (now_tick - last_tick) > server_receive_timeout_ms_) {
+                PacketTunnelWarnLog("Node tunnel receive timeout, reconnect: idle_ms=" +
+                                    std::to_string(now_tick - last_tick));
+                break;
+            }
+        } else {
+            unsigned long long last_tick = last_network_activity_tick_.load();
+            if (last_tick != 0 &&
+                now_tick > last_tick &&
+                (now_tick - last_tick) > kHeartbeatTimeoutMs) {
+                PacketTunnelDebugLog("心跳超时: 空闲毫秒=" + std::to_string(now_tick - last_tick));
+                break;
+            }
         }
     }
 

@@ -31,7 +31,8 @@ public:
                        const std::string& virtual_ip,
                        uint16_t mtu,
                        WintunManager* wintun_manager,
-                       bool peer_direct_enabled = true);
+                       bool peer_direct_enabled = true,
+                       unsigned long long server_receive_timeout_ms = 0);
     ~PacketTunnelClient();
 
     bool Start(std::wstring* error_msg);
@@ -381,4 +382,5 @@ private:
     std::vector<std::thread> tcp_direct_connect_threads_;
     bool peer_direct_config_enabled_;
     bool peer_direct_allowed_;
+    unsigned long long server_receive_timeout_ms_;
 };
