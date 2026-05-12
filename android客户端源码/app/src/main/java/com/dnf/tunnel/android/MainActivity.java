@@ -1,29 +1,41 @@
 package com.dnf.tunnel.android;
 
 import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.net.VpnService;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 
 public final class MainActivity extends Activity {
     private static final int VPN_REQUEST_CODE = 1001;
     private static final int SERVER_GRID_COLUMNS = 2;
 
+    private ScrollView selectionScrollView;
+    private ScrollView logScrollView;
     private LinearLayout serverGrid;
     private TextView statusText;
+    private TextView logText;
     private Button startButton;
 
     private String apiHostValue = "";
@@ -32,6 +44,16 @@ public final class MainActivity extends Activity {
     private String selectedServerKey = "";
     private String clientIdValue = "";
     private final List<ServerInfo> currentServers = new ArrayList<>();
+    private final SimpleDateFormat logTimeFormat = new SimpleDateFormat("HH:mm:ss", Locale.US);
+    private final BroadcastReceiver statusReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent == null || !DnfVpnService.ACTION_STATUS.equals(intent.getAction())) {
+                return;
+            }
+            appendLog(intent.getStringExtra(DnfVpnService.EXTRA_STATUS_MESSAGE));
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -42,19 +64,43 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        IntentFilter filter = new IntentFilter(DnfVpnService.ACTION_STATUS);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(statusReceiver, filter);
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        try {
+            unregisterReceiver(statusReceiver);
+        } catch (IllegalArgumentException ignored) {
+        }
+        super.onStop();
+    }
+
+    @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == VPN_REQUEST_CODE && resultCode == RESULT_OK) {
+            appendLog("系统 VPN 授权已通过。");
             startVpnService();
+        } else if (requestCode == VPN_REQUEST_CODE) {
+            appendLog("系统 VPN 授权已取消。");
         }
     }
 
     private void buildUi() {
-        ScrollView scrollView = new ScrollView(this);
+        FrameLayout pageHost = new FrameLayout(this);
+        selectionScrollView = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(16), dp(16), dp(16), dp(16));
-        scrollView.addView(root);
+        selectionScrollView.addView(root);
 
         TextView title = new TextView(this);
         title.setText("选择游戏服务器");
@@ -108,7 +154,60 @@ public final class MainActivity extends Activity {
         });
         root.addView(stopButton, matchWidth());
 
-        setContentView(scrollView);
+        buildLogUi();
+        logScrollView.setVisibility(View.GONE);
+        pageHost.addView(selectionScrollView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        pageHost.addView(logScrollView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        setContentView(pageHost);
+    }
+
+    private void buildLogUi() {
+        logScrollView = new ScrollView(this);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(16), dp(16), dp(16), dp(16));
+        logScrollView.addView(root);
+
+        TextView title = new TextView(this);
+        title.setText("连接日志");
+        title.setTextSize(24);
+        title.setTextColor(Color.rgb(55, 55, 55));
+        title.setGravity(Gravity.START);
+        root.addView(title, matchWidth());
+
+        logText = new TextView(this);
+        logText.setTextSize(13);
+        logText.setTextColor(Color.rgb(40, 40, 40));
+        logText.setTypeface(Typeface.MONOSPACE);
+        logText.setPadding(dp(10), dp(10), dp(10), dp(10));
+        logText.setBackgroundColor(Color.rgb(245, 247, 250));
+        root.addView(logText, matchWidth());
+
+        Button stopButton = new Button(this);
+        stopButton.setText("停止 VPN");
+        stopButton.setAllCaps(false);
+        stopButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                stopVpn();
+            }
+        });
+        root.addView(stopButton, matchWidth());
+
+        Button backButton = new Button(this);
+        backButton.setText("返回服务器选择");
+        backButton.setAllCaps(false);
+        backButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showSelectionPage();
+            }
+        });
+        root.addView(backButton, matchWidth());
     }
 
     private void loadPrefs() {
@@ -272,6 +371,39 @@ public final class MainActivity extends Activity {
         return "服务器 " + server.serverKey();
     }
 
+    private void showLogPage() {
+        selectionScrollView.setVisibility(View.GONE);
+        logScrollView.setVisibility(View.VISIBLE);
+    }
+
+    private void showSelectionPage() {
+        logScrollView.setVisibility(View.GONE);
+        selectionScrollView.setVisibility(View.VISIBLE);
+    }
+
+    private void resetLog(String firstLine) {
+        if (logText != null) {
+            logText.setText("");
+        }
+        appendLog(firstLine);
+    }
+
+    private void appendLog(String message) {
+        if (message == null || message.trim().isEmpty() || logText == null) {
+            return;
+        }
+        String line = logTimeFormat.format(new Date()) + "  " + message.trim() + "\n";
+        logText.append(line);
+        if (logScrollView != null) {
+            logScrollView.post(new Runnable() {
+                @Override
+                public void run() {
+                    logScrollView.fullScroll(View.FOCUS_DOWN);
+                }
+            });
+        }
+    }
+
     private void requestStartVpn() {
         if (apiHost().isEmpty() || apiPort() <= 0) {
             Toast.makeText(this, "当前 APK 未内置配置服务器", Toast.LENGTH_SHORT).show();
@@ -286,10 +418,15 @@ public final class MainActivity extends Activity {
             return;
         }
         savePrefs();
+        ServerInfo selected = findServerByKey(selectedServerKey);
+        showLogPage();
+        resetLog("准备连接：" + (selected == null ? "当前服务器" : serverLabel(selected)));
         Intent prepareIntent = VpnService.prepare(this);
         if (prepareIntent != null) {
+            appendLog("正在请求系统 VPN 授权...");
             startActivityForResult(prepareIntent, VPN_REQUEST_CODE);
         } else {
+            appendLog("系统 VPN 已授权。");
             startVpnService();
         }
     }
@@ -303,6 +440,7 @@ public final class MainActivity extends Activity {
         intent.putExtra(DnfVpnService.EXTRA_CLIENT_ID, clientId());
         startService(intent);
         ServerInfo selected = findServerByKey(selectedServerKey);
+        appendLog("VPN 服务启动请求已发送：" + (selected == null ? "当前服务器" : serverLabel(selected)));
         statusText.setText("VPN 已请求启动：" + (selected == null ? "当前服务器" : serverLabel(selected)));
     }
 
@@ -310,6 +448,7 @@ public final class MainActivity extends Activity {
         Intent intent = new Intent(this, DnfVpnService.class);
         intent.setAction(DnfVpnService.ACTION_STOP);
         startService(intent);
+        appendLog("VPN 停止请求已发送。");
         statusText.setText("VPN 已请求停止。");
     }
 

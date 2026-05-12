@@ -54,13 +54,8 @@ ANDROID_CLIENT_ID=android-phone-001
 
 `ANDROID_SERVER_KEY` 不建时默认 `1`；`ANDROID_CLIENT_ID` 不建时安卓端会自动生成设备 ID。GitHub 不支持创建空 secret，所以不需要创建空的 `ANDROID_CLIENT_ID`。推送代码或手动运行 Actions 后，在构建产物里下载 `dnf-android-client-debug-<run_number>`。
 
-## 运行参数
+## 运行方式
 
-启动界面需要填写：
+带配置 APK 启动后不会显示配置服务器地址和端口。客户端会自动读取内置配置、拉取节点列表，并显示服务器选择按钮。
 
-- API Host：配置服务地址
-- API Port：配置服务端口
-- Server Key：节点编号，通常是 `1`
-- Client ID：安卓设备的稳定客户端 ID
-
-点“获取节点”可以验证配置服务是否可达。点“启动 VPN”后系统会弹出 VPN 授权。
+点击服务器按钮后再点“连接服务器”，界面会切换到连接日志页；首次连接时系统会弹出 VPN 授权。`Client ID` 默认由安卓设备 ID 自动生成。

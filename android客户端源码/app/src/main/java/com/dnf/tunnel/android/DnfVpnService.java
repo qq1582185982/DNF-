@@ -11,10 +11,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class DnfVpnService extends VpnService {
     static final String ACTION_START = "com.dnf.tunnel.android.START";
     static final String ACTION_STOP = "com.dnf.tunnel.android.STOP";
+    static final String ACTION_STATUS = "com.dnf.tunnel.android.STATUS";
     static final String EXTRA_API_HOST = "api_host";
     static final String EXTRA_API_PORT = "api_port";
     static final String EXTRA_SERVER_KEY = "server_key";
     static final String EXTRA_CLIENT_ID = "client_id";
+    static final String EXTRA_STATUS_MESSAGE = "status_message";
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private Thread workerThread;
@@ -40,9 +42,11 @@ public final class DnfVpnService extends VpnService {
 
     private synchronized void startVpn(final Intent intent) {
         if (running.get()) {
+            sendStatus("VPN 已在运行。");
             return;
         }
         running.set(true);
+        sendStatus("VPN 服务正在启动。");
         workerThread = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -64,16 +68,23 @@ public final class DnfVpnService extends VpnService {
             String activeServerKey = null;
             ControlClient controlClient = null;
             try {
+                sendStatus("正在连接配置服务。");
                 controlClient = new ControlClient(apiHost, apiPort);
                 List<ServerInfo> servers = controlClient.getServers();
+                sendStatus("已获取节点列表，正在选择服务器。");
                 ServerInfo server = selectServer(servers, requestedServerKey);
                 activeServerKey = server.serverKey();
+                sendStatus("已选择服务器：" + serverLabel(server));
+                sendStatus("正在申请虚拟 IP。");
                 LeaseGrant lease = controlClient.requestLease(activeServerKey,
                                                               sessionUuid,
                                                               clientId,
                                                               preferredIp);
                 preferredIp = lease.virtualIp;
+                sendStatus("已获取虚拟 IP：" + lease.virtualIp);
+                sendStatus("正在建立 Android VPN 接口。");
                 ParcelFileDescriptor vpnInterface = buildVpnInterface(server, lease);
+                sendStatus("VPN 接口已建立，正在连接数据隧道。");
                 packetTunnelClient = new PacketTunnelClient(this,
                                                             vpnInterface,
                                                             server,
@@ -87,9 +98,12 @@ public final class DnfVpnService extends VpnService {
                 try {
                     packetTunnelClient.run();
                 } finally {
+                    sendStatus("数据隧道已断开，正在清理连接。");
                     renewThread.interrupt();
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                sendStatus("连接异常：" + safeMessage(e));
+                sendStatus("2 秒后自动重试。");
                 sleepQuietly(2000);
             } finally {
                 if (packetTunnelClient != null) {
@@ -122,6 +136,7 @@ public final class DnfVpnService extends VpnService {
                         if (packetTunnelClient != null) {
                             packetTunnelClient.stop();
                         }
+                        sendStatus("租约续期失败，正在重连。");
                         break;
                     }
                 }
@@ -179,7 +194,7 @@ public final class DnfVpnService extends VpnService {
     }
 
     private synchronized void stopVpn() {
-        running.set(false);
+        boolean wasRunning = running.getAndSet(false);
         if (packetTunnelClient != null) {
             packetTunnelClient.stop();
             packetTunnelClient = null;
@@ -188,7 +203,32 @@ public final class DnfVpnService extends VpnService {
             workerThread.interrupt();
             workerThread = null;
         }
+        if (wasRunning) {
+            sendStatus("VPN 已停止。");
+        }
         stopSelf();
+    }
+
+    private void sendStatus(String message) {
+        Intent intent = new Intent(ACTION_STATUS);
+        intent.setPackage(getPackageName());
+        intent.putExtra(EXTRA_STATUS_MESSAGE, message);
+        sendBroadcast(intent);
+    }
+
+    private static String serverLabel(ServerInfo server) {
+        if (server.name != null && !server.name.trim().isEmpty()) {
+            return server.name.trim();
+        }
+        return "服务器 " + server.serverKey();
+    }
+
+    private static String safeMessage(Exception e) {
+        String message = e.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            return e.getClass().getSimpleName();
+        }
+        return message.trim();
     }
 
     private static int subnetMaskToPrefix(String subnetMask) throws Exception {
