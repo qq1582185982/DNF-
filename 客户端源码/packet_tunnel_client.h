@@ -37,7 +37,6 @@ public:
     bool Start(std::wstring* error_msg);
     void Stop();
     bool IsConnected() const { return connected_; }
-    unsigned long long GetLastReceiveTick() const { return last_receive_tick_.load(); }
 
 private:
     struct UdpEndpoint {

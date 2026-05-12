@@ -3310,8 +3310,6 @@ void LinuxPacketTunnelClient::TcpSocketReadLoop() {
             break;
         }
 
-        last_receive_ms_ = now_ms();
-        MarkNetworkActivity();
         if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
             continue;
         }
@@ -4614,12 +4612,12 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
             }
         }
 
-        const unsigned long long last_activity_ms = last_network_activity_ms_.load();
-        if (last_activity_ms != 0 &&
-            current_ms > last_activity_ms &&
-            (current_ms - last_activity_ms) > kHeartbeatTimeoutMs) {
-            LogDebug("Heartbeat idle timeout: idle_ms=" +
-                     std::to_string(current_ms - last_activity_ms));
+        const unsigned long long last_receive_ms = last_receive_ms_.load();
+        if (last_receive_ms != 0 &&
+            current_ms > last_receive_ms &&
+            (current_ms - last_receive_ms) > kHeartbeatTimeoutMs) {
+            LogWarn("数据隧道接收超时，需要重连: 空闲=" +
+                    std::to_string(current_ms - last_receive_ms) + "ms");
             break;
         }
     }

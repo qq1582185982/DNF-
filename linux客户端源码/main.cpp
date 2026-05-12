@@ -11,7 +11,6 @@
 
 #include <atomic>
 #include <cctype>
-#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -21,8 +20,6 @@
 #include <thread>
 
 namespace {
-
-const unsigned long long kNodeTunnelReceiveTimeoutMs = 60000;
 
 struct Options {
     std::string api_url;
@@ -65,12 +62,6 @@ std::string StripQuotes(const std::string& value) {
         }
     }
     return value;
-}
-
-unsigned long long MonotonicMs() {
-    return static_cast<unsigned long long>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
 std::vector<std::string> GetDefaultConfigPaths() {
@@ -530,18 +521,8 @@ int main(int argc, char** argv) {
 
         while (!g_linux_client_stop) {
             if (packet_client && packet_client->IsConnected() && !renew_failed) {
-                const unsigned long long current_ms = MonotonicMs();
-                const unsigned long long last_receive_ms = packet_client->GetLastReceiveMs();
-                if (last_receive_ms != 0 &&
-                    current_ms > last_receive_ms &&
-                    (current_ms - last_receive_ms) > kNodeTunnelReceiveTimeoutMs) {
-                    LogWarn("Node tunnel receive timeout, trigger reconnect: idle_ms=" +
-                            std::to_string(current_ms - last_receive_ms) + "ms");
-                    packet_client->Stop();
-                } else {
-                    usleep(200 * 1000);
-                    continue;
-                }
+                usleep(200 * 1000);
+                continue;
             }
 
             if (g_linux_client_stop) {

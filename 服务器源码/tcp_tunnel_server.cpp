@@ -2328,6 +2328,26 @@ private:
             return false;
         }
 
+        if (is_udp_payload &&
+            sender_session->allow_peer_direct &&
+            peer_session &&
+            peer_session->allow_peer_direct &&
+            (is_known_game_udp_port(src_port) || is_known_game_udp_port(dst_port))) {
+            const string sender_scope_key =
+                build_scoped_virtual_ip_key(sender_session->server_key, src_ip_be);
+            const string target_scope_key =
+                build_scoped_virtual_ip_key(peer_session->server_key, dst_ip_be);
+            if (peer_coord_.GetState(sender_scope_key) == PeerEndpointState::Active &&
+                peer_coord_.GetState(target_scope_key) == PeerEndpointState::Active) {
+                Logger::debug("[数据隧道|" + sender_session->session_uuid +
+                              "] 跳过转发对等端UDP 来源=" +
+                              ipv4_be_to_string(src_ip_be) + ":" + to_string(src_port) +
+                              " 目标=" + ipv4_be_to_string(dst_ip_be) + ":" + to_string(dst_port) +
+                              " 原因=对等直连已激活");
+                return true;
+            }
+        }
+
         if (is_udp_payload) {
             maybe_log_virtual_peer_udp_relay(sender_session,
                                              target_session,

@@ -28,7 +28,6 @@ public:
     bool Start(std::string* error);
     void Stop();
     bool IsConnected() const { return connected_; }
-    unsigned long long GetLastReceiveMs() const { return last_receive_ms_.load(); }
 
 private:
     struct UdpEndpoint {

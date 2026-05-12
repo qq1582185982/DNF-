@@ -2516,8 +2516,6 @@ bool PacketTunnelClient::IsServerVirtualPeer(const std::string& peer_virtual_ip)
 bool PacketTunnelClient::Start(std::wstring* error_msg) {
     Stop();
     stop_requested_ = false;
-    last_receive_tick_ = 0;
-    last_network_activity_tick_ = 0;
     peer_route_debug_log_tick_.clear();
     wintun_target_debug_log_tick_.clear();
     payload_ip_debug_log_tick_.clear();
@@ -4796,8 +4794,6 @@ void PacketTunnelClient::TcpSocketReadLoop() {
             break;
         }
 
-        last_receive_tick_ = GetTickCount64();
-        MarkNetworkActivity();
         if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
             continue;
         }
