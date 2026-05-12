@@ -83,6 +83,100 @@ jobs:
             linux客户端源码/dnf-linux-client@.service
             linux客户端源码/build-info.txt
 
+  android-client-build:
+    name: Android client build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: android客户端源码
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android SDK packages
+        run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Write embedded Android config
+        env:
+          ANDROID_CONFIG_API_HOST: ${{ secrets.ANDROID_CONFIG_API_HOST }}
+          ANDROID_CONFIG_API_PORT: ${{ secrets.ANDROID_CONFIG_API_PORT }}
+          ANDROID_SERVER_KEY: ${{ secrets.ANDROID_SERVER_KEY }}
+          ANDROID_CLIENT_ID: ${{ secrets.ANDROID_CLIENT_ID }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          host = os.environ.get("ANDROID_CONFIG_API_HOST", "").strip()
+          port_text = os.environ.get("ANDROID_CONFIG_API_PORT", "").strip()
+          server_key = os.environ.get("ANDROID_SERVER_KEY", "").strip() or "1"
+          client_id = os.environ.get("ANDROID_CLIENT_ID", "").strip()
+
+          if not host:
+              print("::error::Missing repository secret ANDROID_CONFIG_API_HOST", file=sys.stderr)
+              sys.exit(1)
+          try:
+              port = int(port_text)
+          except ValueError:
+              print("::error::ANDROID_CONFIG_API_PORT must be a number from 1 to 65535", file=sys.stderr)
+              sys.exit(1)
+          if port < 1 or port > 65535:
+              print("::error::ANDROID_CONFIG_API_PORT must be between 1 and 65535", file=sys.stderr)
+              sys.exit(1)
+
+          config = {
+              "config_api_url": host,
+              "config_api_port": port,
+              "server_key": server_key,
+              "client_id": client_id,
+          }
+          path = pathlib.Path("app/src/main/assets/dnf_android_config.json")
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          print("Embedded Android config written from GitHub Actions secrets.")
+          PY
+
+      - name: Build Android debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Write android build info
+        run: |
+          cat > build-info.txt <<EOF
+          ref_name=${{ github.ref_name }}
+          sha=${{ github.sha }}
+          run_number=${{ github.run_number }}
+          built_at_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          artifact=dnf-android-client
+          variant=debug
+          config_source=github_actions_secrets
+          EOF
+
+      - name: Upload android artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: dnf-android-client-debug-${{ github.run_number }}
+          if-no-files-found: error
+          path: |
+            android客户端源码/app/build/outputs/apk/debug/app-debug.apk
+            android客户端源码/build-info.txt
+
   windows-client:
     name: Windows client build
     runs-on: windows-latest

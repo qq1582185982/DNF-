@@ -36,6 +36,19 @@ app/src/main/assets/dnf_android_config.json
 .\生成带配置安卓客户端.ps1 -ApiHost cd.sviplk.com -ApiPort 6350 -ServerKey 1 -Build
 ```
 
+## GitHub Actions 自动构建
+
+仓库的 `build` 工作流会自动构建安卓 debug APK。先在 GitHub 仓库里进入 `Settings` -> `Secrets and variables` -> `Actions`，添加这些 Repository secrets：
+
+```text
+ANDROID_CONFIG_API_HOST=cd.sviplk.com
+ANDROID_CONFIG_API_PORT=6350
+ANDROID_SERVER_KEY=1
+ANDROID_CLIENT_ID=
+```
+
+其中 `ANDROID_CONFIG_API_HOST` 和 `ANDROID_CONFIG_API_PORT` 必填；`ANDROID_SERVER_KEY` 不填时默认 `1`，`ANDROID_CLIENT_ID` 不填时安卓端会自动生成设备 ID。推送代码或手动运行 Actions 后，在构建产物里下载 `dnf-android-client-debug-<run_number>`。
+
 ## 运行参数
 
 启动界面需要填写：
