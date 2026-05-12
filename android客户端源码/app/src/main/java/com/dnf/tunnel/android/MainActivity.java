@@ -110,11 +110,20 @@ public final class MainActivity extends Activity {
 
     private void loadPrefs() {
         SharedPreferences prefs = prefs();
+        AndroidConfig embeddedConfig = AndroidConfig.load(this);
+        String defaultClientId = "android-" + Settings.Secure.getString(getContentResolver(),
+                                                                        Settings.Secure.ANDROID_ID);
+        if (embeddedConfig.hasConnectionConfig()) {
+            apiHostEdit.setText(embeddedConfig.apiHost);
+            apiPortEdit.setText(Integer.toString(embeddedConfig.apiPort));
+            serverKeyEdit.setText(embeddedConfig.serverKey);
+            clientIdEdit.setText(embeddedConfig.clientId.isEmpty() ? defaultClientId : embeddedConfig.clientId);
+            return;
+        }
+
         apiHostEdit.setText(prefs.getString("api_host", ""));
         apiPortEdit.setText(prefs.getString("api_port", ""));
         serverKeyEdit.setText(prefs.getString("server_key", "1"));
-        String defaultClientId = "android-" + Settings.Secure.getString(getContentResolver(),
-                                                                        Settings.Secure.ANDROID_ID);
         clientIdEdit.setText(prefs.getString("client_id", defaultClientId));
     }
 

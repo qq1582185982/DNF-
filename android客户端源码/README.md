@@ -16,6 +16,26 @@ Android 客户端第一版，使用系统 `VpnService` 接入现有虚拟局域�
 
 本机当前没有 Gradle/Android SDK 命令行环境，所以本轮没有生成 APK。
 
+## 生成带配置客户端
+
+Android 不能像 Windows EXE 一样在二进制末尾追加配置；APK 修改后会破坏签名。安卓版本使用构建期内置配置，配置文件在：
+
+```text
+app/src/main/assets/dnf_android_config.json
+```
+
+可用脚本生成：
+
+```powershell
+.\生成带配置安卓客户端.ps1 -ApiHost cd.sviplk.com -ApiPort 6350 -ServerKey 1
+```
+
+如果本机已安装 Android SDK/Gradle，可直接构建：
+
+```powershell
+.\生成带配置安卓客户端.ps1 -ApiHost cd.sviplk.com -ApiPort 6350 -ServerKey 1 -Build
+```
+
 ## 运行参数
 
 启动界面需要填写：
