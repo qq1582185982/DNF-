@@ -4498,7 +4498,23 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
             break;
         }
 
-        if (!SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
+        const bool udp_heartbeat_sent =
+            SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL);
+        bool tcp_heartbeat_sent = false;
+        if (tcp_connected_ && tcp_sock_ >= 0) {
+            tcp_heartbeat_sent =
+                SendFrameOverTcp(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL);
+            if (!tcp_heartbeat_sent) {
+                LogWarn("TCP中转载体心跳发送失败，回退到UDP心跳");
+                tcp_connected_ = false;
+                const int stale_tcp_sock = tcp_sock_;
+                tcp_sock_ = -1;
+                if (stale_tcp_sock >= 0) {
+                    close(stale_tcp_sock);
+                }
+            }
+        }
+        if (!udp_heartbeat_sent && !tcp_heartbeat_sent) {
             break;
         }
 

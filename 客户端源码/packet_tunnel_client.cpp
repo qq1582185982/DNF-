@@ -5598,7 +5598,23 @@ void PacketTunnelClient::HeartbeatLoop() {
             break;
         }
 
-        if (!SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
+        const bool udp_heartbeat_sent =
+            SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL);
+        bool tcp_heartbeat_sent = false;
+        if (tcp_connected_ && tcp_sock_ != INVALID_SOCKET) {
+            tcp_heartbeat_sent =
+                SendFrameOverTcp(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL);
+            if (!tcp_heartbeat_sent) {
+                PacketTunnelWarnLog("TCP中转载体心跳发送失败，回退到UDP心跳");
+                tcp_connected_ = false;
+                SOCKET stale_tcp_sock = tcp_sock_;
+                tcp_sock_ = INVALID_SOCKET;
+                if (stale_tcp_sock != INVALID_SOCKET) {
+                    closesocket(stale_tcp_sock);
+                }
+            }
+        }
+        if (!udp_heartbeat_sent && !tcp_heartbeat_sent) {
             PacketTunnelDebugLog("心跳发送失败");
             break;
         }
