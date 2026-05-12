@@ -3,35 +3,42 @@ package com.dnf.tunnel.android;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Color;
 import android.net.VpnService;
 import android.os.Bundle;
 import android.provider.Settings;
-import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public final class MainActivity extends Activity {
     private static final int VPN_REQUEST_CODE = 1001;
+    private static final int SERVER_GRID_COLUMNS = 2;
 
-    private EditText apiHostEdit;
-    private EditText apiPortEdit;
-    private EditText serverKeyEdit;
-    private EditText clientIdEdit;
+    private LinearLayout serverGrid;
     private TextView statusText;
+    private Button startButton;
+
+    private String apiHostValue = "";
+    private int apiPortValue = 0;
+    private String defaultServerKey = "1";
+    private String selectedServerKey = "";
+    private String clientIdValue = "";
+    private final List<ServerInfo> currentServers = new ArrayList<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         buildUi();
         loadPrefs();
+        loadServers();
     }
 
     @Override
@@ -50,28 +57,38 @@ public final class MainActivity extends Activity {
         scrollView.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("DNF Android Client");
-        title.setTextSize(22);
+        title.setText("选择游戏服务器");
+        title.setTextSize(24);
+        title.setTextColor(Color.rgb(55, 55, 55));
         title.setGravity(Gravity.START);
         root.addView(title, matchWidth());
 
-        apiHostEdit = addInput(root, "API Host", InputType.TYPE_CLASS_TEXT);
-        apiPortEdit = addInput(root, "API Port", InputType.TYPE_CLASS_NUMBER);
-        serverKeyEdit = addInput(root, "Server Key", InputType.TYPE_CLASS_TEXT);
-        clientIdEdit = addInput(root, "Client ID", InputType.TYPE_CLASS_TEXT);
+        statusText = new TextView(this);
+        statusText.setTextSize(14);
+        statusText.setTextColor(Color.rgb(90, 90, 90));
+        statusText.setPadding(0, dp(8), 0, dp(4));
+        statusText.setText("正在准备节点列表...");
+        root.addView(statusText, matchWidth());
 
-        Button loadServersButton = new Button(this);
-        loadServersButton.setText("获取节点");
-        loadServersButton.setOnClickListener(new View.OnClickListener() {
+        serverGrid = new LinearLayout(this);
+        serverGrid.setOrientation(LinearLayout.VERTICAL);
+        root.addView(serverGrid, matchWidth());
+
+        Button refreshButton = new Button(this);
+        refreshButton.setText("刷新节点");
+        refreshButton.setAllCaps(false);
+        refreshButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 loadServers();
             }
         });
-        root.addView(loadServersButton, matchWidth());
+        root.addView(refreshButton, matchWidth());
 
-        Button startButton = new Button(this);
-        startButton.setText("启动 VPN");
+        startButton = new Button(this);
+        startButton.setText("连接服务器");
+        startButton.setAllCaps(false);
+        startButton.setEnabled(false);
         startButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -82,6 +99,7 @@ public final class MainActivity extends Activity {
 
         Button stopButton = new Button(this);
         stopButton.setText("停止 VPN");
+        stopButton.setAllCaps(false);
         stopButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -90,22 +108,7 @@ public final class MainActivity extends Activity {
         });
         root.addView(stopButton, matchWidth());
 
-        statusText = new TextView(this);
-        statusText.setTextSize(14);
-        statusText.setPadding(0, dp(12), 0, 0);
-        statusText.setText("relay-only 第一版，不启用对等直连。");
-        root.addView(statusText, matchWidth());
-
         setContentView(scrollView);
-    }
-
-    private EditText addInput(LinearLayout root, String hint, int inputType) {
-        EditText editText = new EditText(this);
-        editText.setHint(hint);
-        editText.setSingleLine(true);
-        editText.setInputType(inputType);
-        root.addView(editText, matchWidth());
-        return editText;
     }
 
     private void loadPrefs() {
@@ -114,30 +117,39 @@ public final class MainActivity extends Activity {
         String defaultClientId = "android-" + Settings.Secure.getString(getContentResolver(),
                                                                         Settings.Secure.ANDROID_ID);
         if (embeddedConfig.hasConnectionConfig()) {
-            apiHostEdit.setText(embeddedConfig.apiHost);
-            apiPortEdit.setText(Integer.toString(embeddedConfig.apiPort));
-            serverKeyEdit.setText(embeddedConfig.serverKey);
-            clientIdEdit.setText(embeddedConfig.clientId.isEmpty() ? defaultClientId : embeddedConfig.clientId);
-            return;
+            apiHostValue = embeddedConfig.apiHost;
+            apiPortValue = embeddedConfig.apiPort;
+            defaultServerKey = embeddedConfig.serverKey;
+            clientIdValue = embeddedConfig.clientId.isEmpty() ? defaultClientId : embeddedConfig.clientId;
+        } else {
+            apiHostValue = prefs.getString("api_host", "");
+            apiPortValue = parsePort(prefs.getString("api_port", ""));
+            defaultServerKey = prefs.getString("server_key", "1");
+            clientIdValue = prefs.getString("client_id", defaultClientId);
         }
-
-        apiHostEdit.setText(prefs.getString("api_host", ""));
-        apiPortEdit.setText(prefs.getString("api_port", ""));
-        serverKeyEdit.setText(prefs.getString("server_key", "1"));
-        clientIdEdit.setText(prefs.getString("client_id", defaultClientId));
+        selectedServerKey = prefs.getString("selected_server_key", defaultServerKey);
     }
 
     private void savePrefs() {
         prefs().edit()
-                .putString("api_host", apiHost())
-                .putString("api_port", apiPortEdit.getText().toString().trim())
-                .putString("server_key", serverKey())
+                .putString("api_host", apiHostValue)
+                .putString("api_port", apiPortValue > 0 ? Integer.toString(apiPortValue) : "")
+                .putString("server_key", defaultServerKey)
+                .putString("selected_server_key", selectedServerKey)
                 .putString("client_id", clientId())
                 .apply();
     }
 
     private void loadServers() {
-        savePrefs();
+        if (apiHost().isEmpty() || apiPort() <= 0) {
+            serverGrid.removeAllViews();
+            startButton.setEnabled(false);
+            statusText.setText("当前 APK 未内置配置，请使用 GitHub 自动构建生成带配置客户端。");
+            return;
+        }
+
+        serverGrid.removeAllViews();
+        startButton.setEnabled(false);
         statusText.setText("正在获取节点...");
         new Thread(new Runnable() {
             @Override
@@ -155,7 +167,10 @@ public final class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
-                            statusText.setText("获取节点失败: " + e.getMessage());
+                            currentServers.clear();
+                            serverGrid.removeAllViews();
+                            startButton.setEnabled(false);
+                            statusText.setText("获取节点失败，请检查网络或配置服务器。");
                         }
                     });
                 }
@@ -164,33 +179,113 @@ public final class MainActivity extends Activity {
     }
 
     private void showServers(List<ServerInfo> servers) {
+        currentServers.clear();
+        serverGrid.removeAllViews();
         if (servers == null || servers.isEmpty()) {
-            statusText.setText("没有节点。");
+            startButton.setEnabled(false);
+            statusText.setText("没有可用节点。");
             return;
         }
-        StringBuilder text = new StringBuilder();
-        text.append("节点列表:\n");
-        for (ServerInfo server : servers) {
-            text.append(server.id)
-                    .append("  ")
-                    .append(server.name)
-                    .append("  ")
-                    .append(server.serverVirtualIp)
-                    .append("  ")
-                    .append(server.tunnelServerIp)
-                    .append(":")
-                    .append(server.tunnelPort)
-                    .append('\n');
+
+        currentServers.addAll(servers);
+        ServerInfo selected = findServerByKey(selectedServerKey);
+        if (selected == null) {
+            selected = findServerByKey(defaultServerKey);
         }
-        statusText.setText(text.toString());
+        if (selected == null) {
+            selected = currentServers.get(0);
+        }
+        selectedServerKey = selected.serverKey();
+        renderServerButtons();
+        startButton.setEnabled(true);
+        updateSelectedStatus(selected);
+        savePrefs();
+    }
+
+    private void renderServerButtons() {
+        serverGrid.removeAllViews();
+        for (int i = 0; i < currentServers.size(); i += SERVER_GRID_COLUMNS) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            serverGrid.addView(row, matchWidth());
+
+            for (int col = 0; col < SERVER_GRID_COLUMNS; ++col) {
+                final int index = i + col;
+                if (index >= currentServers.size()) {
+                    TextView spacer = new TextView(this);
+                    row.addView(spacer, weightedColumn());
+                    continue;
+                }
+
+                final ServerInfo server = currentServers.get(index);
+                Button button = new Button(this);
+                button.setText(serverLabel(server));
+                button.setTextSize(14);
+                button.setAllCaps(false);
+                button.setMinHeight(dp(52));
+                button.setGravity(Gravity.CENTER);
+                if (server.serverKey().equals(selectedServerKey)) {
+                    button.setTextColor(Color.WHITE);
+                    button.setBackgroundColor(Color.rgb(37, 99, 235));
+                } else {
+                    button.setTextColor(Color.rgb(35, 35, 35));
+                    button.setBackgroundColor(Color.rgb(230, 232, 235));
+                }
+                button.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        selectServer(server);
+                    }
+                });
+                row.addView(button, weightedColumn());
+            }
+        }
+    }
+
+    private void selectServer(ServerInfo server) {
+        selectedServerKey = server.serverKey();
+        renderServerButtons();
+        updateSelectedStatus(server);
+        savePrefs();
+    }
+
+    private void updateSelectedStatus(ServerInfo server) {
+        statusText.setText("已选择：" + serverLabel(server));
+    }
+
+    private ServerInfo findServerByKey(String key) {
+        if (key == null || key.trim().isEmpty()) {
+            return null;
+        }
+        for (ServerInfo server : currentServers) {
+            if (key.trim().equals(server.serverKey())) {
+                return server;
+            }
+        }
+        return null;
+    }
+
+    private static String serverLabel(ServerInfo server) {
+        if (server.name != null && !server.name.trim().isEmpty()) {
+            return server.name.trim();
+        }
+        return "服务器 " + server.serverKey();
     }
 
     private void requestStartVpn() {
-        savePrefs();
-        if (apiHost().isEmpty() || apiPort() <= 0 || clientId().isEmpty()) {
-            Toast.makeText(this, "请填写 API Host / API Port / Client ID", Toast.LENGTH_SHORT).show();
+        if (apiHost().isEmpty() || apiPort() <= 0) {
+            Toast.makeText(this, "当前 APK 未内置配置服务器", Toast.LENGTH_SHORT).show();
             return;
         }
+        if (selectedServerKey.isEmpty()) {
+            Toast.makeText(this, "请先选择服务器", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (clientId().isEmpty()) {
+            Toast.makeText(this, "客户端 ID 无效", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        savePrefs();
         Intent prepareIntent = VpnService.prepare(this);
         if (prepareIntent != null) {
             startActivityForResult(prepareIntent, VPN_REQUEST_CODE);
@@ -207,7 +302,8 @@ public final class MainActivity extends Activity {
         intent.putExtra(DnfVpnService.EXTRA_SERVER_KEY, serverKey());
         intent.putExtra(DnfVpnService.EXTRA_CLIENT_ID, clientId());
         startService(intent);
-        statusText.setText("VPN 已请求启动。");
+        ServerInfo selected = findServerByKey(selectedServerKey);
+        statusText.setText("VPN 已请求启动：" + (selected == null ? "当前服务器" : serverLabel(selected)));
     }
 
     private void stopVpn() {
@@ -218,23 +314,19 @@ public final class MainActivity extends Activity {
     }
 
     private String apiHost() {
-        return apiHostEdit.getText().toString().trim();
+        return apiHostValue == null ? "" : apiHostValue.trim();
     }
 
     private int apiPort() {
-        try {
-            return Integer.parseInt(apiPortEdit.getText().toString().trim());
-        } catch (NumberFormatException ignored) {
-            return 0;
-        }
+        return apiPortValue;
     }
 
     private String serverKey() {
-        return serverKeyEdit.getText().toString().trim();
+        return selectedServerKey == null ? "" : selectedServerKey.trim();
     }
 
     private String clientId() {
-        return clientIdEdit.getText().toString().trim().replaceAll("\\s+", "_");
+        return clientIdValue == null ? "" : clientIdValue.trim().replaceAll("\\s+", "_");
     }
 
     private SharedPreferences prefs() {
@@ -249,7 +341,24 @@ public final class MainActivity extends Activity {
         return params;
     }
 
+    private LinearLayout.LayoutParams weightedColumn() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1.0f);
+        params.setMargins(dp(4), 0, dp(4), 0);
+        return params;
+    }
+
     private int dp(int value) {
         return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private static int parsePort(String value) {
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (Exception ignored) {
+            return 0;
+        }
     }
 }
