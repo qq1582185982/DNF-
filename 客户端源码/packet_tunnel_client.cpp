@@ -40,7 +40,7 @@ namespace {
 #endif
 
 const DWORD kHeartbeatIntervalMs = 3000;
-const DWORD kHeartbeatTimeoutMs = 12000;
+const DWORD kHeartbeatTimeoutMs = 30000;
 const DWORD kPeerOfferTimeoutMs = 9000;
 const DWORD kPeerDirectReadyTimeoutMs = 15000;
 const DWORD kPeerCooldownTimeoutMs = 30000;
@@ -4145,6 +4145,7 @@ void PacketTunnelClient::SocketReadLoop() {
                 if (inner_is_udp) {
                     LearnPeerUdpPortOwner(peer_virtual_ip, inner_src_port);
                 }
+                last_receive_tick_ = GetTickCount64();
                 MarkNetworkActivity();
                 if (peer_link_manager_ != NULL) {
                     peer_link_manager_->TouchPeerDirectData(peer_virtual_ip, 0);
@@ -5076,7 +5077,10 @@ void PacketTunnelClient::TcpDirectReadLoop(const std::shared_ptr<TcpDirectConnec
             break;
         }
 
-        connection->last_rx_tick_ms = GetTickCount64();
+        const unsigned long long rx_tick = GetTickCount64();
+        connection->last_rx_tick_ms = rx_tick;
+        last_receive_tick_ = rx_tick;
+        MarkNetworkActivity();
         if (frame_type == packet_tunnel::kFrameHeartbeat && payload.empty()) {
             if (SendFrameOverSocket(connection->sock,
                                     &connection->send_lock,
@@ -5128,7 +5132,6 @@ void PacketTunnelClient::TcpDirectReadLoop(const std::shared_ptr<TcpDirectConnec
                               &inner_dst_port);
         }
 
-        MarkNetworkActivity();
         if (PacketTunnelDebugEnabled()) {
             TraceWatchedTcpPacket(payload.data(), payload.size(), "tcp-peer->wintun");
         }

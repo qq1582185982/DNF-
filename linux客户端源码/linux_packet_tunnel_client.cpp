@@ -26,7 +26,7 @@
 namespace {
 
 const int kHeartbeatIntervalMs = 3000;
-const int kHeartbeatTimeoutMs = 12000;
+const int kHeartbeatTimeoutMs = 30000;
 const int kPeerOfferTimeoutMs = 9000;
 const int kPeerDirectReadyTimeoutMs = 15000;
 const int kPeerCooldownTimeoutMs = 30000;
@@ -2566,6 +2566,7 @@ void LinuxPacketTunnelClient::SocketReadLoop() {
                 if (inner_is_udp) {
                     LearnPeerUdpPortOwner(peer_virtual_ip, inner_src_port);
                 }
+                last_receive_ms_ = now_ms();
                 MarkNetworkActivity();
                 if (peer_link_manager_ != NULL) {
                     peer_link_manager_->TouchPeerDirectData(peer_virtual_ip, 0);
@@ -3560,7 +3561,10 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
             break;
         }
 
-        connection->last_rx_ms = now_ms();
+        const unsigned long long rx_ms = now_ms();
+        connection->last_rx_ms = rx_ms;
+        last_receive_ms_ = rx_ms;
+        MarkNetworkActivity();
         if (frame_type == packet_tunnel::kFrameHeartbeat && payload.empty()) {
             if (SendFrameOverSocket(connection->sock,
                                     &connection->send_mutex,
@@ -3594,7 +3598,6 @@ void LinuxPacketTunnelClient::TcpDirectReadLoop(
         }
 
         std::string tun_error;
-        MarkNetworkActivity();
         if (!tun_manager_ ||
             !tun_manager_->WritePacket(payload.data(), payload.size(), &tun_error)) {
             if (!stop_requested_) {
