@@ -5622,6 +5622,10 @@ void PacketTunnelClient::HeartbeatLoop() {
             PacketTunnelDebugLog("心跳发送失败");
             break;
         }
+        if (tcp_connected_ && tcp_sock_ != INVALID_SOCKET &&
+            !SendFrameOverTcp(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
+            PacketTunnelDebugLog("TCP中转载体心跳发送失败");
+        }
 
         unsigned long long now_tick = GetTickCount64();
         MaintainTcpDirectConnections(now_tick);

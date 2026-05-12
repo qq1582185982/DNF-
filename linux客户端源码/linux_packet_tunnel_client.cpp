@@ -3310,6 +3310,9 @@ void LinuxPacketTunnelClient::TcpSocketReadLoop() {
             break;
         }
 
+        last_receive_ms_ = now_ms();
+        MarkNetworkActivity();
+
         if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
             continue;
         }
@@ -4495,6 +4498,10 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
 
         if (!SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
             break;
+        }
+        if (tcp_connected_ && tcp_sock_ >= 0 &&
+            !SendFrameOverTcp(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
+            LogDebug("TCP中转载体心跳发送失败");
         }
 
         const unsigned long long current_ms = now_ms();
