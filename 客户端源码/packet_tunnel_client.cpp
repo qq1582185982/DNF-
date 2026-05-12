@@ -2510,6 +2510,28 @@ PacketTunnelClient::~PacketTunnelClient() {
     DeleteCriticalSection(&tcp_send_lock_);
 }
 
+bool PacketTunnelClient::IsServerReceiveTimedOut(unsigned long long* idle_ms) const {
+    if (idle_ms != NULL) {
+        *idle_ms = 0;
+    }
+    if (server_receive_timeout_ms_ == 0) {
+        return false;
+    }
+    const unsigned long long last_tick = last_receive_tick_.load();
+    if (last_tick == 0) {
+        return false;
+    }
+    const unsigned long long now_tick = GetTickCount64();
+    if (now_tick <= last_tick) {
+        return false;
+    }
+    const unsigned long long elapsed = now_tick - last_tick;
+    if (idle_ms != NULL) {
+        *idle_ms = elapsed;
+    }
+    return elapsed > server_receive_timeout_ms_;
+}
+
 bool PacketTunnelClient::IsServerVirtualPeer(const std::string& peer_virtual_ip) const {
     return !server_virtual_ip_.empty() &&
            peer_virtual_ip == server_virtual_ip_;
@@ -4796,6 +4818,9 @@ void PacketTunnelClient::TcpSocketReadLoop() {
             break;
         }
 
+        last_receive_tick_ = GetTickCount64();
+        MarkNetworkActivity();
+
         if (frame_type == packet_tunnel::kFrameHeartbeatAck) {
             continue;
         }
@@ -5717,12 +5742,10 @@ void PacketTunnelClient::HeartbeatLoop() {
         }
 
         if (server_receive_timeout_ms_ > 0) {
-            unsigned long long last_tick = last_receive_tick_.load();
-            if (last_tick != 0 &&
-                now_tick > last_tick &&
-                (now_tick - last_tick) > server_receive_timeout_ms_) {
+            unsigned long long server_receive_idle_ms = 0;
+            if (IsServerReceiveTimedOut(&server_receive_idle_ms)) {
                 PacketTunnelWarnLog("Node tunnel receive timeout, reconnect: idle_ms=" +
-                                    std::to_string(now_tick - last_tick));
+                                    std::to_string(server_receive_idle_ms));
                 break;
             }
         } else {

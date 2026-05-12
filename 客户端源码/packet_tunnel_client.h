@@ -38,6 +38,7 @@ public:
     bool Start(std::wstring* error_msg);
     void Stop();
     bool IsConnected() const { return connected_; }
+    bool IsServerReceiveTimedOut(unsigned long long* idle_ms = NULL) const;
 
 private:
     struct UdpEndpoint {

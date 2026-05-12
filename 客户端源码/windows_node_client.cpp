@@ -1000,8 +1000,13 @@ int main(int argc, char** argv) {
 
         while (!g_stop_requested) {
             if (packet_client && packet_client->IsConnected() && !renew_failed) {
-                Sleep(200);
-                continue;
+                unsigned long long server_receive_idle_ms = 0;
+                if (!packet_client->IsServerReceiveTimedOut(&server_receive_idle_ms)) {
+                    Sleep(200);
+                    continue;
+                }
+                LogWarn("数据隧道接收超时，主动触发自动恢复: idle_ms=" +
+                        std::to_string(server_receive_idle_ms));
             }
 
             if (g_stop_requested) {
