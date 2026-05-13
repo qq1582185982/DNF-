@@ -16,6 +16,7 @@ public final class DnfVpnService extends VpnService {
     static final String EXTRA_API_PORT = "api_port";
     static final String EXTRA_SERVER_KEY = "server_key";
     static final String EXTRA_CLIENT_ID = "client_id";
+    static final String EXTRA_PEER_DIRECT_ENABLED = "peer_direct_enabled";
     static final String EXTRA_STATUS_MESSAGE = "status_message";
 
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -61,6 +62,7 @@ public final class DnfVpnService extends VpnService {
         int apiPort = intent.getIntExtra(EXTRA_API_PORT, 0);
         String requestedServerKey = intent.getStringExtra(EXTRA_SERVER_KEY);
         String clientId = intent.getStringExtra(EXTRA_CLIENT_ID);
+        boolean peerDirectEnabled = intent.getBooleanExtra(EXTRA_PEER_DIRECT_ENABLED, true);
         String preferredIp = "";
 
         while (running.get()) {
@@ -82,6 +84,7 @@ public final class DnfVpnService extends VpnService {
                                                               preferredIp);
                 preferredIp = lease.virtualIp;
                 sendStatus("已获取虚拟 IP：" + lease.virtualIp);
+                sendStatus("数据模式：" + (peerDirectEnabled ? "智能直连，失败自动中转" : "仅中转"));
                 sendStatus("正在建立 Android VPN 接口。");
                 ParcelFileDescriptor vpnInterface = buildVpnInterface(server, lease);
                 sendStatus("VPN 接口已建立，正在连接数据隧道。");
@@ -90,7 +93,14 @@ public final class DnfVpnService extends VpnService {
                                                             server,
                                                             lease,
                                                             sessionUuid,
-                                                            clientId);
+                                                            clientId,
+                                                            peerDirectEnabled,
+                                                            new PacketTunnelClient.StatusListener() {
+                                                                @Override
+                                                                public void onStatus(String message) {
+                                                                    sendStatus(message);
+                                                                }
+                                                            });
                 Thread renewThread = startRenewThread(controlClient,
                                                       activeServerKey,
                                                       sessionUuid,

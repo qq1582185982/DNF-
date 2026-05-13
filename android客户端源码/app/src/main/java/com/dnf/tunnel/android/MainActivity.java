@@ -36,6 +36,7 @@ public final class MainActivity extends Activity {
     private LinearLayout serverGrid;
     private TextView statusText;
     private TextView logText;
+    private Button modeButton;
     private Button startButton;
 
     private String apiHostValue = "";
@@ -43,6 +44,7 @@ public final class MainActivity extends Activity {
     private String defaultServerKey = "1";
     private String selectedServerKey = "";
     private String clientIdValue = "";
+    private boolean peerDirectEnabled = true;
     private final List<ServerInfo> currentServers = new ArrayList<>();
     private final SimpleDateFormat logTimeFormat = new SimpleDateFormat("HH:mm:ss", Locale.US);
     private final BroadcastReceiver statusReceiver = new BroadcastReceiver() {
@@ -119,6 +121,18 @@ public final class MainActivity extends Activity {
         serverGrid = new LinearLayout(this);
         serverGrid.setOrientation(LinearLayout.VERTICAL);
         root.addView(serverGrid, matchWidth());
+
+        modeButton = new Button(this);
+        modeButton.setAllCaps(false);
+        modeButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                peerDirectEnabled = !peerDirectEnabled;
+                updateModeButton();
+                savePrefs();
+            }
+        });
+        root.addView(modeButton, matchWidth());
 
         Button refreshButton = new Button(this);
         refreshButton.setText("刷新节点");
@@ -227,6 +241,8 @@ public final class MainActivity extends Activity {
             clientIdValue = prefs.getString("client_id", defaultClientId);
         }
         selectedServerKey = prefs.getString("selected_server_key", defaultServerKey);
+        peerDirectEnabled = prefs.getBoolean("peer_direct_enabled", true);
+        updateModeButton();
     }
 
     private void savePrefs() {
@@ -236,6 +252,7 @@ public final class MainActivity extends Activity {
                 .putString("server_key", defaultServerKey)
                 .putString("selected_server_key", selectedServerKey)
                 .putString("client_id", clientId())
+                .putBoolean("peer_direct_enabled", peerDirectEnabled)
                 .apply();
     }
 
@@ -349,7 +366,7 @@ public final class MainActivity extends Activity {
     }
 
     private void updateSelectedStatus(ServerInfo server) {
-        statusText.setText("已选择：" + serverLabel(server));
+        statusText.setText("已选择：" + serverLabel(server) + "  " + modeLabel());
     }
 
     private ServerInfo findServerByKey(String key) {
@@ -369,6 +386,26 @@ public final class MainActivity extends Activity {
             return server.name.trim();
         }
         return "服务器 " + server.serverKey();
+    }
+
+    private void updateModeButton() {
+        if (modeButton == null) {
+            return;
+        }
+        modeButton.setText("数据模式：" + modeLabel());
+        modeButton.setTextColor(peerDirectEnabled ? Color.WHITE : Color.rgb(35, 35, 35));
+        modeButton.setBackgroundColor(peerDirectEnabled ? Color.rgb(22, 163, 74)
+                                                       : Color.rgb(230, 232, 235));
+        if (!currentServers.isEmpty()) {
+            ServerInfo selected = findServerByKey(selectedServerKey);
+            if (selected != null) {
+                updateSelectedStatus(selected);
+            }
+        }
+    }
+
+    private String modeLabel() {
+        return peerDirectEnabled ? "智能直连" : "仅中转";
     }
 
     private void showLogPage() {
@@ -421,6 +458,7 @@ public final class MainActivity extends Activity {
         ServerInfo selected = findServerByKey(selectedServerKey);
         showLogPage();
         resetLog("准备连接：" + (selected == null ? "当前服务器" : serverLabel(selected)));
+        appendLog("数据模式：" + (peerDirectEnabled ? "智能直连，失败自动中转" : "仅中转"));
         Intent prepareIntent = VpnService.prepare(this);
         if (prepareIntent != null) {
             appendLog("正在请求系统 VPN 授权...");
@@ -438,6 +476,7 @@ public final class MainActivity extends Activity {
         intent.putExtra(DnfVpnService.EXTRA_API_PORT, apiPort());
         intent.putExtra(DnfVpnService.EXTRA_SERVER_KEY, serverKey());
         intent.putExtra(DnfVpnService.EXTRA_CLIENT_ID, clientId());
+        intent.putExtra(DnfVpnService.EXTRA_PEER_DIRECT_ENABLED, peerDirectEnabled);
         startService(intent);
         ServerInfo selected = findServerByKey(selectedServerKey);
         appendLog("VPN 服务启动请求已发送：" + (selected == null ? "当前服务器" : serverLabel(selected)));
