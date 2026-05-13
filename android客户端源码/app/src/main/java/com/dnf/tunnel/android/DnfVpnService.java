@@ -84,7 +84,7 @@ public final class DnfVpnService extends VpnService {
                                                               preferredIp);
                 preferredIp = lease.virtualIp;
                 sendStatus("已获取虚拟 IP：" + lease.virtualIp);
-                sendStatus("数据模式：" + (peerDirectEnabled ? "智能直连，失败自动中转" : "仅中转"));
+                sendStatus("数据模式：" + (peerDirectEnabled ? "UDP/TCP 智能直连，失败自动中转" : "仅中转"));
                 sendStatus("正在建立 Android VPN 接口。");
                 ParcelFileDescriptor vpnInterface = buildVpnInterface(server, lease);
                 sendStatus("VPN 接口已建立，正在连接数据隧道。");

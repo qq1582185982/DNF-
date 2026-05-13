@@ -15,6 +15,11 @@ final class PacketTunnelProtocol {
     static final int FRAME_PEER_ACK = 0x25;
     static final int FRAME_PEER_KEEPALIVE = 0x26;
     static final int FRAME_PEER_DISABLE = 0x27;
+    static final int FRAME_TCP_PEER_OFFER = 0x28;
+    static final int FRAME_TCP_DIRECT_ADVERTISE = 0x29;
+    static final int FRAME_TCP_DIRECT_OPEN = 0x2A;
+    static final int FRAME_TCP_DIRECT_CANDIDATE_ADVERTISE = 0x2B;
+    static final int FRAME_UDP_DIRECT_CANDIDATE_ADVERTISE = 0x2C;
     static final int HANDSHAKE_ACK_SIZE = 8;
     static final int FRAME_HEADER_SIZE = 3;
     static final int PEER_ENDPOINT_FAMILY_IPV4 = 4;
@@ -23,6 +28,9 @@ final class PacketTunnelProtocol {
     static final int PEER_OFFER_PAYLOAD_SIZE = 32;
     static final int PEER_SIGNAL_PAYLOAD_SIZE = 16;
     static final int PEER_DISABLE_PAYLOAD_SIZE = 16;
+    static final int TCP_DIRECT_ADVERTISE_PAYLOAD_SIZE = 4;
+    static final int TCP_DIRECT_OPEN_PAYLOAD_SIZE = 8;
+    static final int DIRECT_CANDIDATE_ADVERTISE_PAYLOAD_SIZE = 20;
 
     private PacketTunnelProtocol() {
     }

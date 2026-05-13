@@ -458,7 +458,7 @@ public final class MainActivity extends Activity {
         ServerInfo selected = findServerByKey(selectedServerKey);
         showLogPage();
         resetLog("准备连接：" + (selected == null ? "当前服务器" : serverLabel(selected)));
-        appendLog("数据模式：" + (peerDirectEnabled ? "智能直连，失败自动中转" : "仅中转"));
+        appendLog("数据模式：" + (peerDirectEnabled ? "UDP/TCP 智能直连，失败自动中转" : "仅中转"));
         Intent prepareIntent = VpnService.prepare(this);
         if (prepareIntent != null) {
             appendLog("正在请求系统 VPN 授权...");
