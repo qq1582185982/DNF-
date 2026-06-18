@@ -42,6 +42,9 @@ const int kSocketReadTimeoutMs = 1000;
 const int kSocketSendTimeoutMs = 50;
 const int kSocketSendRetryCount = 2;
 const int kSocketSendRetryDelayMs = 5;
+const int kTcpKeepaliveIdleSec = 30;
+const int kTcpKeepaliveIntervalSec = 10;
+const int kTcpKeepaliveProbeCount = 3;
 const int kTcpDirectConnectTimeoutMs = 1200;
 const int kTcpDirectRetryCooldownMs = 5000;
 const int kTcpDirectAutoWarmRetryMs = 12000;
@@ -862,6 +865,18 @@ void ConfigureLinuxTcpStreamSocket(int sock) {
 
     int keepalive = 1;
     setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+#ifdef TCP_KEEPIDLE
+    int keepidle = kTcpKeepaliveIdleSec;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+#endif
+#ifdef TCP_KEEPINTVL
+    int keepintvl = kTcpKeepaliveIntervalSec;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+#endif
+#ifdef TCP_KEEPCNT
+    int keepcnt = kTcpKeepaliveProbeCount;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+#endif
     int nodelay = 1;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 }
@@ -1848,6 +1863,18 @@ bool LinuxPacketTunnelClient::ConnectTcpSocket(std::string* error) {
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
     int keepalive = 1;
     setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+#ifdef TCP_KEEPIDLE
+    int keepidle = kTcpKeepaliveIdleSec;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+#endif
+#ifdef TCP_KEEPINTVL
+    int keepintvl = kTcpKeepaliveIntervalSec;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+#endif
+#ifdef TCP_KEEPCNT
+    int keepcnt = kTcpKeepaliveProbeCount;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+#endif
     int tcp_nodelay = 1;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &tcp_nodelay, sizeof(tcp_nodelay));
 
@@ -3338,6 +3365,11 @@ void LinuxPacketTunnelClient::TcpSocketReadLoop() {
 
     const int stale_sock = tcp_sock_;
     tcp_connected_ = false;
+    if (!stop_requested_) {
+        LogWarn("TCP中转载体断开，触发节点重连");
+        connected_ = false;
+        stop_requested_ = true;
+    }
     if (stale_sock >= 0) {
         close(stale_sock);
         if (tcp_sock_ == stale_sock) {
@@ -4499,9 +4531,15 @@ void LinuxPacketTunnelClient::HeartbeatLoop() {
         if (!SendFrame(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
             break;
         }
-        if (tcp_connected_ && tcp_sock_ >= 0 &&
-            !SendFrameOverTcp(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
-            LogDebug("TCP中转载体心跳发送失败");
+        if (tcp_connected_ && tcp_sock_ >= 0) {
+            std::string tcp_heartbeat_error;
+            if (!SendFrameOverTcp(packet_tunnel::kFrameHeartbeat,
+                                  NULL,
+                                  0,
+                                  &tcp_heartbeat_error)) {
+                LogWarn("TCP中转载体心跳发送失败: " + tcp_heartbeat_error);
+                break;
+            }
         }
 
         const unsigned long long current_ms = now_ms();

@@ -57,6 +57,8 @@ const DWORD kSocketReadTimeoutMs = 1000;
 const DWORD kSocketSendTimeoutMs = 50;
 const int kSocketSendRetryCount = 2;
 const DWORD kSocketSendRetryDelayMs = 5;
+const DWORD kTcpKeepaliveTimeMs = 30000;
+const DWORD kTcpKeepaliveIntervalMs = 10000;
 const DWORD kTcpDirectConnectTimeoutMs = 1200;
 const DWORD kTcpDirectRetryCooldownMs = 5000;
 const DWORD kTcpDirectAutoWarmRetryMs = 12000;
@@ -614,12 +616,20 @@ void ConfigureTcpStreamSocket(SOCKET sock) {
                SO_RCVTIMEO,
                reinterpret_cast<const char*>(&recv_timeout),
                sizeof(recv_timeout));
-    BOOL keepalive = TRUE;
-    setsockopt(sock,
-               SOL_SOCKET,
-               SO_KEEPALIVE,
-               reinterpret_cast<const char*>(&keepalive),
-               sizeof(keepalive));
+    tcp_keepalive keepalive = {};
+    keepalive.onoff = 1;
+    keepalive.keepalivetime = kTcpKeepaliveTimeMs;
+    keepalive.keepaliveinterval = kTcpKeepaliveIntervalMs;
+    DWORD bytes_returned = 0;
+    WSAIoctl(sock,
+             SIO_KEEPALIVE_VALS,
+             &keepalive,
+             sizeof(keepalive),
+             NULL,
+             0,
+             &bytes_returned,
+             NULL,
+             NULL);
     BOOL tcp_nodelay = TRUE;
     setsockopt(sock,
                IPPROTO_TCP,
@@ -2936,8 +2946,20 @@ bool PacketTunnelClient::ConnectTcpSocket(std::wstring* error_msg) {
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&send_timeout), sizeof(send_timeout));
     DWORD recv_timeout = kSocketReadTimeoutMs;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recv_timeout), sizeof(recv_timeout));
-    BOOL keepalive = TRUE;
-    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&keepalive), sizeof(keepalive));
+    tcp_keepalive keepalive = {};
+    keepalive.onoff = 1;
+    keepalive.keepalivetime = kTcpKeepaliveTimeMs;
+    keepalive.keepaliveinterval = kTcpKeepaliveIntervalMs;
+    DWORD bytes_returned = 0;
+    WSAIoctl(sock,
+             SIO_KEEPALIVE_VALS,
+             &keepalive,
+             sizeof(keepalive),
+             NULL,
+             0,
+             &bytes_returned,
+             NULL,
+             NULL);
     BOOL tcp_nodelay = TRUE;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&tcp_nodelay), sizeof(tcp_nodelay));
 
@@ -4875,6 +4897,11 @@ void PacketTunnelClient::TcpSocketReadLoop() {
 
     SOCKET stale_sock = tcp_sock_;
     tcp_connected_ = false;
+    if (!stop_requested_ && server_receive_timeout_ms_ > 0) {
+        PacketTunnelWarnLog("TCP中转载体断开，触发节点重连");
+        connected_ = false;
+        stop_requested_ = true;
+    }
     if (stale_sock != INVALID_SOCKET) {
         closesocket(stale_sock);
         if (tcp_sock_ == stale_sock) {
@@ -5622,9 +5649,18 @@ void PacketTunnelClient::HeartbeatLoop() {
             PacketTunnelDebugLog("心跳发送失败");
             break;
         }
-        if (tcp_connected_ && tcp_sock_ != INVALID_SOCKET &&
-            !SendFrameOverTcp(packet_tunnel::kFrameHeartbeat, NULL, 0, NULL)) {
-            PacketTunnelDebugLog("TCP中转载体心跳发送失败");
+        if (tcp_connected_ && tcp_sock_ != INVALID_SOCKET) {
+            std::wstring tcp_heartbeat_error;
+            if (!SendFrameOverTcp(packet_tunnel::kFrameHeartbeat,
+                                  NULL,
+                                  0,
+                                  &tcp_heartbeat_error)) {
+                PacketTunnelWarnLog("TCP中转载体心跳发送失败: " +
+                                    WideToUtf8(tcp_heartbeat_error));
+                if (server_receive_timeout_ms_ > 0) {
+                    break;
+                }
+            }
         }
 
         unsigned long long now_tick = GetTickCount64();
